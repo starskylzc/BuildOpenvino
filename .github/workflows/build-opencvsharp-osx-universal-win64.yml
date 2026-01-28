@@ -1,4 +1,4 @@
-name: build-opencvsharp-osx-universal
+name: build-opencvsharp-osx-universal-win64
 
 on:
   workflow_dispatch:
