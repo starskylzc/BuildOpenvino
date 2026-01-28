@@ -1,7 +1,6 @@
-name: build-openvino-2023.1.0 + ort-1.16.0-openvinoep + Intel.ML.OnnxRuntime.Openvino (NO onnxruntime native)
+name: "build-openvino-2023.1.0-ort-1.16.0-openvinoep-nuget-no-ort-native"
 
-on:
-  workflow_dispatch:
+'on': { workflow_dispatch: {} }
 
 env:
   OPENVINO_TAG: "2023.1.0"
@@ -21,28 +20,27 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - name: Setup Python (ORT build scripts)
+      - name: "Setup Python"
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install Ninja (optional)
-        run: choco install ninja -y
-
-      - name: Install OpenCL ICD Loader (vcpkg) + pefile
+      - name: "Install tools (ninja, vcpkg opencl, python deps)"
         run: |
           $ErrorActionPreference="Stop"
+          choco install ninja -y
           git clone --depth 1 https://github.com/microsoft/vcpkg.git vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg.exe install opencl:x64-windows
           python -m pip install --upgrade pip
           python -m pip install pefile numpy
 
-      - name: Clone OpenVINO (tag 2023.1.0)
+      - name: "Clone OpenVINO (tag 2023.1.0)"
         run: |
+          $ErrorActionPreference="Stop"
           git clone --branch $env:OPENVINO_TAG --depth 1 --recurse-submodules https://github.com/openvinotoolkit/openvino.git openvino
 
-      - name: Build & Install OpenVINO (win-x64, Intel GPU plugin ON, no Python)
+      - name: "Build & Install OpenVINO (win-x64, Intel GPU plugin ON, no Python)"
         run: |
           $ErrorActionPreference="Stop"
 
@@ -72,11 +70,12 @@ jobs:
 
           "$PWD\ov_install" | Out-File -FilePath "$env:GITHUB_WORKSPACE\ov_install_win.txt" -Encoding ascii
 
-      - name: Clone ONNX Runtime (tag v1.16.0)
+      - name: "Clone ONNX Runtime (tag v1.16.0)"
         run: |
+          $ErrorActionPreference="Stop"
           git clone --branch $env:ORT_TAG --depth 1 --recurse-submodules https://github.com/microsoft/onnxruntime.git onnxruntime
 
-      - name: Build ORT OpenVINO EP provider (win-x64, target GPU)
+      - name: "Build ORT OpenVINO EP provider (win-x64, target GPU)"
         run: |
           $ErrorActionPreference="Stop"
 
@@ -91,7 +90,7 @@ jobs:
           .\build.bat --config $env:CONFIG --build_shared_lib --parallel --skip_tests --use_openvino GPU --update --build `
             --cmake_generator "Visual Studio 17 2022"
 
-      - name: Stage minimal win-x64 native payload (exclude onnxruntime.dll)
+      - name: "Stage minimal win-x64 native payload (no onnxruntime*.dll, dependency-closure BFS)"
         run: |
           $ErrorActionPreference="Stop"
 
@@ -102,12 +101,12 @@ jobs:
           $ov = Get-Content "$env:GITHUB_WORKSPACE\ov_install_win.txt" | Select-Object -First 1
           $vcpkgBin = Join-Path "$env:GITHUB_WORKSPACE\vcpkg" "installed\x64-windows\bin"
 
-          # --- seed: ORT provider ONLY ---
-          $prov = Get-ChildItem -Path "$env:GITHUB_WORKSPACE\onnxruntime\build" -Recurse -Filter "onnxruntime_providers_openvino.dll" | Select-Object -First 1
+          # Provider ONLY (robust search)
+          $prov = Get-ChildItem -Path "$env:GITHUB_WORKSPACE\onnxruntime" -Recurse -Filter "onnxruntime_providers_openvino.dll" | Select-Object -First 1
           if (!$prov) { throw "onnxruntime_providers_openvino.dll not found" }
           Copy-Item $prov.FullName $native -Force
 
-          # --- seed: essential OpenVINO dlls/plugins ---
+          # Seed OpenVINO core + plugins
           $seedNames = @(
             "openvino.dll",
             "openvino_c.dll",
@@ -123,11 +122,11 @@ jobs:
             if ($f) { Copy-Item $f.FullName $native -Force }
           }
 
-          # OpenCL ICD loader runtime (optional but helpful)
+          # Optional OpenCL ICD loader runtime
           $openclDll = Join-Path $vcpkgBin "OpenCL.dll"
           if (Test-Path $openclDll) { Copy-Item $openclDll $native -Force }
 
-          # plugins.xml (relative locations)
+          # plugins.xml
           $candidates = @(
             @{ Name="CPU";   File="openvino_intel_cpu_plugin.dll" },
             @{ Name="GPU";   File="openvino_intel_gpu_plugin.dll" },
@@ -147,91 +146,91 @@ jobs:
           $lines.Add("</ie>")
           $lines -join "`r`n" | Out-File -FilePath (Join-Path $native "plugins.xml") -Encoding utf8
 
-          # ---- Dependency closure BFS (pefile) ----
-          # Exclude any onnxruntime*.dll even if found somewhere.
-          $py = @"
-import os
-import pefile
-from collections import deque
-
-native = r"${native}"
-scan_dirs = [r"${native}", r"${vcpkgBin}", r"${ov}"]
-
-def is_system(name):
-    u = name.upper()
-    sys_prefix = (
-        "KERNEL32","USER32","GDI32","ADVAPI32","SHELL32","OLE32","OLEAUT32","WS2_32","IPHLPAPI",
-        "CRYPT32","COMDLG32","SHLWAPI","NTDLL","VERSION",
-        "MSVCRT","VCRUNTIME","UCRTBASE","api-ms-win-","ext-ms-win-"
-    )
-    return u.startswith(sys_prefix)
-
-def is_forbidden(name):
-    u = name.lower()
-    return u.startswith("onnxruntime")  # do not ship onnxruntime.dll or other ORT binaries
-
-def find_dll(name):
-    # already in native?
-    p = os.path.join(native, name)
-    if os.path.isfile(p): return p
-    for d in scan_dirs:
-        for root, _, files in os.walk(d):
-            for f in files:
-                if f.lower() == name.lower():
-                    return os.path.join(root, f)
-    return None
-
-def imports(dll_path):
-    pe = pefile.PE(dll_path)
-    deps = []
-    if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
-        for entry in pe.DIRECTORY_ENTRY_IMPORT:
-            deps.append(entry.dll.decode(errors="ignore"))
-    return deps
-
-queue = deque()
-seen = set()
-
-for f in os.listdir(native):
-    if f.lower().endswith(".dll"):
-        queue.append(f)
-        seen.add(f.lower())
-
-while queue:
-    cur = queue.popleft()
-    cur_path = os.path.join(native, cur)
-    try:
-        deps = imports(cur_path)
-    except Exception:
-        continue
-
-    for dep in deps:
-        if not dep or is_system(dep) or is_forbidden(dep):
-            continue
-        key = dep.lower()
-        if key in seen:
-            continue
-        src = find_dll(dep)
-        if src:
-            base = os.path.basename(src)
-            if is_forbidden(base):
-                continue
-            dst = os.path.join(native, base)
-            if not os.path.isfile(dst):
-                with open(src, "rb") as r, open(dst, "wb") as w:
-                    w.write(r.read())
-            seen.add(base.lower())
-            queue.append(base)
-        else:
-            raise RuntimeError(f"Missing dependency: {dep} (referenced by {cur})")
-
-print("Dependency closure complete. DLL count =", len([x for x in os.listdir(native) if x.lower().endswith('.dll')]))
-"@
-          $py | python -
+          # Write Python script to file (YAML-safe) then run dependency closure BFS
+          $pyFile = Join-Path $env:GITHUB_WORKSPACE "dep_closure_win.py"
+          $pyLines = @(
+            "import os",
+            "import pefile",
+            "from collections import deque",
+            "",
+            "native = r'''$native'''",
+            "scan_dirs = [r'''$native''', r'''$vcpkgBin''', r'''$ov''']",
+            "",
+            "def is_system(name):",
+            "    u = name.upper()",
+            "    sys_prefix = (",
+            "        'KERNEL32','USER32','GDI32','ADVAPI32','SHELL32','OLE32','OLEAUT32','WS2_32','IPHLPAPI',",
+            "        'CRYPT32','COMDLG32','SHLWAPI','NTDLL','VERSION',",
+            "        'MSVCRT','VCRUNTIME','UCRTBASE','api-ms-win-','ext-ms-win-'",
+            "    )",
+            "    return u.startswith(sys_prefix)",
+            "",
+            "def is_forbidden(name):",
+            "    return name.lower().startswith('onnxruntime')",
+            "",
+            "def find_dll(name):",
+            "    p = os.path.join(native, name)",
+            "    if os.path.isfile(p):",
+            "        return p",
+            "    for d in scan_dirs:",
+            "        for root, _, files in os.walk(d):",
+            "            for f in files:",
+            "                if f.lower() == name.lower():",
+            "                    return os.path.join(root, f)",
+            "    return None",
+            "",
+            "def imports(dll_path):",
+            "    pe = pefile.PE(dll_path)",
+            "    deps = []",
+            "    if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):",
+            "        for entry in pe.DIRECTORY_ENTRY_IMPORT:",
+            "            deps.append(entry.dll.decode(errors='ignore'))",
+            "    return deps",
+            "",
+            "queue = deque()",
+            "seen = set()",
+            "",
+            "for f in os.listdir(native):",
+            "    if f.lower().endswith('.dll'):",
+            "        queue.append(f)",
+            "        seen.add(f.lower())",
+            "",
+            "while queue:",
+            "    cur = queue.popleft()",
+            "    cur_path = os.path.join(native, cur)",
+            "    try:",
+            "        deps = imports(cur_path)",
+            "    except Exception:",
+            "        continue",
+            "    for dep in deps:",
+            "        if (not dep) or is_system(dep) or is_forbidden(dep):",
+            "            continue",
+            "        key = dep.lower()",
+            "        if key in seen:",
+            "            continue",
+            "        src = find_dll(dep)",
+            "        if not src:",
+            "            raise RuntimeError(f'Missing dependency: {dep} (referenced by {cur})')",
+            "        base = os.path.basename(src)",
+            "        if is_forbidden(base):",
+            "            continue",
+            "        dst = os.path.join(native, base)",
+            "        if not os.path.isfile(dst):",
+            "            with open(src, 'rb') as r, open(dst, 'wb') as w:",
+            "                w.write(r.read())",
+            "        seen.add(base.lower())",
+            "        queue.append(base)",
+            "",
+            "dll_count = len([x for x in os.listdir(native) if x.lower().endswith('.dll')])",
+            "print('Dependency closure complete. DLL count =', dll_count)"
+          )
+          Set-Content -Path $pyFile -Value $pyLines -Encoding UTF8
+          python $pyFile
 
           Compress-Archive -Path "$pkgRoot\*" -DestinationPath "$env:GITHUB_WORKSPACE\win-x64-pkg.zip" -Force
 
-      - uses: actions/upload-artifact@v4
+      - name: "Upload win-x64 payload"
+        uses: actions/upload-artifact@v4
         with:
           name: win-x64-pkg
           path: win-x64-pkg.zip
@@ -242,28 +241,29 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
       run:
         shell: bash
     steps:
-      - name: Setup Python (ORT build scripts)
+      - name: "Setup Python"
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install build tools
+      - name: "Install build tools"
         run: |
+          set -euxo pipefail
           brew update
           brew install ninja cmake
 
-      - name: Clone OpenVINO (tag 2023.1.0)
+      - name: "Clone OpenVINO (tag 2023.1.0)"
         run: |
+          set -euxo pipefail
           git clone --branch "${OPENVINO_TAG}" --depth 1 --recurse-submodules https://github.com/openvinotoolkit/openvino.git openvino
 
-      - name: Build & Install OpenVINO (osx-x64, 10.15 target, CPU only, no Python)
+      - name: "Build & Install OpenVINO (osx-x64, 10.15, CPU only, no Python)"
         env:
           MACOSX_DEPLOYMENT_TARGET: "10.15"
         run: |
           set -euxo pipefail
           cd openvino
           unset TBBROOT OpenCV_DIR || true
-
           mkdir -p build && cd build
           cmake .. -G "Ninja Multi-Config" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
@@ -272,19 +272,18 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
             -DENABLE_PYTHON=OFF -DENABLE_WHEEL=OFF \
             -DENABLE_TESTS=OFF -DENABLE_SAMPLES=OFF \
             -DENABLE_INTEL_GPU=OFF
-
           cmake --build . --config Release --parallel "$(sysctl -n hw.ncpu)"
           cmake --install . --config Release
-
           echo "$PWD/ov_install" > "$GITHUB_WORKSPACE/ov_install_osx.txt"
 
-      - name: Clone ONNX Runtime (tag v1.16.0)
+      - name: "Clone ONNX Runtime (tag v1.16.0)"
         run: |
+          set -euxo pipefail
           git clone --branch "${ORT_TAG}" --depth 1 --recurse-submodules https://github.com/microsoft/onnxruntime.git onnxruntime
           python -m pip install --upgrade pip
           python -m pip install numpy
 
-      - name: Build ORT OpenVINO EP provider (osx-x64, CPU)
+      - name: "Build ORT OpenVINO EP provider (osx-x64, CPU)"
         env:
           MACOSX_DEPLOYMENT_TARGET: "10.15"
         run: |
@@ -293,14 +292,17 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
           ov_config_dir="$(dirname "$(find "$ov" -name OpenVINOConfig.cmake | head -n 1)")"
           export INTEL_OPENVINO_DIR="$ov"
           export OpenVINO_DIR="$ov_config_dir"
-
           cd onnxruntime
           ./build.sh --config Release --build_shared_lib --parallel --skip_tests --use_openvino CPU --update --build
 
-      - name: Stage minimal osx-x64 native payload (exclude libonnxruntime*.dylib)
+      - name: "Stage minimal osx-x64 native payload (no libonnxruntime*, dependency closure + @loader_path)"
         env:
           MACOSX_DEPLOYMENT_TARGET: "10.15"
         run: |
+          set -euxo pipefail
+
+          stage_sh="$GITHUB_WORKSPACE/stage_osx.sh"
+          cat > "$stage_sh" << 'EOS'
           set -euxo pipefail
 
           pkg_root="$GITHUB_WORKSPACE/pkg"
@@ -309,12 +311,10 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
 
           ov="$(cat "$GITHUB_WORKSPACE/ov_install_osx.txt")"
 
-          # Seed: provider ONLY
-          prov="$(find "$GITHUB_WORKSPACE/onnxruntime/build" -name 'libonnxruntime_providers_openvino.dylib' | head -n 1)"
+          prov="$(find "$GITHUB_WORKSPACE/onnxruntime" -name 'libonnxruntime_providers_openvino.dylib' | head -n 1)"
           test -f "$prov"
           cp -f "$prov" "$native/"
 
-          # Seed: OpenVINO core + plugins
           for n in \
             libopenvino.dylib \
             libopenvino_c.dylib \
@@ -330,7 +330,6 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
             fi
           done
 
-          # plugins.xml (relative)
           {
             echo "<ie>"
             echo "  <plugins>"
@@ -343,7 +342,6 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
             echo "</ie>"
           } > "$native/plugins.xml"
 
-          # Dependency closure BFS (otool -L), excluding any libonnxruntime*.dylib
           changed=1
           while [ $changed -eq 1 ]; do
             changed=0
@@ -351,17 +349,10 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
               [ -f "$lib" ] || continue
               while read -r dep _; do
                 [ -z "$dep" ] && continue
-                case "$dep" in
-                  /System/*|/usr/lib/*) continue ;;
-                esac
+                case "$dep" in /System/*|/usr/lib/*) continue ;; esac
                 base="$(basename "$dep")"
-                # exclude ORT native libraries (you already ship them via Microsoft.ML.OnnxRuntime)
-                if [[ "$base" == libonnxruntime* ]]; then
-                  continue
-                fi
-                if [ -f "$native/$base" ]; then
-                  continue
-                fi
+                [[ "$base" == libonnxruntime* ]] && continue
+                [ -f "$native/$base" ] && continue
                 src="$(find "$ov" -name "$base" | head -n 1 || true)"
                 if [ -n "$src" ] && [ -f "$src" ]; then
                   cp -f "$src" "$native/$base"
@@ -374,7 +365,6 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
             done
           done
 
-          # Patch to @loader_path
           for lib in "$native"/*.dylib; do
             install_name_tool -id "@rpath/$(basename "$lib")" "$lib" || true
             install_name_tool -add_rpath "@loader_path" "$lib" || true
@@ -390,13 +380,15 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
             done < <(otool -L "$lib" | tail -n +2)
           done
 
-          for lib in "$native"/*.dylib; do
-            strip -x "$lib" || true
-          done
-
+          strip -x "$native"/*.dylib || true
           ditto -c -k --sequesterRsrc --keepParent "$pkg_root" "$GITHUB_WORKSPACE/osx-x64-pkg.zip"
+          EOS
 
-      - uses: actions/upload-artifact@v4
+          chmod +x "$stage_sh"
+          bash "$stage_sh"
+
+      - name: "Upload osx-x64 payload"
+        uses: actions/upload-artifact@v4
         with:
           name: osx-x64-pkg
           path: osx-x64-pkg.zip
@@ -405,12 +397,12 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
     runs-on: ubuntu-latest
     needs: [build-win-x64, build-osx-x64]
     steps:
-      - name: Download artifacts
+      - name: "Download artifacts"
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Merge payloads
+      - name: "Merge payloads"
         run: |
           set -euxo pipefail
           mkdir -p nuget_root
@@ -419,11 +411,10 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
           test -d "nuget_root/pkg/runtimes/win-x64/native"
           test -d "nuget_root/pkg/runtimes/osx-x64/native"
 
-      - name: Create packing project (depends on official Microsoft.ML.OnnxRuntime.Managed only)
+      - name: "Create packing project"
         run: |
           set -euxo pipefail
           cd nuget_root/pkg
-
           cat > "${PACKAGE_ID}.csproj" << EOF
           <Project Sdk="Microsoft.NET.Sdk">
             <PropertyGroup>
@@ -431,28 +422,26 @@ print("Dependency closure complete. DLL count =", len([x for x in os.listdir(nat
               <PackageId>${PACKAGE_ID}</PackageId>
               <Version>${PACKAGE_VERSION}</Version>
               <Authors>Custom Build</Authors>
-              <Description>OpenVINO EP provider + minimal OpenVINO runtime (OpenVINO ${OPENVINO_TAG}, ORT ${PACKAGE_VERSION}). Native assets: win-x64 (Intel iGPU plugin enabled), osx-x64 (CPU). Does NOT include onnxruntime native library.</Description>
+              <Description>OpenVINO EP provider + minimal OpenVINO runtime (OpenVINO ${OPENVINO_TAG}, ORT ${PACKAGE_VERSION}). win-x64 (Intel iGPU plugin enabled), osx-x64 (CPU). Does NOT include onnxruntime native library.</Description>
               <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
               <IncludeBuildOutput>false</IncludeBuildOutput>
               <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
             </PropertyGroup>
-
             <ItemGroup>
               <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="${ORT_MANAGED_DEP_VERSION}" />
             </ItemGroup>
-
             <ItemGroup>
               <None Include="runtimes/**" Pack="true" PackagePath="runtimes/" />
             </ItemGroup>
           </Project>
           EOF
 
-      - name: Pack nupkg
+      - name: "Pack nupkg"
         run: |
           set -euxo pipefail
           dotnet pack "nuget_root/pkg/${PACKAGE_ID}.csproj" -c Release -o out
 
-      - name: Upload NuGet package
+      - name: "Upload NuGet package"
         uses: actions/upload-artifact@v4
         with:
           name: nuget
