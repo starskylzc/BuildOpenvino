@@ -7,7 +7,7 @@ set -euo pipefail
 ARCH="$1"
 DEPLOY="$2"
 
-OPENCV_VERSION="${OPENCV_VERSION:-4.10.0}"
+OPENCV_VERSION="${OPENCV_VERSION:-4.11.0}"
 OPENCVSHARP_REF="${OPENCVSHARP_REF:-main}"
 BUILD_LIST="${BUILD_LIST:-core,imgproc,videoio}"
 
