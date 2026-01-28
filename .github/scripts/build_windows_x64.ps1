@@ -10,7 +10,7 @@ param(
   [string]$BuildList = $env:BUILD_LIST
 )
 
-if ([string]::IsNullOrWhiteSpace($OpenCvVersion)) { $OpenCvVersion = "4.10.0" }
+if ([string]::IsNullOrWhiteSpace($OpenCvVersion)) { $OpenCvVersion = "4.11.0" }
 if ([string]::IsNullOrWhiteSpace($OpenCvSharpRef)) { $OpenCvSharpRef = "main" }
 if ([string]::IsNullOrWhiteSpace($BuildList)) { $BuildList = "core,imgproc,videoio" }
 
@@ -43,9 +43,11 @@ Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    (Join-Path $Src "
 # Patch OpenCvSharpExtern to minimal sources: core/imgproc/videoio
 # ------------------------------------------------------------
 Write-Info "Patch OpenCvSharpExtern CMakeLists to minimal sources (core/imgproc/videoio)"
-python - << 'PY'
+
+$pyPatchCMake = @"
 import pathlib, re, os
-src = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work" / "src" / "opencvsharp"
+root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
+src = root / "src" / "opencvsharp"
 cmake = src / "src" / "OpenCvSharpExtern" / "CMakeLists.txt"
 text = cmake.read_text(encoding="utf-8", errors="ignore")
 
@@ -61,10 +63,10 @@ minimal = """add_library(OpenCvSharpExtern SHARED
 )
 
 """
-text2 = text[:m.start()] + minimal + text[m.end():]
-cmake.write_text(text2, encoding="utf-8")
+cmake.write_text(text[:m.start()] + minimal + text[m.end():], encoding="utf-8")
 print("Patched:", cmake)
-PY
+"@
+python -c $pyPatchCMake
 
 # ------------------------------------------------------------
 # Build OpenCV static (minimal modules, minimize deps)
@@ -104,13 +106,12 @@ cmake --build $OpenCvB --config Release
 
 # ------------------------------------------------------------
 # Auto-filter include_opencv.h based on actual include roots
-# (same idea as mac script)
 # ------------------------------------------------------------
 Write-Info "Auto-filter include_opencv.h based on compile include roots"
 $env:BUILD_LIST = $BuildList
-python - << 'PY'
-import pathlib, re, os
 
+$pyFilter = @"
+import pathlib, re, os
 root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
 opencv_root = root / "src" / "opencv"
 opencv_include = opencv_root / "include"
@@ -146,10 +147,8 @@ for line in lines:
 
 hdr.write_text("\n".join(out) + "\n", encoding="utf-8")
 print(f"include_opencv.h filtered: disabled {disabled} includes")
-print("Include roots:")
-for r in include_roots:
-    print("  -", r)
-PY
+"@
+python -c $pyFilter
 
 # ------------------------------------------------------------
 # Build OpenCvSharpExtern (use OpenCV BUILD TREE)
@@ -157,7 +156,7 @@ PY
 $SharpSrc = Join-Path $Src "opencvsharp"
 $SharpB   = Join-Path $Bld "opencvsharp"
 
-Write-Info "Configure OpenCvSharpExtern (x64)"
+Write-Info "Configure OpenCvSharpExtern (win-x64)"
 cmake -S (Join-Path $SharpSrc "src") -B $SharpB -G Ninja `
   -D CMAKE_BUILD_TYPE=Release `
   -D CMAKE_INSTALL_PREFIX="$Out" `
@@ -167,7 +166,6 @@ Write-Info "Build & install OpenCvSharpExtern"
 cmake --build $SharpB --config Release
 cmake --install $SharpB --config Release
 
-# Find OpenCvSharpExtern.dll and copy to final/
 Write-Info "Collect artifact"
 $dll = Get-ChildItem -Path $Out -Recurse -Filter "OpenCvSharpExtern.dll" | Select-Object -First 1
 if (-not $dll) { throw "OpenCvSharpExtern.dll not found under $Out" }
