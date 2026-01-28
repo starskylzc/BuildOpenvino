@@ -1,387 +1,164 @@
-name: Extract OpenVINO Minimal Runtime (Windows CPU+GPU, macOS CPU, ONNX)
+name: Extract OpenVINO Runtime (ONNX + Minimal + Localized)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动点击按钮触发
 
 jobs:
-  extract:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: windows
-            url: https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/windows/w_openvino_toolkit_windows_2023.3.0.13775.ceeafaf64f3_x86_64.zip
-            archive: openvino_win.zip
-          - os: macos-latest
-            platform: macos
-            url: https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/macos/m_openvino_toolkit_macos_10_15_2023.3.0.13775.ceeafaf64f3_x86_64.tgz
-            archive: openvino_mac.tgz
-
-    runs-on: ${{ matrix.os }}
-
+  build:
+    runs-on: macos-latest # 必须使用 Mac 环境以支持 install_name_tool 工具
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download
-        shell: bash
+      # 1. 下载官方包
+      - name: Download Official Packages
         run: |
-          set -euxo pipefail
-          curl -L --retry 5 --retry-delay 2 -o "${{ matrix.archive }}" "${{ matrix.url }}"
-          ls -lh "${{ matrix.archive }}"
+          mkdir -p downloads
+          echo ">>> Downloading Windows Package..."
+          curl -L -o downloads/win.zip "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/windows/w_openvino_toolkit_windows_2023.3.0.13775.ceeafaf64f3_x86_64.zip"
+          
+          echo ">>> Downloading Mac Package..."
+          curl -L -o downloads/mac.tgz "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/macos/m_openvino_toolkit_macos_10_15_2023.3.0.13775.ceeafaf64f3_x86_64.tgz"
 
-      - name: Extract
-        shell: bash
+      # 2. 解压
+      - name: Extract Archives
         run: |
-          set -euxo pipefail
-          rm -rf _src && mkdir -p _src
+          echo ">>> Extracting..."
+          unzip -q downloads/win.zip -d extracted_win
+          mkdir -p extracted_mac
+          tar -xzf downloads/mac.tgz -C extracted_mac
+          
+          # 简化路径变量，方便后面引用
+          # Windows 解压后通常有一层目录，找到那个目录
+          WIN_ROOT=$(find extracted_win -maxdepth 1 -type d -name "w_openvino*" | head -n 1)
+          MAC_ROOT=$(find extracted_mac -maxdepth 1 -type d -name "m_openvino*" | head -n 1)
+          
+          echo "WIN_ROOT=$WIN_ROOT" >> $GITHUB_ENV
+          echo "MAC_ROOT=$MAC_ROOT" >> $GITHUB_ENV
 
-          if [[ "${{ matrix.platform }}" == "windows" ]]; then
-            # Windows 解压
-            powershell -Command "if (Test-Path openvino_win.zip) { Expand-Archive -Path openvino_win.zip -DestinationPath _src } else { tar -xf openvino_win.zip -C _src }"
-          else
-            # macOS 和其他 Linux 环境解压
-            tar -xzf "${{ matrix.archive }}" -C _src
-          fi
-
-          echo "=== _src top ==="
-          ls -la _src
-          echo "=== dirs depth<=3 ==="
-          find _src -maxdepth 3 -type d -print
-
-      # ------------------------------------------------------------
-      # Windows x64: Intel GPU + Intel CPU + ONNX frontend + TBB
-      # Seeds: openvino + openvino_c + plugins.xml + TBB deps
-      #       + openvino_intel_gpu_plugin + openvino_intel_cpu_plugin
-      #       + openvino_onnx_frontend
-      # Then: dumpbin dependency closure, only copy deps found INSIDE Release folder
-      # Also: rewrite plugins.xml => CPU+GPU, location relative to openvino.dll directory
-      # ------------------------------------------------------------
-      - name: Extract minimal runtime (Windows, CPU + GPU + ONNX, exact seeds + closure + TBB)
-        if: matrix.platform == 'windows'
-        shell: pwsh
+      # 3. 处理 Windows (GPU Only + ONNX)
+      - name: Process Windows Runtime
         run: |
-          $ErrorActionPreference = "Stop"
+          mkdir -p final_output/windows
+          
+          # 定义源路径
+          SRC_BIN="$WIN_ROOT/runtime/bin/intel64/Release"
+          SRC_TBB="$WIN_ROOT/runtime/3rdparty/tbb/bin"
+          SRC_INC="$WIN_ROOT/runtime/include/ie/c_api"
+          DST="final_output/windows"
+          
+          echo ">>> Copying Windows Libraries..."
+          
+          # A. 核心库
+          cp "$SRC_BIN/openvino.dll" "$DST/"
+          cp "$SRC_BIN/openvino_c.dll" "$DST/"
+          
+          # B. 前端支持 (ONNX 是必须的，IR 建议保留以防内部转换需求)
+          cp "$SRC_BIN/openvino_onnx_frontend.dll" "$DST/"
+          cp "$SRC_BIN/openvino_ir_frontend.dll" "$DST/"
+          
+          # C. 插件 (仅保留 GPU)
+          cp "$SRC_BIN/openvino_intel_gpu_plugin.dll" "$DST/"
+          # GPU 缓存配置 (如果存在则复制)
+          [ -f "$SRC_BIN/cache.json" ] && cp "$SRC_BIN/cache.json" "$DST/"
+          
+          # D. 第三方依赖 (TBB)
+          cp "$SRC_TBB"/*.dll "$DST/"
+          
+          # E. 头文件 (C API)
+          mkdir -p "$DST/include"
+          cp "$SRC_INC/ie_c_api.h" "$DST/include/"
+          
+          # F. 生成专属 plugins.xml (Windows GPU 版)
+          echo ">>> Generating Windows plugins.xml..."
+          cat <<EOF > "$DST/plugins.xml"
+          <ie>
+              <plugins>
+                  <plugin name="GPU" location="openvino_intel_gpu_plugin.dll">
+                  </plugin>
+              </plugins>
+          </ie>
+          EOF
 
-          Write-Host "=== Locate runtime root ==="
-          $runtimeDir = Get-ChildItem -Path "_src" -Recurse -Directory -Filter "runtime" | Select-Object -First 1
-          if (-not $runtimeDir) { throw "Cannot find runtime directory under _src" }
-          $runtimeDir = $runtimeDir.FullName
-          Write-Host "runtimeDir = $runtimeDir"
-
-          $binRel = Join-Path $runtimeDir "bin\intel64\Release"
-          if (-not (Test-Path $binRel)) { throw "Cannot find: $binRel" }
-          Write-Host "binRel = $binRel"
-          Get-ChildItem $binRel | Sort-Object Name | Format-Table Name,Length
-
-          # C API header
-          $ieHeader = Join-Path $runtimeDir "include\ie\c_api\ie_c_api.h"
-          if (-not (Test-Path $ieHeader)) { throw "Missing header: $ieHeader" }
-
-          # plugins.xml (search)
-          $pluginsXml = Join-Path $binRel "plugins.xml"
-          if (-not (Test-Path $pluginsXml)) {
-            $pluginsXml = Get-ChildItem -Path $runtimeDir -Recurse -File -Filter "plugins.xml" | Select-Object -First 1 | ForEach-Object { $_.FullName }
-          }
-          if (-not $pluginsXml -or -not (Test-Path $pluginsXml)) { throw "plugins.xml not found" }
-          Write-Host "plugins.xml = $pluginsXml"
-
-          # cache.json (GPU support file per docs)
-          $cacheJson = Join-Path $binRel "cache.json"
-          if (-not (Test-Path $cacheJson)) { throw "cache.json not found in Release folder: $binRel" }
-
-          # Locate dumpbin.exe
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere)) { throw "vswhere not found: $vswhere" }
-          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find **\dumpbin.exe | Select-Object -First 1
-          if (-not $dumpbin -or -not (Test-Path $dumpbin)) { throw "dumpbin.exe not found" }
-          Write-Host "dumpbin = $dumpbin"
-
-          function Get-DllDependents([string]$filePath) {
-            $out = & $dumpbin /nologo /dependents $filePath 2>$null
-            if (-not $out) { return @() }
-            $deps = @()
-            foreach ($line in $out) {
-              $t = $line.Trim()
-              if ($t -match '^[A-Za-z0-9\-\._]+\.dll$') { $deps += $t }
-            }
-            return $deps | Select-Object -Unique
-          }
-
-          function IsSystemImport([string]$dllName) {
-            $n = $dllName.ToLowerInvariant()
-            if ($n.StartsWith("api-ms-win-") -or $n.StartsWith("ext-ms-win-")) { return $true }
-            if ($n -in @(
-              "kernel32.dll","user32.dll","gdi32.dll","advapi32.dll","ole32.dll","oleaut32.dll",
-              "shell32.dll","shlwapi.dll","winmm.dll","ws2_32.dll","ntdll.dll","comdlg32.dll",
-              "secur32.dll","bcrypt.dll","crypt32.dll","dbghelp.dll","psapi.dll","iphlpapi.dll",
-              "version.dll","msvcrt.dll","ucrtbase.dll",
-              # GPU plugin OS dep is OpenCL.dll (system)
-              "opencl.dll"
-            )) { return $true }
-            return $false
-          }
-
-          # Output: everything in ONE folder to guarantee program-dir loading
-          $outRoot = Join-Path (Resolve-Path ".") "dist\openvino-min-windows"
-          $outBin  = Join-Path $outRoot "bin"
-          $outInc  = Join-Path $outRoot "include\ie\c_api"
-          New-Item -ItemType Directory -Force -Path $outBin | Out-Null
-          New-Item -ItemType Directory -Force -Path $outInc | Out-Null
-
-          # Exact seeds for your scenario (ONNX + CPU + GPU + C API)
-          # per docs: openvino, openvino_c, plugins.xml, device plugin, ONNX frontend, GPU cache.json
-          $seedNames = @(
-            "openvino.dll",
-            "openvino_c.dll",
-            "openvino_intel_gpu_plugin.dll",
-            "openvino_intel_cpu_plugin.dll",
-            "openvino_onnx_frontend.dll"
-          )
-
-          $seedPaths = @()
-          foreach ($n in $seedNames) {
-            $p = Join-Path $binRel $n
-            if (-not (Test-Path $p)) { throw "Seed missing in Release: $n" }
-            $seedPaths += $p
-          }
-
-          Write-Host "=== Seeds ==="
-          $seedPaths | ForEach-Object { Write-Host $_ }
-
-          # Copy seeds + cache.json
-          foreach ($s in $seedPaths) { Copy-Item $s $outBin -Force }
-          Copy-Item $cacheJson $outBin -Force
-
-          # Dependency closure (only copy deps that exist in $binRel)
-          $queue = New-Object System.Collections.Generic.Queue[string]
-          $seen  = New-Object 'System.Collections.Generic.HashSet[string]'
-          foreach ($s in $seedPaths) {
-            $queue.Enqueue($s)
-            $null = $seen.Add((Split-Path $s -Leaf).ToLowerInvariant())
-          }
-
-          $iter = 0
-          while ($queue.Count -gt 0) {
-            $iter++
-            $cur = $queue.Dequeue()
-            $curName = Split-Path $cur -Leaf
-            Write-Host "---- Iter $iter: $curName ----"
-
-            $deps = Get-DllDependents $cur
-            foreach ($d in $deps) {
-              if (IsSystemImport $d) { continue }
-              $dl = $d.ToLowerInvariant()
-              if ($seen.Contains($dl)) { continue }
-
-              $depPath = Join-Path $binRel $d
-              if (Test-Path $depPath) {
-                $null = $seen.Add($dl)
-                Copy-Item $depPath $outBin -Force
-                Write-Host "  +copy $d"
-                $queue.Enqueue($depPath)
-              } else {
-                Write-Host "  skip not-in-package $d"
-              }
-            }
-          }
-
-          # Rewrite plugins.xml: CPU + GPU, location relative to openvino.dll directory
-          [xml]$xml = Get-Content $pluginsXml
-          $pluginsNode = $xml.SelectSingleNode("//plugins")
-          if (-not $pluginsNode) { throw "plugins node not found in plugins.xml" }
-
-          foreach ($p in @($pluginsNode.SelectNodes("plugin"))) { $null = $pluginsNode.RemoveChild($p) }
-
-          # Add CPU plugin
-          $cpu = $xml.CreateElement("plugin")
-          $cpu.SetAttribute("name","CPU")
-          $cpu.SetAttribute("location","openvino_intel_cpu_plugin.dll")
-          $null = $pluginsNode.AppendChild($cpu)
-
-          # Add GPU plugin
-          $gpu = $xml.CreateElement("plugin")
-          $gpu.SetAttribute("name","GPU")
-          $gpu.SetAttribute("location","openvino_intel_gpu_plugin.dll")
-          $null = $pluginsNode.AppendChild($gpu)
-
-          $outPlugins = Join-Path $outBin "plugins.xml"
-          $xml.Save($outPlugins)
-
-          # Copy header
-          Copy-Item $ieHeader $outInc -Force
-
-          Write-Host "=== Final output ==="
-          Get-ChildItem $outRoot -Recurse | Sort-Object FullName | Format-Table FullName,Length
-          Write-Host "=== plugins.xml ==="
-          Get-Content $outPlugins
-
-      # ------------------------------------------------------------
-      # macOS x86_64: Intel CPU + ONNX frontend
-      # Seeds: libopenvino + libopenvino_c + plugins.xml + TBB deps
-      #       + libopenvino_intel_cpu_plugin
-      #       + libopenvino_onnx_frontend
-      # Then: otool closure (only deps resolvable inside extracted runtime tree)
-      # Patch: @loader_path everywhere for program-dir loading
-      # Rewrite plugins.xml => CPU only, relative location
-      # ------------------------------------------------------------
-      - name: Extract minimal runtime (macOS, CPU + ONNX, exact seeds + closure + @loader_path)
-        if: matrix.platform == 'macos'
-        shell: bash
+      # 4. 处理 Mac (CPU Only + ONNX + Patching)
+      - name: Process Mac Runtime
         run: |
-          set -euxo pipefail
+          mkdir -p final_output/mac
+          
+          # 定义源路径
+          SRC_LIB="$MAC_ROOT/runtime/lib/intel64/Release"
+          SRC_TBB="$MAC_ROOT/runtime/3rdparty/tbb/lib"
+          SRC_INC="$MAC_ROOT/runtime/include/ie/c_api"
+          DST="final_output/mac"
+          
+          echo ">>> Copying Mac Libraries..."
+          
+          # A. 核心库
+          cp "$SRC_LIB/libopenvino.dylib" "$DST/"
+          cp "$SRC_LIB/libopenvino_c.dylib" "$DST/"
+          
+          # B. 前端支持 (ONNX + IR)
+          cp "$SRC_LIB/libopenvino_onnx_frontend.dylib" "$DST/"
+          cp "$SRC_LIB/libopenvino_ir_frontend.dylib" "$DST/"
+          
+          # C. 插件 (仅保留 CPU)
+          # 检测 CPU 插件文件名 (可能是 .so 也可能是 .dylib)
+          CPU_PLUGIN=$(find "$SRC_LIB" -name "libopenvino_intel_cpu_plugin.*" | head -n 1)
+          cp "$CPU_PLUGIN" "$DST/"
+          CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
+          
+          # D. 第三方依赖 (TBB)
+          cp "$SRC_TBB"/libtbb*.dylib "$DST/"
+          
+          # E. 头文件
+          mkdir -p "$DST/include"
+          cp "$SRC_INC/ie_c_api.h" "$DST/include/"
+          
+          # F. 生成专属 plugins.xml (Mac CPU 版)
+          echo ">>> Generating Mac plugins.xml..."
+          cat <<EOF > "$DST/plugins.xml"
+          <ie>
+              <plugins>
+                  <plugin name="CPU" location="$CPU_PLUGIN_NAME">
+                  </plugin>
+              </plugins>
+          </ie>
+          EOF
 
-          runtime_dir="$(find _src -type d -name runtime -maxdepth 6 | head -n 1 || true)"
-          [[ -n "$runtime_dir" ]] || (echo "ERROR: runtime dir not found" && exit 1)
-          echo "runtime_dir=$runtime_dir"
-
-          # Find lib folder containing libopenvino*.dylib
-          lib_rel=""
-          for p in \
-            "$runtime_dir/lib/intel64/Release" \
-            "$runtime_dir/lib/Release" \
-            "$runtime_dir/lib"; do
-            if [[ -d "$p" ]] && ls "$p"/libopenvino*.dylib >/dev/null 2>&1; then
-              lib_rel="$p"; break
-            fi
+          # G. [关键步骤] 本地化 Patch (Relocation)
+          echo ">>> Patching Mac binaries for local execution..."
+          cd "$DST"
+          
+          # 找到所有动态库
+          LIBS=$(ls *.dylib *.so 2>/dev/null)
+          
+          for LIB in $LIBS; do
+            # 1. 赋予写权限
+            chmod +w "$LIB"
+            
+            # 2. 修改自身的 ID 为 @loader_path (相对路径)
+            install_name_tool -id "@loader_path/$LIB" "$LIB"
+            
+            # 3. 查找所有依赖并修改
+            # otool -L 列出依赖 -> grep 找出 @rpath 开头的 -> awk 提取路径
+            DEPS=$(otool -L "$LIB" | grep "@rpath" | awk '{print $1}')
+            
+            for DEP_PATH in $DEPS; do
+                DEP_NAME=$(basename "$DEP_PATH")
+                # 将 @rpath/libtbb.12.dylib 修改为 @loader_path/libtbb.12.dylib
+                install_name_tool -change "$DEP_PATH" "@loader_path/$DEP_NAME" "$LIB"
+                echo "  Fixed: $LIB -> $DEP_NAME"
+            done
           done
-          [[ -n "$lib_rel" ]] || (echo "ERROR: cannot locate lib_rel" && exit 1)
-          echo "lib_rel=$lib_rel"
-          ls -la "$lib_rel"
+          
+          cd ../..
 
-          ie_header="$runtime_dir/include/ie/c_api/ie_c_api.h"
-          [[ -f "$ie_header" ]] || (echo "ERROR: ie_c_api.h missing" && exit 1)
-
-          plugins_xml="$lib_rel/plugins.xml"
-          if [[ ! -f "$plugins_xml" ]]; then
-            plugins_xml="$(find "$runtime_dir" -type f -name plugins.xml | head -n 1 || true)"
-          fi
-          [[ -f "$plugins_xml" ]] || (echo "ERROR: plugins.xml missing" && exit 1)
-          echo "plugins.xml=$plugins_xml"
-
-          out="dist/openvino-min-macos"
-          out_lib="$out/lib"
-          out_inc="$out/include/ie/c_api"
-          mkdir -p "$out_lib" "$out_inc"
-
-          # Exact seeds for your scenario (ONNX + CPU + C API)
-          seeds=(
-            "$lib_rel/libopenvino.dylib"
-            "$lib_rel/libopenvino_c.dylib"
-            "$lib_rel/libopenvino_intel_cpu_plugin.dylib"
-            "$lib_rel/libopenvino_onnx_frontend.dylib"
-          )
-          for s in "${seeds[@]}"; do
-            [[ -f "$s" ]] || (echo "ERROR: seed missing: $s" && exit 1)
-          done
-
-          echo "=== Seeds ==="
-          printf '%s\n' "${seeds[@]}"
-
-          # closure
-          declare -A seen
-          queue=()
-
-          copy_one() {
-            local src="$1"
-            local base
-            base="$(basename "$src")"
-            if [[ ! -f "$out_lib/$base" ]]; then
-              cp -f "$src" "$out_lib/$base"
-              echo "  +copy: $base"
-            fi
-          }
-
-          enqueue() {
-            local base
-            base="$(basename "$1")"
-            if [[ -z "${seen[$base]+x}" ]]; then
-              seen["$base"]=1
-              queue+=("$1")
-            fi
-          }
-
-          for s in "${seeds[@]}"; do
-            copy_one "$s"
-            enqueue "$s"
-          done
-
-          iter=0
-          while [[ ${#queue[@]} -gt 0 ]]; do
-            iter=$((iter+1))
-            cur="${queue[0]}"
-            queue=("${queue[@]:1}")
-            curbase="$(basename "$cur")"
-            echo "---- Iter $iter: analyze $curbase ----"
-
-            target="$out_lib/$curbase"
-            [[ -f "$target" ]] || continue
-
-            deps="$(otool -L "$target" | tail -n +2 | awk '{print $1}' || true)"
-            while IFS= read -r dep; do
-              [[ -z "$dep" ]] && continue
-              if [[ "$dep" == /usr/lib/* || "$dep" == /System/* ]]; then
-                continue
-              fi
-
-              resolved=""
-              if [[ "$dep" == "$runtime_dir"* && -f "$dep" ]]; then
-                resolved="$dep"
-              elif [[ "$dep" == @rpath/* ]]; then
-                cand="$lib_rel/$(basename "$dep")"
-                [[ -f "$cand" ]] && resolved="$cand"
-              else
-                depbase="$(basename "$dep")"
-                cand="$(find "$runtime_dir" -type f -name "$depbase" | head -n 1 || true)"
-                [[ -n "$cand" && -f "$cand" ]] && resolved="$cand"
-              fi
-
-              if [[ -n "$resolved" ]]; then
-                copy_one "$resolved"
-                enqueue "$resolved"
-              fi
-            done <<< "$deps"
-          done
-
-          # Rewrite plugins.xml to CPU only, location relative to libopenvino.dylib dir
-          cat "$plugins_xml" \
-            | perl -0777 -pe 's/<plugin\b[^>]*\/>\s*//sg' \
-            | perl -0777 -pe 's!(<plugins[^>]*>)!$1\n    <plugin name="CPU" location="libopenvino_intel_cpu_plugin.dylib"/>\n!s' \
-            > "$out_lib/plugins.xml"
-
-          # Patch install names for local loading
-          for f in "$out_lib"/*.dylib; do
-            [[ -f "$f" ]] || continue
-            name="$(basename "$f")"
-            install_name_tool -id "@loader_path/$name" "$f" || true
-          done
-
-          for f in "$out_lib"/*.dylib; do
-            [[ -f "$f" ]] || continue
-            deps="$(otool -L "$f" | tail -n +2 | awk '{print $1}' || true)"
-            while IFS= read -r dep; do
-              [[ -z "$dep" ]] && continue
-              if [[ "$dep" == /usr/lib/* || "$dep" == /System/* ]]; then
-                continue
-              fi
-              depbase="$(basename "$dep")"
-              if [[ -f "$out_lib/$depbase" ]]; then
-                install_name_tool -change "$dep" "@loader_path/$depbase" "$f" || true
-              fi
-            done <<< "$deps"
-          done
-
-          cp -f "$ie_header" "$out_inc/"
-
-          echo "=== Final output ==="
-          find "$out" -maxdepth 3 -print
-          echo "=== plugins.xml ==="
-          cat "$out_lib/plugins.xml"
-          echo "=== sample otool ==="
-          otool -L "$out_lib/libopenvino.dylib" || true
-
-      - name: Upload artifact
+      # 5. 打包与上传
+      - name: Zip and Upload
+        run: |
+          cd final_output
+          zip -r openvino_minimal_onnx.zip .
+          echo ">>> Final Package Created."
+          
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openvino-min-runtime-${{ matrix.platform }}
-          path: dist/openvino-min-${{ matrix.platform }}
+          name: openvino_runtime_minimal
+          path: final_output/openvino_minimal_onnx.zip
