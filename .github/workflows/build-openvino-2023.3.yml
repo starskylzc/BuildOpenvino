@@ -1,13 +1,12 @@
-name: Extract OpenVINO Runtime (ONNX + Minimal + Localized)
+name: Extract OpenVINO (ONNX Only + Minimal + Localized)
 
 on:
-  workflow_dispatch: # 允许手动点击按钮触发
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest # 必须使用 Mac 环境以支持 install_name_tool 工具
+    runs-on: macos-latest
     steps:
-      # 1. 下载官方包
       - name: Download Official Packages
         run: |
           mkdir -p downloads
@@ -17,7 +16,6 @@ jobs:
           echo ">>> Downloading Mac Package..."
           curl -L -o downloads/mac.tgz "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/macos/m_openvino_toolkit_macos_10_15_2023.3.0.13775.ceeafaf64f3_x86_64.tgz"
 
-      # 2. 解压
       - name: Extract Archives
         run: |
           echo ">>> Extracting..."
@@ -25,20 +23,18 @@ jobs:
           mkdir -p extracted_mac
           tar -xzf downloads/mac.tgz -C extracted_mac
           
-          # 简化路径变量，方便后面引用
-          # Windows 解压后通常有一层目录，找到那个目录
+          # 获取解压后的根目录路径
           WIN_ROOT=$(find extracted_win -maxdepth 1 -type d -name "w_openvino*" | head -n 1)
           MAC_ROOT=$(find extracted_mac -maxdepth 1 -type d -name "m_openvino*" | head -n 1)
           
           echo "WIN_ROOT=$WIN_ROOT" >> $GITHUB_ENV
           echo "MAC_ROOT=$MAC_ROOT" >> $GITHUB_ENV
 
-      # 3. 处理 Windows (GPU Only + ONNX)
+      # --- Windows 处理 (GPU Only + ONNX Only) ---
       - name: Process Windows Runtime
         run: |
           mkdir -p final_output/windows
           
-          # 定义源路径
           SRC_BIN="$WIN_ROOT/runtime/bin/intel64/Release"
           SRC_TBB="$WIN_ROOT/runtime/3rdparty/tbb/bin"
           SRC_INC="$WIN_ROOT/runtime/include/ie/c_api"
@@ -46,27 +42,25 @@ jobs:
           
           echo ">>> Copying Windows Libraries..."
           
-          # A. 核心库
+          # 1. 核心库
           cp "$SRC_BIN/openvino.dll" "$DST/"
           cp "$SRC_BIN/openvino_c.dll" "$DST/"
           
-          # B. 前端支持 (ONNX 是必须的，IR 建议保留以防内部转换需求)
+          # 2. 前端支持 (仅 ONNX, 已移除 IR)
           cp "$SRC_BIN/openvino_onnx_frontend.dll" "$DST/"
-          cp "$SRC_BIN/openvino_ir_frontend.dll" "$DST/"
           
-          # C. 插件 (仅保留 GPU)
+          # 3. 插件 (仅 GPU)
           cp "$SRC_BIN/openvino_intel_gpu_plugin.dll" "$DST/"
-          # GPU 缓存配置 (如果存在则复制)
           [ -f "$SRC_BIN/cache.json" ] && cp "$SRC_BIN/cache.json" "$DST/"
           
-          # D. 第三方依赖 (TBB)
+          # 4. 第三方依赖 (TBB)
           cp "$SRC_TBB"/*.dll "$DST/"
           
-          # E. 头文件 (C API)
+          # 5. 头文件
           mkdir -p "$DST/include"
           cp "$SRC_INC/ie_c_api.h" "$DST/include/"
           
-          # F. 生成专属 plugins.xml (Windows GPU 版)
+          # 6. 生成 plugins.xml (Windows GPU)
           echo ">>> Generating Windows plugins.xml..."
           cat <<EOF > "$DST/plugins.xml"
           <ie>
@@ -77,12 +71,11 @@ jobs:
           </ie>
           EOF
 
-      # 4. 处理 Mac (CPU Only + ONNX + Patching)
+      # --- Mac 处理 (CPU Only + ONNX Only + Patching) ---
       - name: Process Mac Runtime
         run: |
           mkdir -p final_output/mac
           
-          # 定义源路径
           SRC_LIB="$MAC_ROOT/runtime/lib/intel64/Release"
           SRC_TBB="$MAC_ROOT/runtime/3rdparty/tbb/lib"
           SRC_INC="$MAC_ROOT/runtime/include/ie/c_api"
@@ -90,28 +83,27 @@ jobs:
           
           echo ">>> Copying Mac Libraries..."
           
-          # A. 核心库
+          # 1. 核心库
           cp "$SRC_LIB/libopenvino.dylib" "$DST/"
           cp "$SRC_LIB/libopenvino_c.dylib" "$DST/"
           
-          # B. 前端支持 (ONNX + IR)
+          # 2. 前端支持 (仅 ONNX, 已移除 IR 修复报错)
           cp "$SRC_LIB/libopenvino_onnx_frontend.dylib" "$DST/"
-          cp "$SRC_LIB/libopenvino_ir_frontend.dylib" "$DST/"
           
-          # C. 插件 (仅保留 CPU)
-          # 检测 CPU 插件文件名 (可能是 .so 也可能是 .dylib)
+          # 3. 插件 (仅 CPU)
+          # 自动寻找 CPU 插件 (兼容 .so 或 .dylib)
           CPU_PLUGIN=$(find "$SRC_LIB" -name "libopenvino_intel_cpu_plugin.*" | head -n 1)
           cp "$CPU_PLUGIN" "$DST/"
           CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
           
-          # D. 第三方依赖 (TBB)
+          # 4. 第三方依赖 (TBB)
           cp "$SRC_TBB"/libtbb*.dylib "$DST/"
           
-          # E. 头文件
+          # 5. 头文件
           mkdir -p "$DST/include"
           cp "$SRC_INC/ie_c_api.h" "$DST/include/"
           
-          # F. 生成专属 plugins.xml (Mac CPU 版)
+          # 6. 生成 plugins.xml (Mac CPU)
           echo ">>> Generating Mac plugins.xml..."
           cat <<EOF > "$DST/plugins.xml"
           <ie>
@@ -122,43 +114,35 @@ jobs:
           </ie>
           EOF
 
-          # G. [关键步骤] 本地化 Patch (Relocation)
-          echo ">>> Patching Mac binaries for local execution..."
+          # 7. Mac 本地化 Patch (修改 @rpath 为 @loader_path)
+          echo ">>> Patching Mac binaries..."
           cd "$DST"
-          
-          # 找到所有动态库
           LIBS=$(ls *.dylib *.so 2>/dev/null)
           
           for LIB in $LIBS; do
-            # 1. 赋予写权限
             chmod +w "$LIB"
-            
-            # 2. 修改自身的 ID 为 @loader_path (相对路径)
+            # 修改自身 ID
             install_name_tool -id "@loader_path/$LIB" "$LIB"
             
-            # 3. 查找所有依赖并修改
-            # otool -L 列出依赖 -> grep 找出 @rpath 开头的 -> awk 提取路径
+            # 修改依赖路径
             DEPS=$(otool -L "$LIB" | grep "@rpath" | awk '{print $1}')
-            
             for DEP_PATH in $DEPS; do
                 DEP_NAME=$(basename "$DEP_PATH")
-                # 将 @rpath/libtbb.12.dylib 修改为 @loader_path/libtbb.12.dylib
                 install_name_tool -change "$DEP_PATH" "@loader_path/$DEP_NAME" "$LIB"
                 echo "  Fixed: $LIB -> $DEP_NAME"
             done
           done
-          
           cd ../..
 
-      # 5. 打包与上传
       - name: Zip and Upload
         run: |
           cd final_output
-          zip -r openvino_minimal_onnx.zip .
-          echo ">>> Final Package Created."
+          zip -r openvino_onnx_only.zip .
+          echo "Final Content:"
+          ls -R
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openvino_runtime_minimal
-          path: final_output/openvino_minimal_onnx.zip
+          name: openvino_runtime_onnx_only
+          path: final_output/openvino_onnx_only.zip
