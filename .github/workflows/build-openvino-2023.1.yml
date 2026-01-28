@@ -236,7 +236,7 @@ jobs:
           path: win-x64-pkg.zip
 
   build-osx-x64:
-    runs-on: macos-13
+    runs-on: macos-15-intel
     defaults:
       run:
         shell: bash
