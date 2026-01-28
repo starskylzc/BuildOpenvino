@@ -44,7 +44,6 @@ clone_or_update "https://github.com/shimat/opencvsharp.git"    "$SRC/opencvsharp
 #   - core.cpp, imgproc.cpp, videoio.cpp
 # ------------------------------------------------------------
 echo "==> Patch OpenCvSharpExtern CMakeLists to minimal sources (core/imgproc/videoio)"
-
 python3 - <<PY
 import pathlib, re
 
@@ -102,61 +101,68 @@ cmake -S "$SRC/opencv" -B "$B/opencv" -G Ninja \
 ninja -C "$B/opencv"
 
 # ------------------------------------------------------------
-# Auto-filter include_opencv.h:
-#   - Keep opencv2 headers that exist in your trimmed OpenCV tree
-#   - Comment out includes that do NOT exist (e.g. highgui, shape, etc.)
-# This avoids "file not found" without guessing what's needed.
+# Auto-filter include_opencv.h based on *actual compile include roots*,
+# NOT based on opencv_contrib source tree.
+#
+# Compile include roots (matching what your compiler uses):
+#   - $SRC/opencv/include
+#   - $SRC/opencv/modules/<module>/include   (only for modules in BUILD_LIST)
+#
+# Anything else (e.g. opencv_contrib headers like opencv2/shape.hpp)
+# must be commented out, otherwise compilation fails.
 # ------------------------------------------------------------
-echo "==> Auto-filter include_opencv.h based on existing OpenCV headers"
+echo "==> Auto-filter include_opencv.h based on compile include roots"
 
 python3 - <<PY
 import pathlib, re
 
-opencv_inc = pathlib.Path(r"$SRC/opencv") / "include" / "opencv2"
-contrib_inc = pathlib.Path(r"$SRC/opencv_contrib") / "modules"
+opencv_root = pathlib.Path(r"$SRC/opencv")
+opencv_include = opencv_root / "include"
+modules_root = opencv_root / "modules"
+
+build_list = r"$BUILD_LIST".split(",")
+module_includes = [modules_root / m / "include" for m in build_list if (modules_root / m / "include").exists()]
+
+# Only these roots are considered "visible" to the compiler in your build.
+include_roots = [opencv_include] + module_includes
+
 hdr = pathlib.Path(r"$SRC/opencvsharp") / "src" / "OpenCvSharpExtern" / "include_opencv.h"
+lines = hdr.read_text(encoding="utf-8", errors="ignore").splitlines()
 
-text = hdr.read_text(encoding="utf-8", errors="ignore").splitlines()
+pat = re.compile(r'^\s*#\s*include\s*<([^>]+)>\s*$')
 
-def header_exists(rel: str) -> bool:
-    # rel: like opencv2/shape.hpp or opencv2/highgui/highgui_c.h
-    if not rel.startswith("opencv2/"):
-        return True
-    p = rel[len("opencv2/"):]
-    # main opencv include
-    if (opencv_inc / p).exists():
-        return True
-    # contrib headers can be under modules/<name>/include/opencv2/...
-    # We'll search quickly for the exact tail path under contrib modules.
-    for m in contrib_inc.glob("*"):
-        cand = m / "include" / "opencv2" / p
-        if cand.exists():
+def visible_header_exists(rel: str) -> bool:
+    # rel like "opencv2/shape.hpp"
+    for root in include_roots:
+        if (root / rel).exists():
             return True
     return False
 
 out = []
-changed = 0
-
-pat = re.compile(r'^\s*#\s*include\s*<([^>]+)>\s*$')
-for line in text:
+disabled = 0
+for line in lines:
     m = pat.match(line)
     if not m:
         out.append(line)
         continue
     inc = m.group(1).strip()
-    if inc.startswith("opencv2/") and not header_exists(inc):
-        out.append("// [auto-disabled missing header] " + line)
-        changed += 1
+    # only filter opencv2/*
+    if inc.startswith("opencv2/") and not visible_header_exists(inc):
+        out.append("// [auto-disabled not in include roots] " + line)
+        disabled += 1
     else:
         out.append(line)
 
 hdr.write_text("\n".join(out) + "\n", encoding="utf-8")
-print(f"Filtered include_opencv.h: disabled {changed} missing includes")
+print(f"include_opencv.h filtered: disabled {disabled} includes")
+print("Include roots:")
+for r in include_roots:
+    print("  -", r)
 PY
 
 # ------------------------------------------------------------
 # Build OpenCvSharpExtern
-#   - Use OpenCV BUILD TREE (fixes missing installed 3rdparty .a like libprotobuf)
+#   - Use OpenCV BUILD TREE to avoid missing installed 3rdparty .a
 # ------------------------------------------------------------
 echo "==> Build OpenCvSharpExtern ($ARCH)"
 cmake -S "$SRC/opencvsharp/src" -B "$B/opencvsharp" -G Ninja \
