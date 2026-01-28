@@ -38,11 +38,7 @@ jobs:
 
           if [[ "${{ matrix.platform }}" == "windows" ]]; then
             # Windows 解压
-            if (Test-Path openvino_win.zip) {
-              Expand-Archive -Path openvino_win.zip -DestinationPath _src
-            } else {
-              tar -xf openvino_win.zip -C _src
-            }
+            powershell -Command "if (Test-Path openvino_win.zip) { Expand-Archive -Path openvino_win.zip -DestinationPath _src } else { tar -xf openvino_win.zip -C _src }"
           else
             # macOS 和其他 Linux 环境解压
             tar -xzf "${{ matrix.archive }}" -C _src
