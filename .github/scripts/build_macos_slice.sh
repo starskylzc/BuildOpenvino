@@ -66,8 +66,7 @@ cmake -S "$SRC/opencvsharp/src" -B "$B/opencvsharp" -G Ninja \
   -D CMAKE_OSX_ARCHITECTURES="$ARCH" \
   -D CMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOY" \
   -D CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  -D CMAKE_PREFIX_PATH="$I/opencv" \
-  -D OpenCV_DIR="$I/opencv/lib/cmake/opencv4"
+  -D OpenCV_DIR="$B/opencv"
 
 ninja -C "$B/opencvsharp"
 ninja -C "$B/opencvsharp" install
