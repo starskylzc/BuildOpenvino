@@ -1,12 +1,11 @@
-name: Build Minimal OpenCvSharpExtern (Universal)
+name: Build Minimal OpenCvSharpExtern (Fixed)
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build-arch:
     name: Build for ${{ matrix.arch }}
-    # 使用最新的 runners: macos-13 是 Intel, macos-14 是 ARM64 (M1)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -30,10 +29,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: opencv/opencv
-          ref: 4.8.0 # 锁定版本
+          ref: 4.8.0  # 保持 4.8.0，通过参数修复兼容性
           path: opencv
 
-      - name: Checkout OpenCV Contrib (Need Freetype)
+      - name: Checkout OpenCV Contrib
         uses: actions/checkout@v4
         with:
           repository: opencv/opencv_contrib
@@ -43,20 +42,28 @@ jobs:
       - name: Install Build Tools
         run: |
           brew install cmake ninja
-          # 安装静态库构建所需的依赖，防止编译时找不到头文件
-          brew install ffmpeg freetype harfbuzz
+          # 只安装最基础的，防止 brew 的库干扰静态编译
+          brew install yasm
 
-      - name: Configure OpenCV (Minimal Static)
+      - name: Configure OpenCV (Minimal Static & Fixed)
         run: |
           mkdir -p opencv/build
           cd opencv/build
           
-          # 核心裁剪配置
+          # 核心修复说明：
+          # 1. -Wno-macro-redefined -w : 忽略 zlib 的宏定义冲突和所有警告
+          # 2. WITH_CAROTENE=OFF : 修复 ARM64 编译崩溃
+          # 3. WITH_IPP=OFF : 修复 x64 下旧系统兼容性
+          # 4. BUILD_ZLIB=ON : 强制使用内置 zlib 并在上面应用忽略警告的 flag
+          
           cmake -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=../install \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }} \
+            -DCMAKE_C_FLAGS="-w -Wno-macro-redefined -Wno-everything" \
+            -DCMAKE_CXX_FLAGS="-w -Wno-macro-redefined -Wno-everything" \
+            \
             -DBUILD_SHARED_LIBS=OFF \
             -DOPENCV_EXTRA_MODULES_PATH=../../opencv_contrib/modules \
             \
@@ -75,6 +82,7 @@ jobs:
             -DBUILD_opencv_calib3d=OFF \
             -DBUILD_opencv_features2d=OFF \
             -DBUILD_opencv_objdetect=OFF \
+            -DBUILD_opencv_video=OFF \
             \
             -DBUILD_ZLIB=ON \
             -DBUILD_JPEG=ON \
@@ -86,10 +94,14 @@ jobs:
             -DWITH_FFMPEG=ON \
             -DWITH_FREETYPE=ON \
             -DWITH_HARFBUZZ=ON \
+            -DWITH_CAROTENE=OFF \
+            -DWITH_IPP=OFF \
             -DWITH_LAPACK=OFF \
             -DWITH_EIGEN=OFF \
             -DWITH_OPENCL=OFF \
             -DWITH_ITT=OFF \
+            -DWITH_JASPER=OFF \
+            -DWITH_OPENJPEG=OFF \
             ..
 
       - name: Build OpenCV Static
@@ -103,10 +115,13 @@ jobs:
           mkdir -p opencvsharp/src/OpenCvSharpExtern/build
           cd opencvsharp/src/OpenCvSharpExtern/build
           
+          # 同样加上忽略警告的 flag
           cmake -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }} \
+            -DCMAKE_C_FLAGS="-w" \
+            -DCMAKE_CXX_FLAGS="-w" \
             -DOpenCV_DIR=$(pwd)/../../../../opencv/build/install/lib/cmake/opencv4 \
             ..
 
@@ -148,7 +163,7 @@ jobs:
           echo "=== Verify Architectures ==="
           lipo -info output/libOpenCvSharpExtern.dylib
           
-          echo "=== Verify Dependencies (Should contain minimal system libs) ==="
+          echo "=== Verify Dependencies ==="
           otool -L output/libOpenCvSharpExtern.dylib
 
       - name: Upload Final Universal Binary
@@ -156,3 +171,4 @@ jobs:
         with:
           name: libOpenCvSharpExtern-Universal
           path: output/libOpenCvSharpExtern.dylib
+          
