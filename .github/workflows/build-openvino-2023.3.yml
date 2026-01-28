@@ -387,4 +387,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openvino
+          name: openvino-min-runtime-${{ matrix.platform }}
+          path: dist/openvino-min-${{ matrix.platform }}
