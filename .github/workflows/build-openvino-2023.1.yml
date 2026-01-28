@@ -7,6 +7,10 @@ env:
   ORT_TAG: "v1.16.0"
   CONFIG: "Release"
 
+  # OpenVINO official prebuilt packages (2023.1.0 / build 12185.47b736f63ed)
+  OPENVINO_WIN_URL: "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.1/windows/w_openvino_toolkit_windows_2023.1.0.12185.47b736f63ed_x86_64.zip"
+  OPENVINO_OSX_URL: "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.1/macos/m_openvino_toolkit_macos_10_15_2023.1.0.12185.47b736f63ed_x86_64.tgz"
+
   PACKAGE_ID: "Intel.ML.OnnxRuntime.Openvino"
   PACKAGE_VERSION: "1.16.0"
   ORT_MANAGED_DEP_VERSION: "1.16.0"
@@ -20,7 +24,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - name: "Setup Python"
+      - name: "Setup Python (ORT build + dep closure)"
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -35,62 +39,47 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pefile numpy
 
-      - name: "Clone OpenVINO (tag 2023.1.0)"
+      - name: "Download & Extract OpenVINO prebuilt (win-x64)"
         run: |
           $ErrorActionPreference="Stop"
-          git clone --branch $env:OPENVINO_TAG --depth 1 --recurse-submodules https://github.com/openvinotoolkit/openvino.git openvino
+          $zip = Join-Path $env:GITHUB_WORKSPACE "openvino_win.zip"
+          Invoke-WebRequest -Uri $env:OPENVINO_WIN_URL -OutFile $zip
+          $dst = Join-Path $env:GITHUB_WORKSPACE "openvino_pkg"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
 
-      - name: "Build & Install OpenVINO (win-x64, Intel GPU plugin ON, no Python)"
-        run: |
-          $ErrorActionPreference="Stop"
+          $root = Get-ChildItem -Path $dst -Directory | Select-Object -First 1
+          if (!$root) { throw "OpenVINO root folder not found after unzip." }
 
-          $vcpkg = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
-          $openclLib = Join-Path $vcpkg "installed\x64-windows\lib\OpenCL.lib"
-          $openclInc = Join-Path $vcpkg "installed\x64-windows\include"
-          if (!(Test-Path $openclLib)) { throw "OpenCL.lib not found: $openclLib" }
-          if (!(Test-Path $openclInc)) { throw "OpenCL include not found: $openclInc" }
+          $ovRoot = $root.FullName
+          $ovBin  = Join-Path $ovRoot "runtime\bin\intel64\Release"
+          $ovCmake= Join-Path $ovRoot "runtime\cmake"
+          $ovTbb  = Join-Path $ovRoot "runtime\3rdparty\tbb\bin"
 
-          cd openvino
-          $env:TBBROOT=""
-          $env:OpenCV_DIR=""
+          if (!(Test-Path $ovBin))   { throw "OpenVINO bin not found: $ovBin" }
+          if (!(Test-Path $ovCmake)) { throw "OpenVINO cmake not found: $ovCmake" }
+          if (!(Test-Path $ovTbb))   { throw "OpenVINO tbb bin not found: $ovTbb" }
 
-          New-Item -ItemType Directory -Force -Path build | Out-Null
-          cd build
-
-          cmake .. -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_INSTALL_PREFIX="$PWD\ov_install" `
-            -DENABLE_PYTHON=OFF -DENABLE_WHEEL=OFF `
-            -DENABLE_TESTS=OFF -DENABLE_SAMPLES=OFF `
-            -DENABLE_INTEL_GPU=ON `
-            -DOpenCL_LIBRARY="$openclLib" `
-            -DOpenCL_INCLUDE_DIR="$openclInc"
-
-          cmake --build . --config $env:CONFIG --parallel
-          cmake --install . --config $env:CONFIG
-
-          "$PWD\ov_install" | Out-File -FilePath "$env:GITHUB_WORKSPACE\ov_install_win.txt" -Encoding ascii
+          Add-Content $env:GITHUB_ENV "OV_ROOT_WIN=$ovRoot"
+          Add-Content $env:GITHUB_ENV "OV_BIN_WIN=$ovBin"
+          Add-Content $env:GITHUB_ENV "OV_CMAKE_WIN=$ovCmake"
+          Add-Content $env:GITHUB_ENV "OV_TBB_BIN_WIN=$ovTbb"
 
       - name: "Clone ONNX Runtime (tag v1.16.0)"
         run: |
           $ErrorActionPreference="Stop"
           git clone --branch $env:ORT_TAG --depth 1 --recurse-submodules https://github.com/microsoft/onnxruntime.git onnxruntime
 
-      - name: "Build ORT OpenVINO EP provider (win-x64, target GPU)"
+      - name: "Build ORT OpenVINO EP provider (win-x64, Intel iGPU target via OpenVINO GPU_FP32)"
         run: |
           $ErrorActionPreference="Stop"
-
-          $ov = Get-Content "$env:GITHUB_WORKSPACE\ov_install_win.txt" | Select-Object -First 1
-          $ovConfig = Get-ChildItem -Path $ov -Recurse -Filter "OpenVINOConfig.cmake" | Select-Object -First 1
-          if (!$ovConfig) { throw "OpenVINOConfig.cmake not found under: $ov" }
-
-          $env:INTEL_OPENVINO_DIR = $ov
-          $env:OpenVINO_DIR = $ovConfig.Directory.FullName
+          $env:INTEL_OPENVINO_DIR = $env:OV_ROOT_WIN
+          $env:OpenVINO_DIR       = $env:OV_CMAKE_WIN
 
           cd onnxruntime
-          .\build.bat --config $env:CONFIG --build_shared_lib --parallel --skip_tests --use_openvino GPU --update --build `
-            --cmake_generator "Visual Studio 17 2022"
+          .\build.bat --config $env:CONFIG --build_shared_lib --parallel --skip_tests --use_openvino GPU_FP32 --update --build --cmake_generator "Visual Studio 17 2022"
 
-      - name: "Stage minimal win-x64 native payload (no onnxruntime*.dll, dependency-closure BFS)"
+      - name: "Stage minimal win-x64 native payload (no onnxruntime*.dll, dep-closure BFS)"
         run: |
           $ErrorActionPreference="Stop"
 
@@ -98,70 +87,70 @@ jobs:
           $native  = Join-Path $pkgRoot "runtimes\win-x64\native"
           New-Item -ItemType Directory -Force -Path $native | Out-Null
 
-          $ov = Get-Content "$env:GITHUB_WORKSPACE\ov_install_win.txt" | Select-Object -First 1
           $vcpkgBin = Join-Path "$env:GITHUB_WORKSPACE\vcpkg" "installed\x64-windows\bin"
 
-          # Provider ONLY (robust search)
+          # Provider ONLY
           $prov = Get-ChildItem -Path "$env:GITHUB_WORKSPACE\onnxruntime" -Recurse -Filter "onnxruntime_providers_openvino.dll" | Select-Object -First 1
           if (!$prov) { throw "onnxruntime_providers_openvino.dll not found" }
           Copy-Item $prov.FullName $native -Force
 
-          # Seed OpenVINO core + plugins
+          # Seed: OpenVINO core + needed plugins (真实文件名以官方包为准)
+          $ovBin = $env:OV_BIN_WIN
           $seedNames = @(
             "openvino.dll",
             "openvino_c.dll",
             "openvino_intel_cpu_plugin.dll",
             "openvino_intel_gpu_plugin.dll",
             "openvino_auto_plugin.dll",
-            "openvino_multi_plugin.dll",
-            "openvino_hetero_plugin.dll",
-            "openvino_batch_plugin.dll"
+            "openvino_auto_batch_plugin.dll",
+            "openvino_hetero_plugin.dll"
           )
           foreach ($name in $seedNames) {
-            $f = Get-ChildItem -Path $ov -Recurse -Filter $name -File | Select-Object -First 1
-            if ($f) { Copy-Item $f.FullName $native -Force }
+            $src = Join-Path $ovBin $name
+            if (Test-Path $src) { Copy-Item $src $native -Force }
           }
 
-          # Optional OpenCL ICD loader runtime
+          # cache.json (GPU 插件常用)
+          $cacheJson = Join-Path $ovBin "cache.json"
+          if (Test-Path $cacheJson) { Copy-Item $cacheJson $native -Force }
+
+          # OpenCL ICD Loader runtime (让 GPU 插件能 Load OpenCL.dll；真正算力仍依赖用户安装 Intel 驱动)
           $openclDll = Join-Path $vcpkgBin "OpenCL.dll"
           if (Test-Path $openclDll) { Copy-Item $openclDll $native -Force }
 
-          # plugins.xml
-          $candidates = @(
-            @{ Name="CPU";   File="openvino_intel_cpu_plugin.dll" },
-            @{ Name="GPU";   File="openvino_intel_gpu_plugin.dll" },
-            @{ Name="AUTO";  File="openvino_auto_plugin.dll" },
-            @{ Name="MULTI"; File="openvino_multi_plugin.dll" },
-            @{ Name="HETERO";File="openvino_hetero_plugin.dll" },
-            @{ Name="BATCH"; File="openvino_batch_plugin.dll" }
-          )
+          # 可选：生成 plugins.xml（不依赖官方包里那个只含 NPU 的 plugins.xml）
+          $pluginsXml = Join-Path $native "plugins.xml"
           $lines = New-Object System.Collections.Generic.List[string]
           $lines.Add("<ie>")
           $lines.Add("  <plugins>")
-          foreach ($p in $candidates) {
-            $path = Join-Path $native $p.File
-            if (Test-Path $path) { $lines.Add("    <plugin name=`"$($p.Name)`" location=`"$($p.File)`"></plugin>") }
-          }
+          if (Test-Path (Join-Path $native "openvino_intel_cpu_plugin.dll")) { $lines.Add("    <plugin name=`"CPU`" location=`"openvino_intel_cpu_plugin.dll`"></plugin>") }
+          if (Test-Path (Join-Path $native "openvino_intel_gpu_plugin.dll")) { $lines.Add("    <plugin name=`"GPU`" location=`"openvino_intel_gpu_plugin.dll`"></plugin>") }
+          if (Test-Path (Join-Path $native "openvino_auto_plugin.dll")) { $lines.Add("    <plugin name=`"AUTO`" location=`"openvino_auto_plugin.dll`"></plugin>") }
+          if (Test-Path (Join-Path $native "openvino_auto_batch_plugin.dll")) { $lines.Add("    <plugin name=`"BATCH`" location=`"openvino_auto_batch_plugin.dll`"></plugin>") }
+          if (Test-Path (Join-Path $native "openvino_hetero_plugin.dll")) { $lines.Add("    <plugin name=`"HETERO`" location=`"openvino_hetero_plugin.dll`"></plugin>") }
           $lines.Add("  </plugins>")
           $lines.Add("</ie>")
-          $lines -join "`r`n" | Out-File -FilePath (Join-Path $native "plugins.xml") -Encoding utf8
+          $lines -join "`r`n" | Out-File -FilePath $pluginsXml -Encoding utf8
 
-          # Write Python script to file (YAML-safe) then run dependency closure BFS
+          # Dependency closure BFS (YAML-safe: write script file then run)
           $pyFile = Join-Path $env:GITHUB_WORKSPACE "dep_closure_win.py"
+          $ovTbb  = $env:OV_TBB_BIN_WIN
+
           $pyLines = @(
             "import os",
             "import pefile",
             "from collections import deque",
             "",
             "native = r'''$native'''",
-            "scan_dirs = [r'''$native''', r'''$vcpkgBin''', r'''$ov''']",
+            "scan_dirs = [r'''$native''', r'''$vcpkgBin''', r'''$ovBin''', r'''$ovTbb''']",
             "",
             "def is_system(name):",
             "    u = name.upper()",
             "    sys_prefix = (",
-            "        'KERNEL32','USER32','GDI32','ADVAPI32','SHELL32','OLE32','OLEAUT32','WS2_32','IPHLPAPI',",
+            "        'KERNEL32','KERNELBASE','USER32','GDI32','ADVAPI32','SHELL32','OLE32','OLEAUT32','WS2_32','IPHLPAPI',",
             "        'CRYPT32','COMDLG32','SHLWAPI','NTDLL','VERSION',",
-            "        'MSVCRT','VCRUNTIME','UCRTBASE','api-ms-win-','ext-ms-win-'",
+            "        'MSVCRT','VCRUNTIME','UCRTBASE','MSVCP','CONCRT','VCOMP',",
+            "        'api-ms-win-','ext-ms-win-'",
             "    )",
             "    return u.startswith(sys_prefix)",
             "",
@@ -189,7 +178,6 @@ jobs:
             "",
             "queue = deque()",
             "seen = set()",
-            "",
             "for f in os.listdir(native):",
             "    if f.lower().endswith('.dll'):",
             "        queue.append(f)",
@@ -212,7 +200,7 @@ jobs:
             "        if not src:",
             "            raise RuntimeError(f'Missing dependency: {dep} (referenced by {cur})')",
             "        base = os.path.basename(src)",
-            "        if is_forbidden(base):",
+            "        if is_forbidden(base) or is_system(base):",
             "            continue",
             "        dst = os.path.join(native, base)",
             "        if not os.path.isfile(dst):",
@@ -241,7 +229,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: "Setup Python"
+      - name: "Setup Python (ORT build)"
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -250,110 +238,104 @@ jobs:
         run: |
           set -euxo pipefail
           brew update
-          brew install ninja cmake
+          brew install cmake ninja
 
-      - name: "Clone OpenVINO (tag 2023.1.0)"
-        run: |
-          set -euxo pipefail
-          git clone --branch "${OPENVINO_TAG}" --depth 1 --recurse-submodules https://github.com/openvinotoolkit/openvino.git openvino
-
-      - name: "Build & Install OpenVINO (osx-x64, 10.15, CPU only, no Python)"
+      - name: "Download & Extract OpenVINO prebuilt (macos x86_64, 10.15)"
         env:
           MACOSX_DEPLOYMENT_TARGET: "10.15"
         run: |
           set -euxo pipefail
-          cd openvino
-          unset TBBROOT OpenCV_DIR || true
-          mkdir -p build && cd build
-          cmake .. -G "Ninja Multi-Config" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
-            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-            -DCMAKE_INSTALL_PREFIX="$PWD/ov_install" \
-            -DENABLE_PYTHON=OFF -DENABLE_WHEEL=OFF \
-            -DENABLE_TESTS=OFF -DENABLE_SAMPLES=OFF \
-            -DENABLE_INTEL_GPU=OFF
-          cmake --build . --config Release --parallel "$(sysctl -n hw.ncpu)"
-          cmake --install . --config Release
-          echo "$PWD/ov_install" > "$GITHUB_WORKSPACE/ov_install_osx.txt"
+          curl -L "${OPENVINO_OSX_URL}" -o openvino_osx.tgz
+          mkdir -p openvino_pkg
+          tar -xzf openvino_osx.tgz -C openvino_pkg
+          root="$(find openvino_pkg -maxdepth 1 -type d -mindepth 1 | head -n 1)"
+          test -n "${root}"
+          ov_root="$(cd "${root}" && pwd)"
+          ov_lib="${ov_root}/runtime/lib/intel64/Release"
+          ov_cmake="${ov_root}/runtime/cmake"
+          ov_tbb="${ov_root}/runtime/3rdparty/tbb/lib"
+          test -d "${ov_lib}"
+          test -d "${ov_cmake}"
+          test -d "${ov_tbb}"
+          echo "OV_ROOT_OSX=${ov_root}" >> "${GITHUB_ENV}"
+          echo "OV_LIB_OSX=${ov_lib}" >> "${GITHUB_ENV}"
+          echo "OV_CMAKE_OSX=${ov_cmake}" >> "${GITHUB_ENV}"
+          echo "OV_TBB_LIB_OSX=${ov_tbb}" >> "${GITHUB_ENV}"
 
-      - name: "Clone ONNX Runtime (tag v1.16.0)"
+      - name: "Clone ONNX Runtime (tag v1.16.0) + python deps"
         run: |
           set -euxo pipefail
           git clone --branch "${ORT_TAG}" --depth 1 --recurse-submodules https://github.com/microsoft/onnxruntime.git onnxruntime
           python -m pip install --upgrade pip
           python -m pip install numpy
 
-      - name: "Build ORT OpenVINO EP provider (osx-x64, CPU)"
+      - name: "Build ORT OpenVINO EP provider (osx-x64, CPU_FP32, deploy 10.15)"
         env:
           MACOSX_DEPLOYMENT_TARGET: "10.15"
         run: |
           set -euxo pipefail
-          ov="$(cat "$GITHUB_WORKSPACE/ov_install_osx.txt")"
-          ov_config_dir="$(dirname "$(find "$ov" -name OpenVINOConfig.cmake | head -n 1)")"
-          export INTEL_OPENVINO_DIR="$ov"
-          export OpenVINO_DIR="$ov_config_dir"
+          export INTEL_OPENVINO_DIR="${OV_ROOT_OSX}"
+          export OpenVINO_DIR="${OV_CMAKE_OSX}"
           cd onnxruntime
-          ./build.sh --config Release --build_shared_lib --parallel --skip_tests --use_openvino CPU --update --build
+          ./build.sh --config Release --build_shared_lib --parallel --skip_tests --use_openvino CPU_FP32 --osx_arch x86_64 --apple_deploy_target 10.15 --update --build
 
-      - name: "Stage minimal osx-x64 native payload (no libonnxruntime*, dependency closure + @loader_path)"
+      - name: "Stage minimal osx-x64 native payload (no libonnxruntime*, dep-closure + @loader_path)"
         env:
           MACOSX_DEPLOYMENT_TARGET: "10.15"
         run: |
-          set -euxo pipefail
-
-          stage_sh="$GITHUB_WORKSPACE/stage_osx.sh"
-          cat > "$stage_sh" << 'EOS'
           set -euxo pipefail
 
           pkg_root="$GITHUB_WORKSPACE/pkg"
           native="$pkg_root/runtimes/osx-x64/native"
           mkdir -p "$native"
 
-          ov="$(cat "$GITHUB_WORKSPACE/ov_install_osx.txt")"
-
+          # Provider ONLY
           prov="$(find "$GITHUB_WORKSPACE/onnxruntime" -name 'libonnxruntime_providers_openvino.dylib' | head -n 1)"
           test -f "$prov"
           cp -f "$prov" "$native/"
 
-          for n in \
-            libopenvino.dylib \
-            libopenvino_c.dylib \
-            libopenvino_intel_cpu_plugin.dylib \
-            libopenvino_auto_plugin.dylib \
-            libopenvino_multi_plugin.dylib \
-            libopenvino_hetero_plugin.dylib \
-            libopenvino_batch_plugin.dylib
-          do
-            f="$(find "$ov" -name "$n" | head -n 1 || true)"
-            if [ -n "$f" ] && [ -f "$f" ]; then
-              cp -f "$f" "$native/"
-            fi
+          ovlib="${OV_LIB_OSX}"
+          ov_tbb="${OV_TBB_LIB_OSX}"
+
+          # Seed OpenVINO core dylibs (包含版本化名字，避免依赖缺失)
+          for f in "$ovlib"/libopenvino*.dylib "$ovlib"/libopenvino_c*.dylib; do
+            if [ -f "$f" ]; then cp -f "$f" "$native/"; fi
           done
 
-          {
-            echo "<ie>"
-            echo "  <plugins>"
-            [ -f "$native/libopenvino_intel_cpu_plugin.dylib" ] && echo "    <plugin name=\"CPU\" location=\"libopenvino_intel_cpu_plugin.dylib\"></plugin>"
-            [ -f "$native/libopenvino_auto_plugin.dylib" ] && echo "    <plugin name=\"AUTO\" location=\"libopenvino_auto_plugin.dylib\"></plugin>"
-            [ -f "$native/libopenvino_multi_plugin.dylib" ] && echo "    <plugin name=\"MULTI\" location=\"libopenvino_multi_plugin.dylib\"></plugin>"
-            [ -f "$native/libopenvino_hetero_plugin.dylib" ] && echo "    <plugin name=\"HETERO\" location=\"libopenvino_hetero_plugin.dylib\"></plugin>"
-            [ -f "$native/libopenvino_batch_plugin.dylib" ] && echo "    <plugin name=\"BATCH\" location=\"libopenvino_batch_plugin.dylib\"></plugin>"
-            echo "  </plugins>"
-            echo "</ie>"
-          } > "$native/plugins.xml"
+          # Seed plugins we actually need (官方包真实文件名)
+          for f in \
+            "$ovlib/libopenvino_intel_cpu_plugin.so" \
+            "$ovlib/libopenvino_auto_plugin.so" \
+            "$ovlib/libopenvino_auto_batch_plugin.so" \
+            "$ovlib/libopenvino_hetero_plugin.so"
+          do
+            if [ -f "$f" ]; then cp -f "$f" "$native/"; fi
+          done
 
+          # Dependency closure (otool -L) for both .dylib and .so, exclude libonnxruntime*
+          shopt -s nullglob
           changed=1
           while [ $changed -eq 1 ]; do
             changed=0
-            for lib in "$native"/*.dylib; do
+            for lib in "$native"/*.dylib "$native"/*.so; do
               [ -f "$lib" ] || continue
-              while read -r dep _; do
+              while read -r dep; do
                 [ -z "$dep" ] && continue
                 case "$dep" in /System/*|/usr/lib/*) continue ;; esac
                 base="$(basename "$dep")"
                 [[ "$base" == libonnxruntime* ]] && continue
                 [ -f "$native/$base" ] && continue
-                src="$(find "$ov" -name "$base" | head -n 1 || true)"
+
+                src=""
+                if [ -f "$ovlib/$base" ]; then
+                  src="$ovlib/$base"
+                elif [ -f "$ov_tbb/$base" ]; then
+                  src="$ov_tbb/$base"
+                else
+                  # fallback: search within those dirs
+                  src="$(find "$ovlib" "$ov_tbb" -maxdepth 1 -name "$base" -print -quit || true)"
+                fi
+
                 if [ -n "$src" ] && [ -f "$src" ]; then
                   cp -f "$src" "$native/$base"
                   changed=1
@@ -361,31 +343,31 @@ jobs:
                   echo "Missing dependency: $dep (referenced by $(basename "$lib"))"
                   exit 1
                 fi
-              done < <(otool -L "$lib" | tail -n +2)
+              done < <(otool -L "$lib" | tail -n +2 | awk '{print $1}')
             done
           done
 
-          for lib in "$native"/*.dylib; do
+          # Patch to @loader_path to avoid DYLD_LIBRARY_PATH
+          for lib in "$native"/*.dylib "$native"/*.so; do
+            [ -f "$lib" ] || continue
             install_name_tool -id "@rpath/$(basename "$lib")" "$lib" || true
             install_name_tool -add_rpath "@loader_path" "$lib" || true
           done
 
-          for lib in "$native"/*.dylib; do
-            while read -r dep _; do
+          for lib in "$native"/*.dylib "$native"/*.so; do
+            [ -f "$lib" ] || continue
+            while read -r dep; do
               [ -z "$dep" ] && continue
+              case "$dep" in /System/*|/usr/lib/*) continue ;; esac
               base="$(basename "$dep")"
               if [ -f "$native/$base" ]; then
                 install_name_tool -change "$dep" "@loader_path/$base" "$lib" || true
               fi
-            done < <(otool -L "$lib" | tail -n +2)
+            done < <(otool -L "$lib" | tail -n +2 | awk '{print $1}')
           done
 
-          strip -x "$native"/*.dylib || true
+          strip -x "$native"/*.dylib "$native"/*.so || true
           ditto -c -k --sequesterRsrc --keepParent "$pkg_root" "$GITHUB_WORKSPACE/osx-x64-pkg.zip"
-          EOS
-
-          chmod +x "$stage_sh"
-          bash "$stage_sh"
 
       - name: "Upload osx-x64 payload"
         uses: actions/upload-artifact@v4
@@ -397,6 +379,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-win-x64, build-osx-x64]
     steps:
+      - name: "Setup .NET (for packing)"
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
       - name: "Download artifacts"
         uses: actions/download-artifact@v4
         with:
@@ -411,7 +398,7 @@ jobs:
           test -d "nuget_root/pkg/runtimes/win-x64/native"
           test -d "nuget_root/pkg/runtimes/osx-x64/native"
 
-      - name: "Create packing project"
+      - name: "Create packing project (managed-only dependency)"
         run: |
           set -euxo pipefail
           cd nuget_root/pkg
@@ -422,7 +409,7 @@ jobs:
               <PackageId>${PACKAGE_ID}</PackageId>
               <Version>${PACKAGE_VERSION}</Version>
               <Authors>Custom Build</Authors>
-              <Description>OpenVINO EP provider + minimal OpenVINO runtime (OpenVINO ${OPENVINO_TAG}, ORT ${PACKAGE_VERSION}). win-x64 (Intel iGPU plugin enabled), osx-x64 (CPU). Does NOT include onnxruntime native library.</Description>
+              <Description>OpenVINO EP provider + minimal OpenVINO runtime (OpenVINO ${OPENVINO_TAG}, ORT ${PACKAGE_VERSION}). win-x64: Intel iGPU (OpenVINO GPU plugin). osx-x64: CPU. Does NOT include onnxruntime native library.</Description>
               <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
               <IncludeBuildOutput>false</IncludeBuildOutput>
               <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
