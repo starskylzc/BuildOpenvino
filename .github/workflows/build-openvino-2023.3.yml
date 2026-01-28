@@ -1,0 +1,479 @@
+name: openvino-2023.3-minruntime-c-api
+
+on:
+  workflow_dispatch:
+
+env:
+  OV_VERSION: "2023.3.0.13775.ceeafaf64f3"
+  OV_WIN_URL: "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/windows/w_openvino_toolkit_windows_2023.3.0.13775.ceeafaf64f3_x86_64.zip"
+  OV_MAC_URL: "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/macos/m_openvino_toolkit_macos_10_15_2023.3.0.13775.ceeafaf64f3_x86_64.tgz"
+  OUT_DIR: "out_openvino_minruntime"
+
+jobs:
+  extract-win-x64:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Setup Python (for dependency closure)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Download OpenVINO (Windows x64)
+        run: |
+          $ErrorActionPreference="Stop"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "openvino_win.zip"
+          Invoke-WebRequest -Uri $env:OV_WIN_URL -OutFile $zip
+          Write-Host "Downloaded: $zip"
+
+      - name: Extract OpenVINO
+        run: |
+          $ErrorActionPreference="Stop"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "openvino_win.zip"
+          $dst = Join-Path $env:GITHUB_WORKSPACE "ov_win"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+
+          $root = Get-ChildItem $dst -Directory | Select-Object -First 1
+          if (!$root) { throw "OpenVINO root folder not found after extraction." }
+          $root.FullName | Out-File -FilePath (Join-Path $env:GITHUB_WORKSPACE "ov_win_root.txt") -Encoding ascii
+          Write-Host "OV ROOT = $($root.FullName)"
+
+      - name: Prepare minimal runtime folder (seed files + header + plugins.xml)
+        run: |
+          $ErrorActionPreference="Stop"
+          python -m pip install --upgrade pip
+          python -m pip install pefile
+
+          $root = Get-Content (Join-Path $env:GITHUB_WORKSPACE "ov_win_root.txt") | Select-Object -First 1
+          $ovBin = Join-Path $root "runtime\bin\intel64\Release"
+          $tbbBin = Join-Path $root "runtime\3rdparty\tbb\bin"
+          $hdrDir = Join-Path $root "runtime\include\ie\c_api"
+          $hdr    = Join-Path $hdrDir "ie_c_api.h"
+
+          if (!(Test-Path $ovBin)) { throw "ovBin not found: $ovBin" }
+          if (!(Test-Path $tbbBin)) { throw "tbbBin not found: $tbbBin" }
+          if (!(Test-Path $hdr)) { throw "C API header not found: $hdr" }
+
+          $out = Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR
+          $native = Join-Path $out "runtimes\win-x64\native"
+          $inc = Join-Path $out "include\ie\c_api"
+          New-Item -ItemType Directory -Force -Path $native | Out-Null
+          New-Item -ItemType Directory -Force -Path $inc | Out-Null
+
+          Copy-Item $hdr -Destination $inc -Force
+
+          # Seed: core + C API + CPU plugin + Intel GPU plugin + ONNX/IR frontends + (safe) preprocess
+          $seed = @(
+            "openvino.dll",
+            "openvino_c.dll",
+            "openvino_intel_cpu_plugin.dll",
+            "openvino_intel_gpu_plugin.dll",
+            "openvino_onnx_frontend.dll",
+            "openvino_ir_frontend.dll",
+            "openvino_gapi_preproc.dll"
+          )
+          foreach ($name in $seed) {
+            $p = Join-Path $ovBin $name
+            if (!(Test-Path $p)) { throw "Missing seed in OpenVINO bin: $p" }
+            Copy-Item $p -Destination $native -Force
+          }
+
+          # Seed TBB (release)
+          $tbbSeed = @("tbb12.dll","tbbmalloc.dll","tbbbind_2_5.dll","tbbmalloc_proxy.dll")
+          foreach ($name in $tbbSeed) {
+            $p = Join-Path $tbbBin $name
+            if (Test-Path $p) { Copy-Item $p -Destination $native -Force }
+          }
+
+          # plugins.xml (local relative)
+          $xml = @()
+          $xml += "<ie>"
+          $xml += "  <plugins>"
+          $xml += "    <plugin name=""CPU"" location=""openvino_intel_cpu_plugin.dll""></plugin>"
+          $xml += "    <plugin name=""GPU"" location=""openvino_intel_gpu_plugin.dll""></plugin>"
+          $xml += "  </plugins>"
+          $xml += "</ie>"
+          $xml -join "`r`n" | Out-File -FilePath (Join-Path $native "plugins.xml") -Encoding utf8
+
+          # persist key dirs for python scripts
+          $native | Out-File -FilePath (Join-Path $env:GITHUB_WORKSPACE "win_native.txt") -Encoding ascii
+          $ovBin  | Out-File -FilePath (Join-Path $env:GITHUB_WORKSPACE "win_ovbin.txt")  -Encoding ascii
+          $tbbBin | Out-File -FilePath (Join-Path $env:GITHUB_WORKSPACE "win_tbbbin.txt") -Encoding ascii
+          Write-Host "Prepared seed payload at: $native"
+
+      - name: Dependency closure (copy missing non-driver deps into native)
+        run: |
+          $ErrorActionPreference="Stop"
+          $py = Join-Path $env:GITHUB_WORKSPACE "dep_closure_win.py"
+
+          $native = Get-Content (Join-Path $env:GITHUB_WORKSPACE "win_native.txt") | Select-Object -First 1
+          $ovBin  = Get-Content (Join-Path $env:GITHUB_WORKSPACE "win_ovbin.txt")  | Select-Object -First 1
+          $tbbBin = Get-Content (Join-Path $env:GITHUB_WORKSPACE "win_tbbbin.txt") | Select-Object -First 1
+
+          $lines = @(
+            "import os",
+            "import pefile",
+            "from collections import deque",
+            "",
+            f"native = r'''{native}'''",
+            f"scan_dirs = [r'''{native}''', r'''{ovBin}''', r'''{tbbBin}''']",
+            r"system_prefix = (",
+            r"  'KERNEL32','USER32','GDI32','ADVAPI32','SHELL32','OLE32','OLEAUT32','WS2_32','IPHLPAPI',",
+            r"  'CRYPT32','COMDLG32','SHLWAPI','NTDLL','VERSION','WINMM','DBGHELP',",
+            r"  'api-ms-win-','ext-ms-win-'",
+            r")",
+            "",
+            r"# Driver-provided deps (do not package): Intel GPU/OpenCL/Level-Zero stack typically comes from the graphics driver",
+            r"driver_allow = set([",
+            r"  'opencl.dll','igc64.dll','igdfcl64.dll','ze_loader.dll','ze_intel_gpu64.dll','ze_intel_gpu64_1.dll','ze_intel_gpu64_2.dll',",
+            r"  'libmmd.dll','intelocl64.dll','intelocl32.dll'",
+            r"])",
+            "",
+            r"# MSVC runtime dlls: copy to make payload more self-contained (if present on runner)",
+            r"msvc_copy = set([",
+            r"  'vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','concrt140.dll','vcomp140.dll',",
+            r"  'msvcp140_atomic_wait.dll','msvcp140_codecvt_ids.dll'",
+            r"])",
+            "",
+            r"def is_system(name: str) -> bool:",
+            r"  u = name.upper()",
+            r"  return u.startswith(system_prefix)",
+            "",
+            r"def find_in_dirs(name: str):",
+            r"  # native already?",
+            r"  p = os.path.join(native, name)",
+            r"  if os.path.isfile(p): return p",
+            r"  for d in scan_dirs:",
+            r"    if not os.path.isdir(d):",
+            r"      continue",
+            r"    for root, _, files in os.walk(d):",
+            r"      for f in files:",
+            r"        if f.lower() == name.lower():",
+            r"          return os.path.join(root, f)",
+            r"  return None",
+            "",
+            r"def find_in_system32(name: str):",
+            r"  sys32 = os.path.join(os.environ.get('WINDIR','C:\\Windows'), 'System32')",
+            r"  cand = os.path.join(sys32, name)",
+            r"  return cand if os.path.isfile(cand) else None",
+            "",
+            r"def imports(dll_path: str):",
+            r"  pe = pefile.PE(dll_path)",
+            r"  deps = []",
+            r"  if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):",
+            r"    for entry in pe.DIRECTORY_ENTRY_IMPORT:",
+            r"      deps.append(entry.dll.decode(errors='ignore'))",
+            r"  return deps",
+            "",
+            r"queue = deque()",
+            r"seen = set()",
+            "",
+            r"for f in os.listdir(native):",
+            r"  if f.lower().endswith('.dll'):",
+            r"    queue.append(f)",
+            r"    seen.add(f.lower())",
+            "",
+            r"missing_driver = set()",
+            "",
+            r"while queue:",
+            r"  cur = queue.popleft()",
+            r"  cur_path = os.path.join(native, cur)",
+            r"  try:",
+            r"    deps = imports(cur_path)",
+            r"  except Exception:",
+            r"    continue",
+            r"  for dep in deps:",
+            r"    if not dep: continue",
+            r"    d = dep.lower()",
+            r"    if is_system(dep):",
+            r"      continue",
+            r"    if d in driver_allow:",
+            r"      missing_driver.add(d)",
+            r"      continue",
+            r"    if d in seen:",
+            r"      continue",
+            r"    src = find_in_dirs(dep)",
+            r"    if not src and d in msvc_copy:",
+            r"      src = find_in_system32(dep)",
+            r"    if not src:",
+            r"      raise RuntimeError(f'Missing dependency: {dep} (referenced by {cur})')",
+            r"    base = os.path.basename(src)",
+            r"    dst = os.path.join(native, base)",
+            r"    if not os.path.isfile(dst):",
+            r"      with open(src,'rb') as r, open(dst,'wb') as w:",
+            r"        w.write(r.read())",
+            r"    seen.add(base.lower())",
+            r"    queue.append(base)",
+            "",
+            r"print('Dependency closure done. DLLs =', len([x for x in os.listdir(native) if x.lower().endswith('.dll')]))",
+            r"if missing_driver:",
+            r"  print('NOTE: driver-provided deps not packaged (OK):', ', '.join(sorted(missing_driver)))"
+          )
+          Set-Content -Path $py -Value $lines -Encoding UTF8
+          python $py
+
+      - name: Validate closure (fail if any non-driver dep still missing)
+        run: |
+          $ErrorActionPreference="Stop"
+          $py = Join-Path $env:GITHUB_WORKSPACE "validate_win.py"
+
+          $native = Get-Content (Join-Path $env:GITHUB_WORKSPACE "win_native.txt") | Select-Object -First 1
+
+          $lines = @(
+            "import os",
+            "import pefile",
+            "",
+            f"native = r'''{native}'''",
+            r"system_prefix = (",
+            r"  'KERNEL32','USER32','GDI32','ADVAPI32','SHELL32','OLE32','OLEAUT32','WS2_32','IPHLPAPI',",
+            r"  'CRYPT32','COMDLG32','SHLWAPI','NTDLL','VERSION','WINMM','DBGHELP',",
+            r"  'api-ms-win-','ext-ms-win-'",
+            r")",
+            r"driver_allow = set(['opencl.dll','igc64.dll','igdfcl64.dll','ze_loader.dll','ze_intel_gpu64.dll','ze_intel_gpu64_1.dll','ze_intel_gpu64_2.dll','libmmd.dll','intelocl64.dll','intelocl32.dll'])",
+            "",
+            r"def is_system(name: str) -> bool:",
+            r"  return name.upper().startswith(system_prefix)",
+            "",
+            r"def imports(dll_path: str):",
+            r"  pe = pefile.PE(dll_path)",
+            r"  deps = []",
+            r"  if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):",
+            r"    for entry in pe.DIRECTORY_ENTRY_IMPORT:",
+            r"      deps.append(entry.dll.decode(errors='ignore'))",
+            r"  return deps",
+            "",
+            r"present = set([f.lower() for f in os.listdir(native) if f.lower().endswith('.dll')])",
+            r"missing = {}",
+            r"driver = set()",
+            r"for f in os.listdir(native):",
+            r"  if not f.lower().endswith('.dll'):",
+            r"    continue",
+            r"  p = os.path.join(native, f)",
+            r"  try:",
+            r"    deps = imports(p)",
+            r"  except Exception:",
+            r"    continue",
+            r"  for dep in deps:",
+            r"    if not dep: continue",
+            r"    if is_system(dep): continue",
+            r"    d = dep.lower()",
+            r"    if d in driver_allow:",
+            r"      driver.add(d)",
+            r"      continue",
+            r"    if d not in present:",
+            r"      missing.setdefault(f, set()).add(dep)",
+            "",
+            r"if missing:",
+            r"  for k,v in missing.items():",
+            r"    print('Missing for', k, ':', ', '.join(sorted(v)))",
+            r"  raise SystemExit(1)",
+            r"print('Validation OK. Driver deps (not packaged):', ', '.join(sorted(driver)) if driver else '(none)')"
+          )
+          Set-Content -Path $py -Value $lines -Encoding UTF8
+          python $py
+
+      - name: Zip artifact (win-x64)
+        run: |
+          $ErrorActionPreference="Stop"
+          $out = Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR
+          Compress-Archive -Path "$out\*" -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "openvino-minruntime-win-x64.zip") -Force
+
+      - name: Upload artifact (win-x64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvino-minruntime-win-x64
+          path: openvino-minruntime-win-x64.zip
+
+  extract-osx-x64:
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download OpenVINO (macOS 10.15 x64)
+        run: |
+          set -euxo pipefail
+          curl -L "${OV_MAC_URL}" -o openvino_mac.tgz
+          ls -lh openvino_mac.tgz
+
+      - name: Extract OpenVINO
+        run: |
+          set -euxo pipefail
+          mkdir -p ov_mac
+          tar -xzf openvino_mac.tgz -C ov_mac
+          root="$(find ov_mac -maxdepth 1 -type d -name "m_openvino_toolkit_*" | head -n 1)"
+          test -n "$root"
+          echo "$root" > ov_mac_root.txt
+          echo "OV ROOT = $root"
+
+      - name: Prepare minimal runtime folder (seed + header + plugins.xml)
+        run: |
+          set -euxo pipefail
+          root="$(cat ov_mac_root.txt)"
+
+          ov_lib="$root/runtime/lib/intel64/Release"
+          tbb_lib="$root/runtime/3rdparty/tbb/lib"
+          hdr="$root/runtime/include/ie/c_api/ie_c_api.h"
+
+          test -d "$ov_lib"
+          test -d "$tbb_lib"
+          test -f "$hdr"
+
+          out="${OUT_DIR}"
+          native="$out/runtimes/osx-x64/native"
+          inc="$out/include/ie/c_api"
+          mkdir -p "$native" "$inc"
+
+          cp -f "$hdr" "$inc/"
+
+          # Seed: OpenVINO core + C API + ONNX/IR frontends (dylib) + CPU plugin/gapi preproc (so)
+          # (mac package contains versioned dylibs; copy all matching for these components)
+          cp -f "$ov_lib"/libopenvino*.dylib "$native/" || true
+          cp -f "$ov_lib"/libopenvino_c*.dylib "$native/" || true
+          cp -f "$ov_lib"/libopenvino_onnx_frontend*.dylib "$native/" || true
+          cp -f "$ov_lib"/libopenvino_ir_frontend*.dylib "$native/" || true
+          cp -f "$ov_lib"/libopenvino_intel_cpu_plugin.so "$native/" || true
+          cp -f "$ov_lib"/libopenvino_gapi_preproc.so "$native/" || true
+
+          # Seed TBB release dylibs (exclude debug)
+          find "$tbb_lib" -maxdepth 1 -type f -name "*.dylib" ! -name "*debug*" -exec cp -f {} "$native/" \;
+
+          # plugins.xml (local relative)
+          cat > "$native/plugins.xml" << 'EOF'
+          <ie>
+            <plugins>
+              <plugin name="CPU" location="libopenvino_intel_cpu_plugin.so"></plugin>
+            </plugins>
+          </ie>
+          EOF
+
+          echo "$ov_lib"  > ov_mac_ovlib.txt
+          echo "$tbb_lib" > ov_mac_tbblib.txt
+          echo "$native"  > ov_mac_native.txt
+
+      - name: Dependency closure (copy missing deps into native) + patch to @loader_path
+        run: |
+          set -euxo pipefail
+          ov_lib="$(cat ov_mac_ovlib.txt)"
+          tbb_lib="$(cat ov_mac_tbblib.txt)"
+          native="$(cat ov_mac_native.txt)"
+
+          # Dependency closure loop (otool -L)
+          changed=1
+          while [ $changed -eq 1 ]; do
+            changed=0
+            for f in "$native"/*.dylib "$native"/*.so; do
+              [ -f "$f" ] || continue
+              while read -r dep _; do
+                [ -z "$dep" ] && continue
+                case "$dep" in
+                  /System/*|/usr/lib/*) continue ;;
+                esac
+                base="$(basename "$dep")"
+                # if already present, ok
+                [ -f "$native/$base" ] && continue
+
+                # find in OpenVINO or TBB folders
+                src="$(find "$ov_lib" "$tbb_lib" -maxdepth 1 -type f -name "$base" | head -n 1 || true)"
+                if [ -n "$src" ] && [ -f "$src" ]; then
+                  cp -f "$src" "$native/$base"
+                  changed=1
+                else
+                  echo "Missing dependency: $dep (referenced by $(basename "$f"))"
+                  exit 1
+                fi
+              done < <(otool -L "$f" | tail -n +2)
+            done
+          done
+
+          # Patch all local deps to @loader_path
+          for f in "$native"/*.dylib "$native"/*.so; do
+            [ -f "$f" ] || continue
+            install_name_tool -add_rpath "@loader_path" "$f" || true
+            # set id for dylibs (ignore for .so)
+            install_name_tool -id "@rpath/$(basename "$f")" "$f" || true
+          done
+
+          for f in "$native"/*.dylib "$native"/*.so; do
+            [ -f "$f" ] || continue
+            while read -r dep _; do
+              [ -z "$dep" ] && continue
+              case "$dep" in
+                /System/*|/usr/lib/*) continue ;;
+              esac
+              base="$(basename "$dep")"
+              if [ -f "$native/$base" ]; then
+                install_name_tool -change "$dep" "@loader_path/$base" "$f" || true
+              fi
+            done < <(otool -L "$f" | tail -n +2)
+          done
+
+      - name: Validate macOS payload (no external OpenVINO/TBB absolute refs)
+        run: |
+          set -euxo pipefail
+          native="$(cat ov_mac_native.txt)"
+
+          for f in "$native"/*.dylib "$native"/*.so; do
+            [ -f "$f" ] || continue
+            while read -r dep _; do
+              [ -z "$dep" ] && continue
+              case "$dep" in
+                /System/*|/usr/lib/*) continue ;;
+              esac
+              # must be @loader_path after patching
+              if [[ "$dep" != @loader_path/* ]]; then
+                echo "ERROR: non-system dep is not @loader_path: $dep (in $(basename "$f"))"
+                exit 1
+              fi
+              base="$(basename "$dep")"
+              if [ ! -f "$native/$base" ]; then
+                echo "ERROR: referenced local dep missing: $base (in $(basename "$f"))"
+                exit 1
+              fi
+            done < <(otool -L "$f" | tail -n +2)
+          done
+
+          echo "macOS validation OK."
+
+      - name: Zip artifact (osx-x64)
+        run: |
+          set -euxo pipefail
+          ditto -c -k --sequesterRsrc --keepParent "${OUT_DIR}" "openvino-minruntime-osx-x64.zip"
+
+      - name: Upload artifact (osx-x64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvino-minruntime-osx-x64
+          path: openvino-minruntime-osx-x64.zip
+
+  merge-all:
+    runs-on: ubuntu-latest
+    needs: [extract-win-x64, extract-osx-x64]
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge to one zip
+        run: |
+          set -euxo pipefail
+          mkdir -p merged
+
+          unzip -q "artifacts/openvino-minruntime-win-x64/openvino-minruntime-win-x64.zip" -d merged
+          unzip -q "artifacts/openvino-minruntime-osx-x64/openvino-minruntime-osx-x64.zip" -d merged
+
+          test -f "merged/${OUT_DIR}/include/ie/c_api/ie_c_api.h"
+          test -d "merged/${OUT_DIR}/runtimes/win-x64/native"
+          test -d "merged/${OUT_DIR}/runtimes/osx-x64/native"
+
+          (cd merged && zip -r "../openvino-minruntime-all.zip" "${OUT_DIR}")
+
+      - name: Upload merged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvino-minruntime-all
+          path: openvino-minruntime-all.zip
