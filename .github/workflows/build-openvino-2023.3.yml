@@ -13,7 +13,7 @@ jobs:
             platform: windows
             url: https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/windows/w_openvino_toolkit_windows_2023.3.0.13775.ceeafaf64f3_x86_64.zip
             archive: openvino_win.zip
-          - os: macos-13
+          - os: macos-latest
             platform: macos
             url: https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/macos/m_openvino_toolkit_macos_10_15_2023.3.0.13775.ceeafaf64f3_x86_64.tgz
             archive: openvino_mac.tgz
@@ -35,11 +35,19 @@ jobs:
         run: |
           set -euxo pipefail
           rm -rf _src && mkdir -p _src
+
           if [[ "${{ matrix.platform }}" == "windows" ]]; then
-            bsdtar -xf "${{ matrix.archive }}" -C _src
+            # Windows 解压
+            if (Test-Path openvino_win.zip) {
+              Expand-Archive -Path openvino_win.zip -DestinationPath _src
+            } else {
+              tar -xf openvino_win.zip -C _src
+            }
           else
+            # macOS 和其他 Linux 环境解压
             tar -xzf "${{ matrix.archive }}" -C _src
           fi
+
           echo "=== _src top ==="
           ls -la _src
           echo "=== dirs depth<=3 ==="
@@ -379,5 +387,4 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openvino-min-runtime-${{ matrix.platform }}
-          path: dist/openvino-min-${{ matrix.platform }}
+          name: openvino
