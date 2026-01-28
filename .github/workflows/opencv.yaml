@@ -1,0 +1,158 @@
+name: Build Minimal OpenCvSharpExtern (Universal)
+
+on:
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build-arch:
+    name: Build for ${{ matrix.arch }}
+    # 使用最新的 runners: macos-13 是 Intel, macos-14 是 ARM64 (M1)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: macos-13
+            deployment_target: "10.15"
+          - arch: arm64
+            os: macos-14
+            deployment_target: "11.0"
+
+    steps:
+      - name: Checkout OpenCvSharp
+        uses: actions/checkout@v4
+        with:
+          repository: shimat/opencvsharp
+          path: opencvsharp
+
+      - name: Checkout OpenCV
+        uses: actions/checkout@v4
+        with:
+          repository: opencv/opencv
+          ref: 4.8.0 # 锁定版本
+          path: opencv
+
+      - name: Checkout OpenCV Contrib (Need Freetype)
+        uses: actions/checkout@v4
+        with:
+          repository: opencv/opencv_contrib
+          ref: 4.8.0
+          path: opencv_contrib
+
+      - name: Install Build Tools
+        run: |
+          brew install cmake ninja
+          # 安装静态库构建所需的依赖，防止编译时找不到头文件
+          brew install ffmpeg freetype harfbuzz
+
+      - name: Configure OpenCV (Minimal Static)
+        run: |
+          mkdir -p opencv/build
+          cd opencv/build
+          
+          # 核心裁剪配置
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=../install \
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }} \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DOPENCV_EXTRA_MODULES_PATH=../../opencv_contrib/modules \
+            \
+            -DBUILD_opencv_apps=OFF \
+            -DBUILD_opencv_python3=OFF \
+            -DBUILD_opencv_java=OFF \
+            -DBUILD_opencv_world=OFF \
+            \
+            -DBUILD_opencv_dnn=OFF \
+            -DBUILD_opencv_ml=OFF \
+            -DBUILD_opencv_flann=OFF \
+            -DBUILD_opencv_photo=OFF \
+            -DBUILD_opencv_stitching=OFF \
+            -DBUILD_opencv_gapi=OFF \
+            -DBUILD_opencv_highgui=OFF \
+            -DBUILD_opencv_calib3d=OFF \
+            -DBUILD_opencv_features2d=OFF \
+            -DBUILD_opencv_objdetect=OFF \
+            \
+            -DBUILD_ZLIB=ON \
+            -DBUILD_JPEG=ON \
+            -DBUILD_PNG=ON \
+            -DBUILD_TIFF=ON \
+            -DBUILD_WEBP=ON \
+            -DBUILD_OPENEXR=ON \
+            \
+            -DWITH_FFMPEG=ON \
+            -DWITH_FREETYPE=ON \
+            -DWITH_HARFBUZZ=ON \
+            -DWITH_LAPACK=OFF \
+            -DWITH_EIGEN=OFF \
+            -DWITH_OPENCL=OFF \
+            -DWITH_ITT=OFF \
+            ..
+
+      - name: Build OpenCV Static
+        run: |
+          cd opencv/build
+          ninja
+          ninja install
+
+      - name: Configure OpenCvSharpExtern
+        run: |
+          mkdir -p opencvsharp/src/OpenCvSharpExtern/build
+          cd opencvsharp/src/OpenCvSharpExtern/build
+          
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }} \
+            -DOpenCV_DIR=$(pwd)/../../../../opencv/build/install/lib/cmake/opencv4 \
+            ..
+
+      - name: Build OpenCvSharpExtern
+        run: |
+          cd opencvsharp/src/OpenCvSharpExtern/build
+          ninja
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libOpenCvSharpExtern-${{ matrix.arch }}
+          path: opencvsharp/src/OpenCvSharpExtern/build/libOpenCvSharpExtern.dylib
+
+  create-universal-binary:
+    needs: build-arch
+    runs-on: macos-latest
+    steps:
+      - name: Download x64 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: libOpenCvSharpExtern-x86_64
+          path: x64
+
+      - name: Download arm64 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: libOpenCvSharpExtern-arm64
+          path: arm64
+
+      - name: Create Universal Binary (Lipo)
+        run: |
+          mkdir output
+          lipo -create \
+            x64/libOpenCvSharpExtern.dylib \
+            arm64/libOpenCvSharpExtern.dylib \
+            -output output/libOpenCvSharpExtern.dylib
+            
+          echo "=== Verify Architectures ==="
+          lipo -info output/libOpenCvSharpExtern.dylib
+          
+          echo "=== Verify Dependencies (Should contain minimal system libs) ==="
+          otool -L output/libOpenCvSharpExtern.dylib
+
+      - name: Upload Final Universal Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: libOpenCvSharpExtern-Universal
+          path: output/libOpenCvSharpExtern.dylib
