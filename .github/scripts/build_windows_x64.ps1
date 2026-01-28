@@ -1,16 +1,16 @@
 # .github/scripts/build_windows_x64.ps1
 #requires -Version 7.0
-$ErrorActionPreference = "Stop"
-
-function Write-Info($msg) { Write-Host "==> $msg" }
-
 param(
   [string]$OpenCvVersion = $env:OPENCV_VERSION,
   [string]$OpenCvSharpRef = $env:OPENCVSHARP_REF,
   [string]$BuildList = $env:BUILD_LIST
 )
 
-if ([string]::IsNullOrWhiteSpace($OpenCvVersion)) { $OpenCvVersion = "4.11.0" }
+$ErrorActionPreference = "Stop"
+
+function Write-Info($msg) { Write-Host "==> $msg" }
+
+if ([string]::IsNullOrWhiteSpace($OpenCvVersion)) { $OpenCvVersion = "4.10.0" }
 if ([string]::IsNullOrWhiteSpace($OpenCvSharpRef)) { $OpenCvSharpRef = "main" }
 if ([string]::IsNullOrWhiteSpace($BuildList)) { $BuildList = "core,imgproc,videoio" }
 
@@ -43,7 +43,6 @@ Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    (Join-Path $Src "
 # Patch OpenCvSharpExtern to minimal sources: core/imgproc/videoio
 # ------------------------------------------------------------
 Write-Info "Patch OpenCvSharpExtern CMakeLists to minimal sources (core/imgproc/videoio)"
-
 $pyPatchCMake = @"
 import pathlib, re, os
 root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
@@ -109,7 +108,6 @@ cmake --build $OpenCvB --config Release
 # ------------------------------------------------------------
 Write-Info "Auto-filter include_opencv.h based on compile include roots"
 $env:BUILD_LIST = $BuildList
-
 $pyFilter = @"
 import pathlib, re, os
 root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
