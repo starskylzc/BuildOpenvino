@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 
 function Write-Info($msg) { Write-Host "==> $msg" }
 
-if ([string]::IsNullOrWhiteSpace($OpenCvVersion)) { $OpenCvVersion = "4.10.0" }
+if ([string]::IsNullOrWhiteSpace($OpenCvVersion)) { $OpenCvVersion = "4.11.0" }
 if ([string]::IsNullOrWhiteSpace($OpenCvSharpRef)) { $OpenCvSharpRef = "main" }
 if ([string]::IsNullOrWhiteSpace($BuildList)) { $BuildList = "core,imgproc,videoio" }
 
