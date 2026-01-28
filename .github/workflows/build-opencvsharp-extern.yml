@@ -9,13 +9,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tools (if missing)
+      - name: Install tools
+        shell: bash
         run: |
           set -euxo pipefail
-          which cmake || brew install cmake
-          which ninja || brew install ninja
+          brew update
+          brew install cmake ninja
 
       - name: Build x86_64 slice (10.15)
+        shell: bash
         run: |
           set -euxo pipefail
           chmod +x .github/scripts/build_macos_slice.sh
@@ -33,13 +35,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tools (if missing)
+      - name: Install tools
+        shell: bash
         run: |
           set -euxo pipefail
-          which cmake || brew install cmake
-          which ninja || brew install ninja
+          brew update
+          brew install cmake ninja
 
       - name: Build arm64 slice (11.0)
+        shell: bash
         run: |
           set -euxo pipefail
           chmod +x .github/scripts/build_macos_slice.sh
@@ -60,15 +64,18 @@ jobs:
         with:
           name: osx-x64-slice
           path: slices/x86_64
+
       - uses: actions/download-artifact@v4
         with:
           name: osx-arm64-slice
           path: slices/arm64
 
       - name: Create universal dylib
+        shell: bash
         run: |
           set -euxo pipefail
           mkdir -p out
+
           lipo -create \
             slices/x86_64/libOpenCvSharpExtern.dylib \
             slices/arm64/libOpenCvSharpExtern.dylib \
