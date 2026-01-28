@@ -7,7 +7,6 @@ set -euo pipefail
 ARCH="$1"
 DEPLOY="$2"
 
-# 可通过 workflow 传入覆盖
 OPENCV_VERSION="${OPENCV_VERSION:-4.10.0}"
 OPENCVSHARP_REF="${OPENCVSHARP_REF:-main}"
 BUILD_LIST="${BUILD_LIST:-core,imgproc,videoio}"
@@ -41,26 +40,17 @@ clone_or_update "https://github.com/opencv/opencv_contrib.git" "$SRC/opencv_cont
 clone_or_update "https://github.com/shimat/opencvsharp.git"    "$SRC/opencvsharp"    "$OPENCVSHARP_REF"
 
 # ------------------------------------------------------------
-# Patch OpenCvSharpExtern to be minimal: only core/imgproc/videoio wrappers
-# and remove dependency on highgui headers (since we won't build highgui).
+# Patch OpenCvSharpExtern to build only what you use:
+#   - core.cpp, imgproc.cpp, videoio.cpp
 # ------------------------------------------------------------
-echo "==> Patch OpenCvSharpExtern for minimal build (core,imgproc,videoio) and remove highgui include"
+echo "==> Patch OpenCvSharpExtern CMakeLists to minimal sources (core/imgproc/videoio)"
 
-# 1) 注释掉 highgui_c.h 的 include（否则 OpenCV 裁剪掉 highgui 后必然找不到该头文件）
-INCLUDE_H="$SRC/opencvsharp/src/OpenCvSharpExtern/include_opencv.h"
-if [[ -f "$INCLUDE_H" ]]; then
-  # macOS sed 需要 -i ''
-  sed -i '' 's@^[[:space:]]*#include[[:space:]]*<opencv2/highgui/highgui_c.h>@// #include <opencv2/highgui/highgui_c.h>@' "$INCLUDE_H" || true
-fi
-
-# 2) 裁剪 OpenCvSharpExtern/CMakeLists.txt：只编译 core.cpp imgproc.cpp videoio.cpp
 python3 - <<PY
 import pathlib, re
 
 cmake = pathlib.Path(r"$SRC/opencvsharp") / "src" / "OpenCvSharpExtern" / "CMakeLists.txt"
 text = cmake.read_text(encoding="utf-8", errors="ignore")
 
-# 找到 add_library(OpenCvSharpExtern SHARED ... ) 块并替换为最小源文件列表
 pattern = re.compile(r"add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*", re.S)
 m = pattern.search(text)
 if not m:
@@ -79,7 +69,7 @@ print("Patched:", cmake)
 PY
 
 # ------------------------------------------------------------
-# 1) Build OpenCV (STATIC, minimal modules, minimize deps)
+# Build OpenCV (STATIC, minimal modules, minimize deps)
 # ------------------------------------------------------------
 echo "==> Build OpenCV static ($ARCH, macOS >= $DEPLOY)"
 cmake -S "$SRC/opencv" -B "$B/opencv" -G Ninja \
@@ -112,9 +102,61 @@ cmake -S "$SRC/opencv" -B "$B/opencv" -G Ninja \
 ninja -C "$B/opencv"
 
 # ------------------------------------------------------------
-# 2) Build OpenCvSharpExtern
-#    IMPORTANT:
-#      - Use OpenCV BUILD TREE to avoid missing installed 3rdparty .a (e.g. libprotobuf)
+# Auto-filter include_opencv.h:
+#   - Keep opencv2 headers that exist in your trimmed OpenCV tree
+#   - Comment out includes that do NOT exist (e.g. highgui, shape, etc.)
+# This avoids "file not found" without guessing what's needed.
+# ------------------------------------------------------------
+echo "==> Auto-filter include_opencv.h based on existing OpenCV headers"
+
+python3 - <<PY
+import pathlib, re
+
+opencv_inc = pathlib.Path(r"$SRC/opencv") / "include" / "opencv2"
+contrib_inc = pathlib.Path(r"$SRC/opencv_contrib") / "modules"
+hdr = pathlib.Path(r"$SRC/opencvsharp") / "src" / "OpenCvSharpExtern" / "include_opencv.h"
+
+text = hdr.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+def header_exists(rel: str) -> bool:
+    # rel: like opencv2/shape.hpp or opencv2/highgui/highgui_c.h
+    if not rel.startswith("opencv2/"):
+        return True
+    p = rel[len("opencv2/"):]
+    # main opencv include
+    if (opencv_inc / p).exists():
+        return True
+    # contrib headers can be under modules/<name>/include/opencv2/...
+    # We'll search quickly for the exact tail path under contrib modules.
+    for m in contrib_inc.glob("*"):
+        cand = m / "include" / "opencv2" / p
+        if cand.exists():
+            return True
+    return False
+
+out = []
+changed = 0
+
+pat = re.compile(r'^\s*#\s*include\s*<([^>]+)>\s*$')
+for line in text:
+    m = pat.match(line)
+    if not m:
+        out.append(line)
+        continue
+    inc = m.group(1).strip()
+    if inc.startswith("opencv2/") and not header_exists(inc):
+        out.append("// [auto-disabled missing header] " + line)
+        changed += 1
+    else:
+        out.append(line)
+
+hdr.write_text("\n".join(out) + "\n", encoding="utf-8")
+print(f"Filtered include_opencv.h: disabled {changed} missing includes")
+PY
+
+# ------------------------------------------------------------
+# Build OpenCvSharpExtern
+#   - Use OpenCV BUILD TREE (fixes missing installed 3rdparty .a like libprotobuf)
 # ------------------------------------------------------------
 echo "==> Build OpenCvSharpExtern ($ARCH)"
 cmake -S "$SRC/opencvsharp/src" -B "$B/opencvsharp" -G Ninja \
