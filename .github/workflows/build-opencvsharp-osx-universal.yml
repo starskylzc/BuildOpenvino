@@ -1,0 +1,85 @@
+name: build-opencvsharp-osx-universal
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_x64:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools (if missing)
+        run: |
+          set -euxo pipefail
+          which cmake || brew install cmake
+          which ninja || brew install ninja
+
+      - name: Build x86_64 slice (10.15)
+        run: |
+          set -euxo pipefail
+          chmod +x .github/scripts/build_macos_slice.sh
+          OPENCV_VERSION=4.10.0 OPENCVSHARP_REF=main BUILD_LIST=core,imgproc,videoio \
+            .github/scripts/build_macos_slice.sh x86_64 10.15
+
+      - name: Upload x86_64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: osx-x64-slice
+          path: _work/out-x86_64/final/libOpenCvSharpExtern.dylib
+
+  build_arm64:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools (if missing)
+        run: |
+          set -euxo pipefail
+          which cmake || brew install cmake
+          which ninja || brew install ninja
+
+      - name: Build arm64 slice (11.0)
+        run: |
+          set -euxo pipefail
+          chmod +x .github/scripts/build_macos_slice.sh
+          OPENCV_VERSION=4.10.0 OPENCVSHARP_REF=main BUILD_LIST=core,imgproc,videoio \
+            .github/scripts/build_macos_slice.sh arm64 11.0
+
+      - name: Upload arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: osx-arm64-slice
+          path: _work/out-arm64/final/libOpenCvSharpExtern.dylib
+
+  lipo_universal:
+    runs-on: macos-15
+    needs: [build_x64, build_arm64]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: osx-x64-slice
+          path: slices/x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: osx-arm64-slice
+          path: slices/arm64
+
+      - name: Create universal dylib
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          lipo -create \
+            slices/x86_64/libOpenCvSharpExtern.dylib \
+            slices/arm64/libOpenCvSharpExtern.dylib \
+            -output out/libOpenCvSharpExtern.dylib
+
+          install_name_tool -id "@rpath/libOpenCvSharpExtern.dylib" out/libOpenCvSharpExtern.dylib || true
+          lipo -info out/libOpenCvSharpExtern.dylib
+          otool -L out/libOpenCvSharpExtern.dylib
+
+      - name: Upload universal artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libOpenCvSharpExtern-osx-universal
+          path: out/libOpenCvSharpExtern.dylib
