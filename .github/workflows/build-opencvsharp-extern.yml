@@ -90,3 +90,33 @@ jobs:
         with:
           name: libOpenCvSharpExtern-osx-universal
           path: out/libOpenCvSharpExtern.dylib
+
+  build_windows_x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 关键：让 cl/link 环境就绪（MSVC）
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install tools (cmake/ninja)
+        shell: pwsh
+        run: |
+          choco install -y ninja cmake
+          cmake --version
+          ninja --version
+          python --version
+
+      - name: Build OpenCvSharpExtern (win-x64)
+        shell: pwsh
+        run: |
+          $env:OPENCV_VERSION = "4.10.0"
+          $env:OPENCVSHARP_REF = "main"
+          $env:BUILD_LIST = "core,imgproc,videoio"
+          pwsh -File .github/scripts/build_windows_x64.ps1
+
+      - name: Upload win-x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCvSharpExtern-win-x64
+          path: _work/out-win-x64/final/OpenCvSharpExtern.dll
