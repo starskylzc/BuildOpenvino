@@ -20,6 +20,31 @@ function Assert-Exists([string]$p, [string]$msg) {
   if (!(Test-Path $p)) { throw $msg }
 }
 
+function Ensure-GeneratedOpenCvHeader([string]$OpenCvBuildDir, [string]$HeaderName) {
+  # Search for generated headers in build tree and copy into build/include/opencv2
+  $dstDir = Join-Path $OpenCvBuildDir "include\opencv2"
+  New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+
+  $found = Get-ChildItem -Path $OpenCvBuildDir -Recurse -File -Filter $HeaderName -ErrorAction SilentlyContinue |
+           Select-Object -First 1
+
+  if ($null -eq $found) {
+    # Provide some debug hints
+    Info "DEBUG: Could not find '$HeaderName' under $OpenCvBuildDir"
+    Info "DEBUG: Listing candidates under build tree (top 4 levels) ..."
+    Get-ChildItem -Path $OpenCvBuildDir -Recurse -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match 'opencv_modules\.hpp|cvconfig\.h' } |
+      Select-Object -First 50 FullName |
+      ForEach-Object { Write-Host $_.FullName }
+
+    throw "Generated header '$HeaderName' not found under OpenCV build tree: $OpenCvBuildDir"
+  }
+
+  $dst = Join-Path $dstDir $HeaderName
+  Copy-Item -Force $found.FullName $dst
+  Info "Copied generated header: $($found.FullName) -> $dst"
+}
+
 if ([string]::IsNullOrWhiteSpace($OpenCvVersion))  { $OpenCvVersion  = "4.11.0" }
 if ([string]::IsNullOrWhiteSpace($OpenCvSharpRef)) { $OpenCvSharpRef = "main" }
 if ([string]::IsNullOrWhiteSpace($BuildList))      { $BuildList      = "core,imgproc,videoio" }
@@ -91,6 +116,14 @@ Info "Build OpenCV"
 cmake --build $OpenCvB --config Release
 
 # -----------------------------
+# 1.1) Ensure generated OpenCV headers exist under build/include/opencv2
+#      Fix for: opencv2/opencv.hpp includes opencv2/opencv_modules.hpp (generated)
+# -----------------------------
+Info "Ensure generated OpenCV headers are under $OpenCvB/include/opencv2"
+Ensure-GeneratedOpenCvHeader $OpenCvB "opencv_modules.hpp"
+Ensure-GeneratedOpenCvHeader $OpenCvB "cvconfig.h"
+
+# -----------------------------
 # 2) Auto-filter include_opencv.h (optional but recommended)
 #    Include roots considered:
 #      opencv/include
@@ -155,10 +188,6 @@ python -c $pyFilter
 
 # -----------------------------
 # 3) Build OpenCvSharpExtern.dll with minimal CMake project (bypass upstream)
-#    Key goals:
-#      - Never write backslashes to CMake strings (avoid \a)
-#      - Do NOT rely on OpenCV_INCLUDE_DIRS (can be empty in some setups)
-#      - Explicitly provide required include roots
 # -----------------------------
 Info "Generate minimal CMake project for OpenCvSharpExtern (bypass upstream CMakeLists)"
 $ExternSrc = Join-Path $SharpSrc "src\OpenCvSharpExtern"
@@ -168,7 +197,6 @@ $MinProj   = Join-Path $Bld "opencvsharp_minproj"
 $MinBuild  = Join-Path $Bld "opencvsharp_minbuild"
 New-Item -ItemType Directory -Force -Path $MinProj,$MinBuild | Out-Null
 
-# Minimal sources strictly matching your need
 $CoreCpp    = Join-Path $ExternSrc "core.cpp"
 $ImgProcCpp = Join-Path $ExternSrc "imgproc.cpp"
 $VideoIoCpp = Join-Path $ExternSrc "videoio.cpp"
@@ -177,7 +205,6 @@ foreach ($f in @($CoreCpp,$ImgProcCpp,$VideoIoCpp)) {
   Assert-Exists $f "Missing expected source: $f"
 }
 
-# Convert paths to CMake-friendly (forward slashes)
 $OpenCvB_CMake     = To-CMakePath $OpenCvB
 $OpenCvSrc_CMake   = To-CMakePath $OpenCvSrc
 $ExternSrc_CMake   = To-CMakePath $ExternSrc
@@ -185,10 +212,8 @@ $CoreCpp_CMake     = To-CMakePath $CoreCpp
 $ImgProcCpp_CMake  = To-CMakePath $ImgProcCpp
 $VideoIoCpp_CMake  = To-CMakePath $VideoIoCpp
 
-# Build include dir (generated headers often here)
 $OpenCvBuildInclude_CMake = "$OpenCvB_CMake/include"
 
-# Optional module include roots (only add if you want; these do NOT affect runtime size)
 $moduleIncludeLines = ""
 foreach ($m in ($BuildList -split ",")) {
   $mm = $m.Trim()
@@ -204,7 +229,6 @@ project(OpenCvSharpExternMin LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Prefer config package from our OpenCV build tree ONLY
 set(OpenCV_DIR "$OpenCvB_CMake")
 find_package(OpenCV REQUIRED CONFIG NO_DEFAULT_PATH)
 
@@ -214,10 +238,6 @@ add_library(OpenCvSharpExtern SHARED
   "$VideoIoCpp_CMake"
 )
 
-# ---- Required include roots ----
-# - OpenCvSharpExtern includes include_opencv.h which includes <opencv2/opencv.hpp>
-# - opencv.hpp is under: <opencv_src>/include/opencv2/opencv.hpp
-# - generated headers may be under: <opencv_build>/include/opencv2/...
 target_include_directories(OpenCvSharpExtern PRIVATE
   "$ExternSrc_CMake"
   "$ExternSrc_CMake/include"
@@ -228,13 +248,9 @@ $moduleIncludeLines
 )
 
 target_compile_definitions(OpenCvSharpExtern PRIVATE OpenCvSharpExtern_EXPORTS)
-
-# link OpenCV libs discovered by config package
 target_link_libraries(OpenCvSharpExtern PRIVATE ${OpenCV_LIBS})
 
-set_target_properties(OpenCvSharpExtern PROPERTIES
-  OUTPUT_NAME "OpenCvSharpExtern"
-)
+set_target_properties(OpenCvSharpExtern PROPERTIES OUTPUT_NAME "OpenCvSharpExtern")
 "@
 
 Set-Content -Path (Join-Path $MinProj "CMakeLists.txt") -Value $CMakeLists -Encoding UTF8
