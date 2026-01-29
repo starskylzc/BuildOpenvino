@@ -28,11 +28,6 @@ function Ensure-GeneratedOpenCvHeader([string]$OpenCvBuildDir, [string]$HeaderNa
            Select-Object -First 1
 
   if ($null -eq $found) {
-    Info "DEBUG: Could not find '$HeaderName' under $OpenCvBuildDir"
-    Get-ChildItem -Path $OpenCvBuildDir -Recurse -File -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -match 'opencv_modules\.hpp|cvconfig\.h' } |
-      Select-Object -First 50 FullName |
-      ForEach-Object { Write-Host $_.FullName }
     throw "Generated header '$HeaderName' not found under OpenCV build tree: $OpenCvBuildDir"
   }
 
@@ -42,6 +37,7 @@ function Ensure-GeneratedOpenCvHeader([string]$OpenCvBuildDir, [string]$HeaderNa
 }
 
 function Write-MinimalIncludeOpenCv([string]$HdrPath) {
+  # 关键修复：补上 logger.hpp，让 cv::utils::logging 有声明
   $content = @'
 #pragma once
 
@@ -79,11 +75,15 @@ function Write-MinimalIncludeOpenCv([string]$HdrPath) {
 #include <opencv2/core/types.hpp>
 #include <opencv2/core/utility.hpp>
 
+// ✅ Fix for: cv::utils::logging not found (OpenCvSharpExtern/core.h uses it)
+#include <opencv2/core/utils/logger.hpp>
+
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgproc/types_c.h>
 #include <opencv2/imgproc/imgproc_c.h>
 
 #include <opencv2/videoio.hpp>
+
 #include <opencv2/core/core_c.h>
 
 // ===== STL =====
@@ -114,6 +114,7 @@ function Patch-RemoveOpenCvHpp([string]$ExternDir) {
   # Replace any direct include of opencv2/opencv.hpp in OpenCvSharpExtern sources
   $replacement = @'
 #include <opencv2/core.hpp>
+#include <opencv2/core/utils/logger.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 '@.TrimEnd()
@@ -126,8 +127,6 @@ function Patch-RemoveOpenCvHpp([string]$ExternDir) {
     if ([string]::IsNullOrWhiteSpace($txt)) { continue }
 
     $new = $txt
-
-    # handle both <> and "" forms
     $new = [regex]::Replace($new, '^\s*#\s*include\s*<opencv2/opencv\.hpp>\s*$', $replacement, "Multiline")
     $new = [regex]::Replace($new, '^\s*#\s*include\s*"opencv2/opencv\.hpp"\s*$', $replacement, "Multiline")
 
@@ -145,12 +144,10 @@ if ([string]::IsNullOrWhiteSpace($OpenCvSharpRef)) { $OpenCvSharpRef = "main" }
 if ([string]::IsNullOrWhiteSpace($BuildList))      { $BuildList      = "core,imgproc,videoio" }
 
 $Workspace = ($env:GITHUB_WORKSPACE ?? (Get-Location).Path)
-
 $Root = Join-Path $Workspace "_work"
 $Src  = Join-Path $Root "src"
 $Bld  = Join-Path $Root "build-win-x64"
 $Out  = Join-Path $Root "out-win-x64"
-
 New-Item -ItemType Directory -Force -Path $Src,$Bld,$Out | Out-Null
 
 Info "Tool versions"
@@ -176,7 +173,7 @@ Clone-Or-Update "https://github.com/opencv/opencv_contrib.git" $Contrib   $OpenC
 Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    $SharpSrc  $OpenCvSharpRef
 
 # -----------------------------
-# 1) Build OpenCV
+# 1) Build OpenCV (STATIC, minimal modules, minimal external deps)
 # -----------------------------
 $OpenCvB = Join-Path $Bld "opencv"
 New-Item -ItemType Directory -Force -Path $OpenCvB | Out-Null
@@ -210,19 +207,19 @@ cmake -S $OpenCvSrc -B $OpenCvB -G Ninja `
 Info "Build OpenCV"
 cmake --build $OpenCvB --config Release
 
+# 生成头复制（有些 OpenCV 配置会把它们生成在 build 根目录 / opencv2 下）
 Info "Ensure generated OpenCV headers are under $OpenCvB/include/opencv2"
 Ensure-GeneratedOpenCvHeader $OpenCvB "opencv_modules.hpp"
 Ensure-GeneratedOpenCvHeader $OpenCvB "cvconfig.h"
 
 # -----------------------------
-# 2) Patch OpenCvSharpExtern headers/sources to avoid opencv.hpp
+# 2) Patch OpenCvSharpExtern to avoid opencv.hpp, keep minimal include_opencv.h
 # -----------------------------
 $ExternDir = Join-Path $SharpSrc "src\OpenCvSharpExtern"
 Assert-Exists $ExternDir "OpenCvSharpExtern dir missing: $ExternDir"
 
 $ExternInclude = Join-Path $ExternDir "include_opencv.h"
 Write-MinimalIncludeOpenCv $ExternInclude
-
 Patch-RemoveOpenCvHpp $ExternDir
 
 # -----------------------------
@@ -247,10 +244,8 @@ $ExternDir_CMake   = To-CMakePath $ExternDir
 $CoreCpp_CMake     = To-CMakePath $CoreCpp
 $ImgProcCpp_CMake  = To-CMakePath $ImgProcCpp
 $VideoIoCpp_CMake  = To-CMakePath $VideoIoCpp
-
 $OpenCvBuildInclude_CMake = "$OpenCvB_CMake/include"
 
-# keep include dirs minimal and deterministic
 $CMakeLists = @"
 cmake_minimum_required(VERSION 3.18)
 project(OpenCvSharpExternMin LANGUAGES C CXX)
