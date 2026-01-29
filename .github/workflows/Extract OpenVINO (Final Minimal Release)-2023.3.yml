@@ -25,7 +25,6 @@ jobs:
           mkdir -p extracted_mac
           tar -xzf downloads/mac.tgz -C extracted_mac
 
-          # 获取动态根目录名
           WIN_ROOT=$(find extracted_win -maxdepth 1 -type d -name "w_openvino*" | head -n 1)
           MAC_ROOT=$(find extracted_mac -maxdepth 1 -type d -name "m_openvino*" | head -n 1)
 
@@ -52,10 +51,9 @@ jobs:
 
           # 2. 插件 (仅保留 Intel GPU)
           cp "$SRC_BIN/openvino_intel_gpu_plugin.dll" "$DST/"
-          # GPU 编译缓存配置 (推荐保留，否则初始化很慢)
           [ -f "$SRC_BIN/cache.json" ] && cp "$SRC_BIN/cache.json" "$DST/"
 
-          # 3. [严格精简] TBB 依赖库
+          # 3. 最小 TBB
           echo ">>> Copying Minimal TBB (No bind/proxy/debug)..."
           cp "$SRC_TBB"/tbb12.dll "$DST/"
           cp "$SRC_TBB"/tbbmalloc.dll "$DST/"
@@ -64,7 +62,7 @@ jobs:
           mkdir -p "$DST/include"
           cp "$SRC_INC/ie_c_api.h" "$DST/include/"
 
-          # 5. 生成 Windows 专用 plugins.xml
+          # 5. 生成 Windows plugins.xml
           echo ">>> Generating Windows plugins.xml..."
           cat <<EOF > "$DST/plugins.xml"
           <ie>
@@ -75,8 +73,9 @@ jobs:
           </ie>
           EOF
 
-      # --- Mac 处理 (CPU Only + ONNX Only + Minimal TBB + CLEAN names + otool-driven patch) ---
-      - name: Process Mac Runtime (Clean names, no symlink, no 2330)
+      # --- Mac 处理 (CPU Only + ONNX Only + Minimal TBB + Patch)
+      #     方案A：只保留实体 libopenvino_onnx_frontend.2330.dylib（非软链接）
+      - name: Process Mac Runtime (CPU + ONNX, keep only libopenvino_onnx_frontend.2330.dylib real file)
         run: |
           set -euxo pipefail
           mkdir -p final_output/mac
@@ -86,13 +85,13 @@ jobs:
           SRC_INC="$MAC_ROOT/runtime/include/ie/c_api"
           DST="final_output/mac"
 
-          echo ">>> Copying Mac Libraries (REAL files only, no symlinks)..."
-          # 1) 只复制实体库（.2023.3.0.dylib），不要复制 .dylib / .2330.dylib 的软链接
+          echo ">>> Copying Mac Libraries (REAL files only)..."
+          # 1) 复制实体库（.2023.3.0.dylib）
           cp "$SRC_LIB/libopenvino.2023.3.0.dylib" "$DST/"
           cp "$SRC_LIB/libopenvino_c.2023.3.0.dylib" "$DST/"
           cp "$SRC_LIB/libopenvino_onnx_frontend.2023.3.0.dylib" "$DST/"
 
-          # 2) CPU 插件（一般是 .so）
+          # 2) CPU 插件（通常是 .so）
           CPU_PLUGIN=$(find "$SRC_LIB" -maxdepth 1 -type f \( -name "libopenvino_intel_cpu_plugin*.so" -o -name "libopenvino_intel_cpu_plugin*.dylib" \) | head -n 1)
           if [[ -z "$CPU_PLUGIN" ]]; then
             echo "ERROR: CPU plugin not found in $SRC_LIB"
@@ -102,7 +101,7 @@ jobs:
           cp "$CPU_PLUGIN" "$DST/"
           CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
 
-          # 3) 最小 TBB（你要求需要）
+          # 3) 最小 TBB
           echo ">>> Copying Minimal TBB (Core + Malloc Only)..."
           cp "$SRC_TBB/libtbb.12.dylib" "$DST/"
           cp "$SRC_TBB/libtbbmalloc.2.dylib" "$DST/"
@@ -111,15 +110,20 @@ jobs:
           mkdir -p "$DST/include"
           cp "$SRC_INC/ie_c_api.h" "$DST/include/"
 
-          # 5) 进入 DST 做“干净改名 + otool 精确 patch”
           cd "$DST"
 
-          echo ">>> Renaming dylibs to CLEAN names..."
+          echo ">>> Renaming dylibs (clean core, ONNX frontend => 2330 real file)..."
+          # core / c api：干净名（不带 2330）
           mv -f "libopenvino.2023.3.0.dylib" "libopenvino.dylib"
           mv -f "libopenvino_c.2023.3.0.dylib" "libopenvino_c.dylib"
-          mv -f "libopenvino_onnx_frontend.2023.3.0.dylib" "libopenvino_onnx_frontend.dylib"
 
-          # 6) 生成 Mac 专用 plugins.xml（写干净名/真实插件名）
+          # onnx frontend：只保留 2330 名（实体文件，不是软链接）
+          mv -f "libopenvino_onnx_frontend.2023.3.0.dylib" "libopenvino_onnx_frontend.2330.dylib"
+
+          # 确保目录里没有“干净名 onnx frontend”
+          rm -f "libopenvino_onnx_frontend.dylib" || true
+
+          # 5) plugins.xml（CPU）
           echo ">>> Generating Mac plugins.xml..."
           cat <<EOF > "plugins.xml"
           <ie>
@@ -130,19 +134,20 @@ jobs:
           </ie>
           EOF
 
-          echo ">>> Pre-Verify (names):"
+          echo ">>> Pre-Verify files:"
           ls -la libopenvino*.dylib libtbb*.dylib "$CPU_PLUGIN_NAME" plugins.xml
 
-          echo ">>> Patching Mac binaries for local execution (CLEAN, otool-driven)..."
+          # 6) Patch：全本地加载 @loader_path
+          echo ">>> Patching Mac binaries for local execution (@loader_path)..."
           LIBS=$(ls *.dylib *.so 2>/dev/null || true)
 
-          # (1) 先把每个库的 install-id 固定为 @loader_path/自身文件名
+          # (1) set install-id
           for LIB in $LIBS; do
             chmod +w "$LIB" || true
             install_name_tool -id "@loader_path/$LIB" "$LIB" || true
           done
 
-          # (2) 再逐库读取 otool -L 的真实依赖字符串，精确 -change
+          # (2) otool 驱动精确修补依赖
           for LIB in $LIBS; do
             echo "---- patch deps for: $LIB ----"
             DEPS=$(otool -L "$LIB" | tail -n +2 | awk '{print $1}' | grep -v "^/usr/lib/" | grep -v "^/System/" || true)
@@ -150,43 +155,35 @@ jobs:
             for DEP_PATH in $DEPS; do
               DEP_NAME=$(basename "$DEP_PATH")
 
-              # OpenVINO 旧名 -> 干净名（无论 DEP_PATH 原来是什么形式，都精确替换）
+              # libopenvino（旧名 -> 干净名）
               if [[ "$DEP_NAME" == "libopenvino.2330.dylib" || "$DEP_NAME" == "libopenvino.2023.3.0.dylib" ]]; then
                 install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino.dylib" "$LIB" || true
-                echo "  fixed: $DEP_NAME -> libopenvino.dylib"
                 continue
               fi
 
+              # libopenvino_c（旧名 -> 干净名）
               if [[ "$DEP_NAME" == "libopenvino_c.2330.dylib" || "$DEP_NAME" == "libopenvino_c.2023.3.0.dylib" ]]; then
                 install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino_c.dylib" "$LIB" || true
-                echo "  fixed: $DEP_NAME -> libopenvino_c.dylib"
                 continue
               fi
 
-              if [[ "$DEP_NAME" == "libopenvino_onnx_frontend.2330.dylib" || "$DEP_NAME" == "libopenvino_onnx_frontend.2023.3.0.dylib" ]]; then
-                install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino_onnx_frontend.dylib" "$LIB" || true
-                echo "  fixed: $DEP_NAME -> libopenvino_onnx_frontend.dylib"
+              # ONNX frontend：不提供干净名，只提供 2330 名（旧名 -> 2330）
+              if [[ "$DEP_NAME" == "libopenvino_onnx_frontend.dylib" || "$DEP_NAME" == "libopenvino_onnx_frontend.2023.3.0.dylib" || "$DEP_NAME" == "libopenvino_onnx_frontend.2330.dylib" ]]; then
+                install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino_onnx_frontend.2330.dylib" "$LIB" || true
                 continue
               fi
 
-              # 通用规则：只要本目录存在同名文件，就改成 @loader_path/同名
+              # 通用：本目录存在同名依赖则本地化
               if [[ -f "$DEP_NAME" ]]; then
                 install_name_tool -change "$DEP_PATH" "@loader_path/$DEP_NAME" "$LIB" || true
-                echo "  fixed: $DEP_NAME -> @loader_path/$DEP_NAME"
               fi
             done
           done
 
-          echo ">>> Verify: any remaining '2330' references?"
-          # 这里只做提示输出，不让它失败
-          (otool -L libopenvino.dylib | grep -n "2330" || true)
-          (otool -L libopenvino_onnx_frontend.dylib | grep -n "2330" || true)
-          (otool -L "$CPU_PLUGIN_NAME" | grep -n "2330" || true)
-
           echo ">>> Verify deps (openvino):"
           otool -L libopenvino.dylib || true
-          echo ">>> Verify deps (onnx frontend):"
-          otool -L libopenvino_onnx_frontend.dylib || true
+          echo ">>> Verify deps (onnx frontend 2330):"
+          otool -L libopenvino_onnx_frontend.2330.dylib || true
           echo ">>> Verify deps (cpu plugin):"
           otool -L "$CPU_PLUGIN_NAME" || true
 
