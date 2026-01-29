@@ -1,0 +1,187 @@
+name: Extract Cuda 11.6-cuDNN 8.5
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: windows-latest
+    steps:
+      - name: Prepare folders
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force downloads, extracted, ort, final_output\win-x64 | Out-Null
+
+      # 确保有 dumpbin（VS 开发者环境）
+      - name: Setup MSVC (for dumpbin)
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Download ORT GPU package (1.16.0)
+        shell: pwsh
+        env:
+          ORT_URL: https://github.com/microsoft/onnxruntime/releases/download/v1.16.0/onnxruntime-win-x64-gpu-1.16.0.zip
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          $out = "downloads\onnxruntime-win-x64-gpu-1.16.0.zip"
+
+          # 用 GITHUB_TOKEN 走授权下载，避免偶发限流/拿到HTML
+          $headers = @{
+            "Authorization" = "Bearer $env:GITHUB_TOKEN"
+            "Accept"        = "application/octet-stream"
+            "User-Agent"    = "actions"
+          }
+
+          Write-Host ">>> Download ORT: $env:ORT_URL"
+          Invoke-WebRequest -Uri $env:ORT_URL -OutFile $out -Headers $headers
+
+          # 简单 sanity check：zip 头
+          $sig = Get-Content -Path $out -Encoding Byte -TotalCount 4
+          if (-not ($sig[0] -eq 0x50 -and $sig[1] -eq 0x4B)) {
+            throw "ORT zip does not look like a ZIP (maybe downloaded HTML)."
+          }
+
+          Expand-Archive -Path $out -DestinationPath ort -Force
+          Write-Host ">>> ORT extracted:"
+          Get-ChildItem ort | Select-Object -First 20 | ForEach-Object { $_.FullName }
+
+      - name: Download NVIDIA redistributables (CUDA 11.6 + cuDNN 8.5)
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+
+          $urls = @(
+            # CUDA Runtime (cudart) 11.6.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-11.6.55-archive.zip",
+
+            # cuBLAS (incl cublasLt) 11.8.1.74
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-11.8.1.74-archive.zip",
+
+            # cuFFT 10.7.0.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-10.7.0.55-archive.zip",
+
+            # cuRAND 10.2.9.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.2.9.55-archive.zip",
+
+            # cuSOLVER 11.3.2.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcusolver/windows-x86_64/libcusolver-windows-x86_64-11.3.2.55-archive.zip",
+
+            # cuSPARSE 11.7.1.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/windows-x86_64/libcusparse-windows-x86_64-11.7.1.55-archive.zip",
+
+            # cuDNN 8.5.0.96 (CUDA 11)
+            "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-8.5.0.96_cuda11-archive.zip"
+          )
+
+          foreach ($u in $urls) {
+            $name = Split-Path $u -Leaf
+            $out  = Join-Path "downloads" $name
+            Write-Host ">>> Downloading $name"
+            Invoke-WebRequest -Uri $u -OutFile $out
+          }
+
+      - name: Extract NVIDIA archives
+        shell: pwsh
+        run: |
+          Get-ChildItem downloads -Filter *.zip | Where-Object { $_.Name -notlike "onnxruntime-*" } | ForEach-Object {
+            $dest = Join-Path "extracted" $_.BaseName
+            New-Item -ItemType Directory -Force $dest | Out-Null
+            Write-Host ">>> Extracting $($_.Name) -> $dest"
+            Expand-Archive -Path $_.FullName -DestinationPath $dest -Force
+          }
+
+      - name: Analyze ORT CUDA provider dependencies (dumpbin)
+        shell: pwsh
+        run: |
+          # 找到 ORT 目录里关键 DLL（不同 zip 内层目录名可能变化，递归找）
+          $cudaProvider = Get-ChildItem -Path ort -Recurse -File -Filter "onnxruntime_providers_cuda.dll" | Select-Object -First 1
+          if (-not $cudaProvider) { throw "onnxruntime_providers_cuda.dll not found in ORT zip" }
+
+          $sharedProvider = Get-ChildItem -Path ort -Recurse -File -Filter "onnxruntime_providers_shared.dll" | Select-Object -First 1
+
+          Write-Host "CUDA Provider: $($cudaProvider.FullName)"
+          if ($sharedProvider) { Write-Host "Shared Provider: $($sharedProvider.FullName)" }
+
+          function Get-Dependents($dllPath) {
+            $out = (dumpbin /nologo /dependents $dllPath) 2>&1
+            $lines = $out -split "`r?`n"
+            # 提取看起来像 xxx.dll 的行
+            $dlls = $lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -match "^[A-Za-z0-9_\-\.]+\.dll$" }
+            return $dlls
+          }
+
+          $deps = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+          foreach ($d in (Get-Dependents $cudaProvider.FullName)) { [void]$deps.Add($d) }
+          if ($sharedProvider) { foreach ($d in (Get-Dependents $sharedProvider.FullName)) { [void]$deps.Add($d) } }
+
+          # 只关注 CUDA/cuDNN 相关（你要打包的用户态运行时）
+          $want = $deps | Where-Object {
+            $_ -match "^(cudart|cublas|cublasLt|cufft|curand|cusolver|cusparse|cudnn).*\.dll$"
+          } | Sort-Object
+
+          if (-not $want -or $want.Count -eq 0) {
+            throw "No CUDA-related dlls found from dumpbin output (unexpected)."
+          }
+
+          Write-Host "=== dumpbin detected CUDA/cuDNN deps ==="
+          $want | ForEach-Object { Write-Host "  $_" }
+
+          $want | Out-File -Encoding UTF8 "final_output\win-x64\ort_cuda_deps.txt"
+
+      - name: Collect minimal runtime DLLs (closure for CUDA + cuDNN infer-only)
+        shell: pwsh
+        run: |
+          $dst = "final_output\win-x64"
+
+          function Copy-OneFromExtracted($name) {
+            $f = Get-ChildItem -Path extracted -Recurse -File -Filter $name | Select-Object -First 1
+            if (-not $f) { throw "Missing DLL in NVIDIA redist: $name" }
+            Copy-Item -Force $f.FullName (Join-Path $dst $name)
+            Write-Host "OK  $name  <-  $($f.FullName)"
+          }
+
+          # 1) 先按 dumpbin 闭包拷 CUDA 相关（静态导入依赖）
+          $deps = Get-Content -Path "final_output\win-x64\ort_cuda_deps.txt" | Where-Object { $_ -and $_.Trim().Length -gt 0 }
+          Write-Host "=== Copy CUDA deps (from dumpbin closure) ==="
+          foreach ($n in $deps) {
+            # 只从 extracted 里拷，不动系统/ORT自带
+            Copy-OneFromExtracted $n
+          }
+
+          # 2) cuDNN：按“推理 only”固定带（避免 delay-load 漏检）
+          #    你明确不要 train，所以只带 infer + cudnn64_8.dll
+          $needCudnnInfer = @(
+            "cudnn64_8.dll",
+            "cudnn_ops_infer64_8.dll",
+            "cudnn_cnn_infer64_8.dll",
+            "cudnn_adv_infer64_8.dll"
+          )
+
+          Write-Host "=== Ensure cuDNN infer-only DLLs ==="
+          foreach ($n in $needCudnnInfer) {
+            if (-not (Test-Path (Join-Path $dst $n))) {
+              Copy-OneFromExtracted $n
+            } else {
+              Write-Host "SKIP $n (already copied by dumpbin closure)"
+            }
+          }
+
+          # 输出清单
+          Get-ChildItem $dst | Sort-Object Name | ForEach-Object {
+            "{0}`t{1}" -f $_.Name, $_.Length
+          } | Out-File -Encoding UTF8 (Join-Path $dst "manifest.txt")
+
+          Write-Host "=== Final output ==="
+          Get-ChildItem $dst | Select-Object Name, Length
+
+      - name: Zip and upload
+        shell: pwsh
+        run: |
+          Compress-Archive -Path final_output\win-x64\* -DestinationPath final_output\cuda116_cudnn85_infer_win-x64.zip -Force
+          Write-Host "Zipped:"
+          Get-ChildItem final_output
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuda116_cudnn85_infer_win-x64
+          path: final_output/cuda116_cudnn85_infer_win-x64.zip
