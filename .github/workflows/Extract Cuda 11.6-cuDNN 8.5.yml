@@ -15,7 +15,6 @@ jobs:
       - name: Setup MSVC (for dumpbin)
         uses: ilammy/msvc-dev-cmd@v1
 
-      # 1) 下载 NuGet nupkg（更稳，不依赖 GitHub release）
       - name: Download Microsoft.ML.OnnxRuntime.Gpu nupkg (1.16.0)
         shell: pwsh
         env:
@@ -23,24 +22,33 @@ jobs:
         run: |
           $ProgressPreference = "SilentlyContinue"
           $out = "downloads\microsoft.ml.onnxruntime.gpu.1.16.0.nupkg"
+
           Write-Host ">>> Download nupkg: $env:NUPKG_URL"
           Invoke-WebRequest -Uri $env:NUPKG_URL -OutFile $out
 
-          # sanity: nupkg 是 zip，头应该是 PK
-          $sig = Get-Content -Path $out -Encoding Byte -TotalCount 4
-          if (-not ($sig[0] -eq 0x50 -and $sig[1] -eq 0x4B)) {
-            throw "Downloaded nupkg does not look like a ZIP (maybe HTML)."
+          if (-not (Test-Path $out)) { throw "Download failed: file not found $out" }
+
+          # ZIP header check (portable across PS versions)
+          $bytes = [System.IO.File]::ReadAllBytes($out)
+          if ($bytes.Length -lt 4) { throw "Downloaded file too small, not a valid nupkg/zip." }
+
+          # ZIP starts with 'PK' (0x50 0x4B)
+          if (-not ($bytes[0] -eq 0x50 -and $bytes[1] -eq 0x4B)) {
+            # print first 200 chars as text to help debug (likely HTML)
+            $head = [System.Text.Encoding]::UTF8.GetString($bytes[0..([Math]::Min($bytes.Length-1, 400))])
+            Write-Host "----- Downloaded content head (as UTF-8) -----"
+            Write-Host $head
+            Write-Host "----------------------------------------------"
+            throw "Downloaded nupkg is not a ZIP (maybe HTML/error page)."
           }
 
           Expand-Archive -Path $out -DestinationPath ort_from_nuget -Force
           Write-Host ">>> Extracted nupkg top entries:"
           Get-ChildItem ort_from_nuget | Select-Object -First 30 | ForEach-Object { $_.FullName }
 
-      # 2) 找到 win-x64 native dll 目录
       - name: Locate ORT native DLLs from nupkg
         shell: pwsh
         run: |
-          # 典型路径：runtimes/win-x64/native/*.dll
           $nativeDir = Get-ChildItem -Path ort_from_nuget -Recurse -Directory |
             Where-Object { $_.FullName -match "runtimes\\win-x64\\native$" } |
             Select-Object -First 1
@@ -52,32 +60,18 @@ jobs:
           Write-Host ">>> Native DLLs:"
           Get-ChildItem $nativeDir.FullName -Filter *.dll | Select-Object Name, Length
 
-      # 3) 下载 NVIDIA redistributables
       - name: Download NVIDIA redistributables (CUDA 11.6 + cuDNN 8.5)
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
 
           $urls = @(
-            # CUDA Runtime (cudart) 11.6.55
             "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-11.6.55-archive.zip",
-
-            # cuBLAS (incl cublasLt) 11.8.1.74
             "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-11.8.1.74-archive.zip",
-
-            # cuFFT 10.7.0.55
             "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-10.7.0.55-archive.zip",
-
-            # cuRAND 10.2.9.55
             "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.2.9.55-archive.zip",
-
-            # cuSOLVER 11.3.2.55
             "https://developer.download.nvidia.com/compute/cuda/redist/libcusolver/windows-x86_64/libcusolver-windows-x86_64-11.3.2.55-archive.zip",
-
-            # cuSPARSE 11.7.1.55
             "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/windows-x86_64/libcusparse-windows-x86_64-11.7.1.55-archive.zip",
-
-            # cuDNN 8.5.0.96 (CUDA 11)
             "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-8.5.0.96_cuda11-archive.zip"
           )
 
@@ -91,15 +85,13 @@ jobs:
       - name: Extract NVIDIA archives
         shell: pwsh
         run: |
-          Get-ChildItem downloads -Filter *.zip | ForEach-Object {
-            if ($_.Name -like "*.nupkg") { return } # ignore
+          Get-ChildItem downloads -Filter *.zip | Where-Object { $_.Name -notlike "*.nupkg" } | ForEach-Object {
             $dest = Join-Path "extracted" $_.BaseName
             New-Item -ItemType Directory -Force $dest | Out-Null
             Write-Host ">>> Extracting $($_.Name) -> $dest"
             Expand-Archive -Path $_.FullName -DestinationPath $dest -Force
           }
 
-      # 4) 用 dumpbin 扫 ORT CUDA provider 的依赖
       - name: Analyze ORT CUDA provider dependencies (dumpbin)
         shell: pwsh
         run: |
@@ -125,7 +117,6 @@ jobs:
           foreach ($d in (Get-Dependents $cudaProvider.FullName)) { [void]$deps.Add($d) }
           if ($sharedProvider) { foreach ($d in (Get-Dependents $sharedProvider.FullName)) { [void]$deps.Add($d) } }
 
-          # 只关注我们能打包的 CUDA/cuDNN 用户态 DLL（不包含 nvcuda.dll）
           $want = $deps | Where-Object {
             $_ -match "^(cudart|cublas|cublasLt|cufft|curand|cusolver|cusparse|cudnn).*\.dll$"
           } | Sort-Object
@@ -139,7 +130,6 @@ jobs:
 
           $want | Out-File -Encoding UTF8 "final_output\win-x64\ort_cuda_deps.txt"
 
-      # 5) 按闭包提取最小 DLL（CUDA 闭包 + cuDNN 推理 infer-only）
       - name: Collect minimal runtime DLLs (CUDA closure + cuDNN infer-only)
         shell: pwsh
         run: |
@@ -152,17 +142,15 @@ jobs:
             Write-Host "OK  $name  <-  $($f.FullName)"
           }
 
-          # (1) CUDA：dumpbin 静态导入闭包决定（100% 不猜）
           $deps = Get-Content -Path "final_output\win-x64\ort_cuda_deps.txt" | Where-Object { $_ -and $_.Trim().Length -gt 0 }
 
           Write-Host "=== Copy CUDA deps (from dumpbin closure) ==="
           foreach ($n in $deps) {
-            # nvcuda.dll 来自驱动，不能也不需要打包
-            if ($n -ieq "nvcuda.dll") { continue }
+            if ($n -ieq "nvcuda.dll") { continue } # driver-provided
             Copy-OneFromExtracted $n
           }
 
-          # (2) cuDNN：推理 only（避免 delay-load 漏检）
+          # cuDNN infer-only (avoid delay-load漏检)
           $needCudnnInfer = @(
             "cudnn64_8.dll",
             "cudnn_ops_infer64_8.dll",
@@ -180,7 +168,7 @@ jobs:
             }
           }
 
-          # 清单输出
+          # manifest
           Get-ChildItem $dst | Sort-Object Name | ForEach-Object {
             "{0}`t{1}" -f $_.Name, $_.Length
           } | Out-File -Encoding UTF8 (Join-Path $dst "manifest.txt")
