@@ -12,9 +12,12 @@ function Info($msg) { Write-Host "==> $msg" }
 
 function To-CMakePath([string]$p) {
   if ([string]::IsNullOrWhiteSpace($p)) { return $p }
-  # 取绝对路径 + 反斜杠转正斜杠，避免 CMake "\a" 这类转义坑
   $full = [System.IO.Path]::GetFullPath($p)
   return ($full -replace '\\','/')
+}
+
+function Assert-Exists([string]$p, [string]$msg) {
+  if (!(Test-Path $p)) { throw $msg }
 }
 
 if ([string]::IsNullOrWhiteSpace($OpenCvVersion))  { $OpenCvVersion  = "4.11.0" }
@@ -56,6 +59,7 @@ Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    $SharpSrc  $OpenC
 # 1) Build OpenCV (STATIC, minimal modules, minimal external deps)
 # -----------------------------
 $OpenCvB = Join-Path $Bld "opencv"
+New-Item -ItemType Directory -Force -Path $OpenCvB | Out-Null
 
 Info "Configure OpenCV (STATIC, minimal, minimal external deps)"
 cmake -S $OpenCvSrc -B $OpenCvB -G Ninja `
@@ -88,6 +92,10 @@ cmake --build $OpenCvB --config Release
 
 # -----------------------------
 # 2) Auto-filter include_opencv.h (optional but recommended)
+#    Include roots considered:
+#      opencv/include
+#      opencv/modules/<build_list>/include
+#      opencv build/include  (generated headers)
 # -----------------------------
 Info "Auto-filter include_opencv.h based on existing OpenCV headers"
 $env:BUILD_LIST = $BuildList
@@ -96,12 +104,19 @@ $pyFilter = @"
 import pathlib, re, os
 
 root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
-opencv_root = root / "src" / "opencv"
-opencv_include = opencv_root / "include"
-modules_root = opencv_root / "modules"
+opencv_src = root / "src" / "opencv"
+opencv_build = root / "build-win-x64" / "opencv"
+
+opencv_include = opencv_src / "include"
+modules_root = opencv_src / "modules"
+build_include = opencv_build / "include"
 
 build_list = [x.strip() for x in os.environ.get("BUILD_LIST","core,imgproc,videoio").split(",") if x.strip()]
+
 include_roots = [opencv_include]
+if build_include.exists():
+    include_roots.append(build_include)
+
 for m in build_list:
     p = modules_root / m / "include"
     if p.exists():
@@ -139,13 +154,19 @@ print(f"Filtered include_opencv.h: disabled {disabled} missing includes")
 python -c $pyFilter
 
 # -----------------------------
-# 3) Build OpenCvSharpExtern.dll WITHOUT parsing opencvsharp CMakeLists
-#    We create a minimal CMake project ourselves.
+# 3) Build OpenCvSharpExtern.dll with minimal CMake project (bypass upstream)
+#    Key goals:
+#      - Never write backslashes to CMake strings (avoid \a)
+#      - Do NOT rely on OpenCV_INCLUDE_DIRS (can be empty in some setups)
+#      - Explicitly provide required include roots
 # -----------------------------
 Info "Generate minimal CMake project for OpenCvSharpExtern (bypass upstream CMakeLists)"
 $ExternSrc = Join-Path $SharpSrc "src\OpenCvSharpExtern"
+Assert-Exists $ExternSrc "Extern src missing: $ExternSrc"
+
 $MinProj   = Join-Path $Bld "opencvsharp_minproj"
-New-Item -ItemType Directory -Force -Path $MinProj | Out-Null
+$MinBuild  = Join-Path $Bld "opencvsharp_minbuild"
+New-Item -ItemType Directory -Force -Path $MinProj,$MinBuild | Out-Null
 
 # Minimal sources strictly matching your need
 $CoreCpp    = Join-Path $ExternSrc "core.cpp"
@@ -153,17 +174,29 @@ $ImgProcCpp = Join-Path $ExternSrc "imgproc.cpp"
 $VideoIoCpp = Join-Path $ExternSrc "videoio.cpp"
 
 foreach ($f in @($CoreCpp,$ImgProcCpp,$VideoIoCpp)) {
-  if (!(Test-Path $f)) { throw "Missing expected source: $f" }
+  Assert-Exists $f "Missing expected source: $f"
 }
 
-# ---- Convert paths to CMake-friendly (forward slashes) ----
+# Convert paths to CMake-friendly (forward slashes)
 $OpenCvB_CMake     = To-CMakePath $OpenCvB
+$OpenCvSrc_CMake   = To-CMakePath $OpenCvSrc
 $ExternSrc_CMake   = To-CMakePath $ExternSrc
 $CoreCpp_CMake     = To-CMakePath $CoreCpp
 $ImgProcCpp_CMake  = To-CMakePath $ImgProcCpp
 $VideoIoCpp_CMake  = To-CMakePath $VideoIoCpp
 
-# CMakeLists content (all paths use /)
+# Build include dir (generated headers often here)
+$OpenCvBuildInclude_CMake = "$OpenCvB_CMake/include"
+
+# Optional module include roots (only add if you want; these do NOT affect runtime size)
+$moduleIncludeLines = ""
+foreach ($m in ($BuildList -split ",")) {
+  $mm = $m.Trim()
+  if ($mm.Length -gt 0) {
+    $moduleIncludeLines += "  `"$OpenCvSrc_CMake/modules/$mm/include`"`n"
+  }
+}
+
 $CMakeLists = @"
 cmake_minimum_required(VERSION 3.18)
 project(OpenCvSharpExternMin LANGUAGES C CXX)
@@ -171,10 +204,9 @@ project(OpenCvSharpExternMin LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# OpenCV build tree (OpenCVConfig.cmake is generated there)
+# Prefer config package from our OpenCV build tree ONLY
 set(OpenCV_DIR "$OpenCvB_CMake")
-
-find_package(OpenCV REQUIRED)
+find_package(OpenCV REQUIRED CONFIG NO_DEFAULT_PATH)
 
 add_library(OpenCvSharpExtern SHARED
   "$CoreCpp_CMake"
@@ -182,15 +214,22 @@ add_library(OpenCvSharpExtern SHARED
   "$VideoIoCpp_CMake"
 )
 
+# ---- Required include roots ----
+# - OpenCvSharpExtern includes include_opencv.h which includes <opencv2/opencv.hpp>
+# - opencv.hpp is under: <opencv_src>/include/opencv2/opencv.hpp
+# - generated headers may be under: <opencv_build>/include/opencv2/...
 target_include_directories(OpenCvSharpExtern PRIVATE
   "$ExternSrc_CMake"
   "$ExternSrc_CMake/include"
   "$ExternSrc_CMake/.."
-  ${OpenCV_INCLUDE_DIRS}
+  "$OpenCvSrc_CMake/include"
+  "$OpenCvBuildInclude_CMake"
+$moduleIncludeLines
 )
 
 target_compile_definitions(OpenCvSharpExtern PRIVATE OpenCvSharpExtern_EXPORTS)
 
+# link OpenCV libs discovered by config package
 target_link_libraries(OpenCvSharpExtern PRIVATE ${OpenCV_LIBS})
 
 set_target_properties(OpenCvSharpExtern PROPERTIES
@@ -201,9 +240,6 @@ set_target_properties(OpenCvSharpExtern PROPERTIES
 Set-Content -Path (Join-Path $MinProj "CMakeLists.txt") -Value $CMakeLists -Encoding UTF8
 
 Info "Configure OpenCvSharpExtern (win-x64, minimal project)"
-$MinBuild = Join-Path $Bld "opencvsharp_minbuild"
-New-Item -ItemType Directory -Force -Path $MinBuild | Out-Null
-
 cmake -S $MinProj -B $MinBuild -G Ninja `
   -D CMAKE_BUILD_TYPE=Release
 
