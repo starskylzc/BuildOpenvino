@@ -36,10 +36,6 @@ function Clone-Or-Update([string]$Url, [string]$Dir, [string]$Ref) {
   git -C $Dir checkout $Ref
 }
 
-function Assert-Exists([string]$p, [string]$msg) {
-  if (!(Test-Path $p)) { throw $msg }
-}
-
 Info "Fetch sources"
 $OpenCvSrc = Join-Path $Src "opencv"
 $Contrib   = Join-Path $Src "opencv_contrib"
@@ -54,37 +50,38 @@ git -C $SharpSrc rev-parse HEAD
 git -C $SharpSrc describe --tags --always
 
 # ------------------------------------------------------------
-# Patch OpenCvSharpExtern to build only what you use:
-#   - core.cpp, imgproc.cpp, videoio.cpp
-# （完全照你的 mac 逻辑）
+# Patch OpenCvSharpExtern to build only: core.cpp,imgproc.cpp,videoio.cpp
 # ------------------------------------------------------------
 Info "Patch OpenCvSharpExtern CMakeLists to minimal sources (core/imgproc/videoio)"
-python - <<'PY'
+$pyPatchExtern = @"
 import pathlib, re, os, sys
 
-sharp = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work" / "src" / "opencvsharp"
+root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
+sharp = root / "src" / "opencvsharp"
 cmake = sharp / "src" / "OpenCvSharpExtern" / "CMakeLists.txt"
+
 text = cmake.read_text(encoding="utf-8", errors="ignore")
 
-pattern = re.compile(r"add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*", re.S)
+pattern = re.compile(r"add_library\\s*\\(\\s*OpenCvSharpExtern\\s+SHARED\\s+.*?\\)\\s*", re.S)
 m = pattern.search(text)
 if not m:
     raise SystemExit("Cannot find add_library(OpenCvSharpExtern SHARED ...) in OpenCvSharpExtern/CMakeLists.txt")
 
-minimal = """add_library(OpenCvSharpExtern SHARED
+minimal = \"\"\"add_library(OpenCvSharpExtern SHARED
     core.cpp
     imgproc.cpp
     videoio.cpp
 )
 
-"""
+\"\"\"
 text2 = text[:m.start()] + minimal + text[m.end():]
 cmake.write_text(text2, encoding="utf-8")
 print("Patched:", cmake)
-PY
+"@
+python -c $pyPatchExtern
 
 # ------------------------------------------------------------
-# Build OpenCV (STATIC, minimal modules, minimize deps)
+# Build OpenCV static (minimal modules)
 # ------------------------------------------------------------
 $OpenCvB = Join-Path $B "opencv"
 New-Item -ItemType Directory -Force -Path $OpenCvB | Out-Null
@@ -119,48 +116,32 @@ cmake -S $OpenCvSrc -B $OpenCvB -G Ninja `
 cmake --build $OpenCvB --config Release
 
 # ------------------------------------------------------------
-# Ensure generated OpenCV headers are where compiler can see them:
-#   - opencv_modules.hpp
-#   - cvconfig.h
-#
-# 有的构建树会把它们生成在:
-#   <build>/opencv2/opencv_modules.hpp
-#   <build>/cvconfig.h
-# 但你的 include path 是 <build>/include
-# 所以这里强制复制到:
-#   <build>/include/opencv2/
+# Ensure generated headers are in <build>/include/opencv2/
 # ------------------------------------------------------------
 Info "Ensure generated OpenCV headers are under $OpenCvB/include/opencv2"
-$gen1 = Join-Path $OpenCvB "opencv2\opencv_modules.hpp"
-$gen2 = Join-Path $OpenCvB "cvconfig.h"
 $dstDir = Join-Path $OpenCvB "include\opencv2"
 New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
 
-if (Test-Path $gen1) {
-  Copy-Item -Force $gen1 (Join-Path $dstDir "opencv_modules.hpp")
-  Info "Copied generated header: $gen1 -> $(Join-Path $dstDir 'opencv_modules.hpp')"
+$genModules = Join-Path $OpenCvB "opencv2\opencv_modules.hpp"
+$genCvConfig = Join-Path $OpenCvB "cvconfig.h"
+
+if (Test-Path $genModules) {
+  Copy-Item -Force $genModules (Join-Path $dstDir "opencv_modules.hpp")
+  Info "Copied generated header: $genModules -> $(Join-Path $dstDir 'opencv_modules.hpp')"
 }
-if (Test-Path $gen2) {
-  Copy-Item -Force $gen2 (Join-Path $dstDir "cvconfig.h")
-  Info "Copied generated header: $gen2 -> $(Join-Path $dstDir 'cvconfig.h')"
+if (Test-Path $genCvConfig) {
+  Copy-Item -Force $genCvConfig (Join-Path $dstDir "cvconfig.h")
+  Info "Copied generated header: $genCvConfig -> $(Join-Path $dstDir 'cvconfig.h')"
 }
 
 # ------------------------------------------------------------
-# Auto-filter include_opencv.h based on *actual compile include roots*,
-# NOT based on opencv_contrib source tree.
-#
-# Compile include roots (matching what compiler uses):
-#   - $OpenCvSrc/include
-#   - $OpenCvSrc/modules/<module>/include      (only BUILD_LIST modules)
-#   - $OpenCvB/include                         (generated headers)
-#
-# Anything else (e.g. opencv_contrib headers like opencv2/shape.hpp)
-# must be commented out, otherwise compilation fails.
+# Auto-filter include_opencv.h based on actual include roots
+# (same idea as your mac script)
 # ------------------------------------------------------------
 Info "Auto-filter include_opencv.h based on compile include roots"
 $env:BUILD_LIST = $BuildList
 
-python - <<'PY'
+$pyFilter = @"
 import pathlib, re, os
 
 root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
@@ -172,20 +153,20 @@ modules_root = opencv_src / "modules"
 build_include = opencv_build / "include"
 
 build_list = [x.strip() for x in os.environ.get("BUILD_LIST","core,imgproc,videoio").split(",") if x.strip()]
-module_includes = []
+
+include_roots = [opencv_include]
 for m in build_list:
     p = modules_root / m / "include"
     if p.exists():
-        module_includes.append(p)
+        include_roots.append(p)
 
-include_roots = [opencv_include] + module_includes
 if build_include.exists():
     include_roots.append(build_include)
 
 hdr = root / "src" / "opencvsharp" / "src" / "OpenCvSharpExtern" / "include_opencv.h"
 lines = hdr.read_text(encoding="utf-8", errors="ignore").splitlines()
 
-pat = re.compile(r'^\s*#\s*include\s*<([^>]+)>\s*$')
+pat = re.compile(r'^\\s*#\\s*include\\s*<([^>]+)>\\s*$')
 
 def visible(rel: str) -> bool:
     for r in include_roots:
@@ -207,17 +188,16 @@ for line in lines:
     else:
         out.append(line)
 
-hdr.write_text("\n".join(out) + "\n", encoding="utf-8")
+hdr.write_text("\\n".join(out) + "\\n", encoding="utf-8")
 print(f"include_opencv.h filtered: disabled {disabled} includes")
 print("Include roots:")
 for r in include_roots:
     print("  -", r)
-PY
+"@
+python -c $pyFilter
 
 # ------------------------------------------------------------
-# Build OpenCvSharpExtern
-#   - Use OpenCV BUILD TREE to avoid missing built 3rdparty .lib
-#   - 走 opencvsharp/src 的 CMake（和 mac 一致），不要自己造“最小工程”
+# Build OpenCvSharpExtern via opencvsharp/src (same as mac)
 # ------------------------------------------------------------
 Info "Build OpenCvSharpExtern (win-x64)"
 $SharpBuild = Join-Path $B "opencvsharp"
