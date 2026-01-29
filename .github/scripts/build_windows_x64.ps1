@@ -158,7 +158,8 @@ Write-Info "Configure OpenCvSharpExtern (win-x64)"
 cmake -S (Join-Path $SharpSrc "src") -B $SharpB -G Ninja `
   -D CMAKE_BUILD_TYPE=Release `
   -D CMAKE_INSTALL_PREFIX="$Out" `
-  -D OpenCV_DIR="$OpenCvB"
+  -D OpenCV_DIR="$OpenCvB" `
+  -D CMAKE_POLICY_VERSION_MINIMUM=3.5
 
 Write-Info "Build & install OpenCvSharpExtern"
 cmake --build $SharpB --config Release
