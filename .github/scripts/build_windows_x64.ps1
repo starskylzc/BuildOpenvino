@@ -10,7 +10,7 @@ $OPENCV_VERSION = if ($env:OPENCV_VERSION) { $env:OPENCV_VERSION } else { "4.11.
 $OPENCVSHARP_REF = if ($env:OPENCVSHARP_REF) { $env:OPENCVSHARP_REF } else { "main" }
 $BUILD_LIST = if ($env:BUILD_LIST) { $env:BUILD_LIST } else { "core,imgproc,videoio" }
 
-# 使用当前位置作为根目录 (对应 Bash 的 ${GITHUB_WORKSPACE:-$(pwd)})
+# 使用当前位置作为根目录
 $ROOT = Join-Path (Get-Location) "_work"
 $SRC = Join-Path $ROOT "src"
 $B_DIR = Join-Path $ROOT "build-win-x64"
@@ -20,6 +20,11 @@ $OUT_DIR = Join-Path $ROOT "out-win-x64"
 New-Item -ItemType Directory -Force -Path $SRC | Out-Null
 New-Item -ItemType Directory -Force -Path $B_DIR | Out-Null
 New-Item -ItemType Directory -Force -Path $OUT_DIR | Out-Null
+
+# 准备 Python 脚本用的路径（统一替换为 / 防止转义问题）
+$SRC_SLASH = $SRC.Replace("\", "/")
+$B_DIR_SLASH = $B_DIR.Replace("\", "/")
+$OUT_DIR_SLASH = $OUT_DIR.Replace("\", "/")
 
 Write-Host "==> Tool versions"
 cmake --version
@@ -51,19 +56,23 @@ Clone-Or-Update "https://github.com/opencv/opencv_contrib.git" (Join-Path $SRC "
 Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    (Join-Path $SRC "opencvsharp")    $OPENCVSHARP_REF
 
 # ============================================================
-# 3. Patch OpenCvSharpExtern (保留最小化源码)
+# 3. Patch OpenCvSharpExtern (包含报错修复)
 # ============================================================
 Write-Host "==> Patch OpenCvSharpExtern CMakeLists to minimal sources"
 
+# 这里使用了 $SRC_SLASH 避免反斜杠问题
 $pyScriptPatchCMake = @"
 import pathlib, re
 
-# 使用 pathlib 自动处理 Windows 反斜杠
-src_path = pathlib.Path(r'$SRC')
+src_path = pathlib.Path(r'$SRC_SLASH')
 cmake = src_path / 'opencvsharp' / 'src' / 'OpenCvSharpExtern' / 'CMakeLists.txt'
 text = cmake.read_text(encoding='utf-8', errors='ignore')
 
-# 寻找 add_library(OpenCvSharpExtern SHARED ...)
+# [FIX] 替换 OpenCV 内部命令 ocv_target_compile_definitions 为标准 CMake 命令
+# 这是之前导致 'Unknown CMake command' 报错的原因
+text = text.replace('ocv_target_compile_definitions', 'target_compile_definitions')
+
+# 寻找并替换 add_library 部分为最小化编译
 pattern = re.compile(r'add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*', re.S)
 m = pattern.search(text)
 if not m:
@@ -78,22 +87,20 @@ else:
 '''
     text2 = text[:m.start()] + minimal + text[m.end():]
     cmake.write_text(text2, encoding='utf-8')
-    print(f'Patched: {cmake}')
+    print(f'Patched and Fixed: {cmake}')
 "@
 
 $pyScriptPatchCMake | python -
 
 # ============================================================
-# 4. 编译 OpenCV Static (核心配置)
+# 4. 编译 OpenCV Static
 # ============================================================
 Write-Host "==> Build OpenCV static (Windows x64)"
 
-# 路径转为 CMake 友好的格式
-$SRC_OPENCV = (Join-Path $SRC "opencv").Replace("\", "/")
-$SRC_CONTRIB = (Join-Path $SRC "opencv_contrib/modules").Replace("\", "/")
-$BUILD_OPENCV = (Join-Path $B_DIR "opencv").Replace("\", "/")
+$SRC_OPENCV = "$SRC_SLASH/opencv"
+$SRC_CONTRIB = "$SRC_SLASH/opencv_contrib/modules"
+$BUILD_OPENCV = "$B_DIR_SLASH/opencv"
 
-# 配置参数 (严格对齐 Mac 脚本的禁用列表)
 cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D OPENCV_EXTRA_MODULES_PATH="$SRC_CONTRIB" `
@@ -140,7 +147,7 @@ module_includes = [modules_root / m / 'include' for m in build_list if (modules_
 
 include_roots = [opencv_include] + module_includes
 
-src_path = pathlib.Path(r'$SRC')
+src_path = pathlib.Path(r'$SRC_SLASH')
 hdr = src_path / 'opencvsharp' / 'src' / 'OpenCvSharpExtern' / 'include_opencv.h'
 lines = hdr.read_text(encoding='utf-8', errors='ignore').splitlines()
 
@@ -178,10 +185,11 @@ $pyScriptFilterHeader | python -
 # ============================================================
 Write-Host "==> Build OpenCvSharpExtern (Windows x64)"
 
-$SRC_SHARP = (Join-Path $SRC "opencvsharp/src").Replace("\", "/")
-$BUILD_SHARP = (Join-Path $B_DIR "opencvsharp").Replace("\", "/")
-$INSTALL_PREFIX = $OUT_DIR.Replace("\", "/")
+$SRC_SHARP = "$SRC_SLASH/opencvsharp/src"
+$BUILD_SHARP = "$B_DIR_SLASH/opencvsharp"
+$INSTALL_PREFIX = "$OUT_DIR_SLASH"
 
+# 指向刚才编译的 build 目录，让它找到 OpenCVConfig.cmake
 cmake -S "$SRC_SHARP" -B "$BUILD_SHARP" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D CMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" `
@@ -197,11 +205,11 @@ ninja -C "$BUILD_SHARP" install
 $FINAL_DIR = Join-Path $OUT_DIR "final"
 New-Item -ItemType Directory -Force -Path $FINAL_DIR | Out-Null
 
-# 在安装目录中查找生成的 DLL
-$DllSource = Get-ChildItem -Path $INSTALL_PREFIX -Filter "OpenCvSharpExtern.dll" -Recurse | Select-Object -First 1
+# 在安装目录中查找生成的 DLL (使用递归查找，因为 cmake install 可能放在 bin/ 子目录)
+$DllSource = Get-ChildItem -Path $OUT_DIR -Filter "OpenCvSharpExtern.dll" -Recurse | Select-Object -First 1
 
 if (-not $DllSource) {
-    Write-Host "ERROR: OpenCvSharpExtern.dll not found in $INSTALL_PREFIX"
+    Write-Host "ERROR: OpenCvSharpExtern.dll not found in $OUT_DIR"
     exit 1
 }
 
