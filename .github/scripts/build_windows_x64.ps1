@@ -1,9 +1,9 @@
 # .github/scripts/build_windows_x64.ps1
 #requires -Version 7.0
 param(
-  [string]$OpenCvVersion  = $env:OPENCV_VERSION,
-  [string]$OpenCvSharpRef = $env:OPENCVSHARP_REF,
-  [string]$BuildList      = $env:BUILD_LIST
+  [string]$OpenCvVersion   = $env:OPENCV_VERSION,
+  [string]$OpenCvSharpRef  = $env:OPENCVSHARP_REF,
+  [string]$BuildList       = $env:BUILD_LIST
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,8 +14,7 @@ if ([string]::IsNullOrWhiteSpace($OpenCvVersion))  { $OpenCvVersion  = "4.11.0" 
 if ([string]::IsNullOrWhiteSpace($OpenCvSharpRef)) { $OpenCvSharpRef = "main" }
 if ([string]::IsNullOrWhiteSpace($BuildList))      { $BuildList      = "core,imgproc,videoio" }
 
-$Workspace = ($env:GITHUB_WORKSPACE)
-if ([string]::IsNullOrWhiteSpace($Workspace)) { $Workspace = (Get-Location).Path }
+$Workspace = ($env:GITHUB_WORKSPACE ?? (Get-Location).Path)
 
 $Root = Join-Path $Workspace "_work"
 $Src  = Join-Path $Root "src"
@@ -44,22 +43,105 @@ Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    (Join-Path $Src "
 
 # ------------------------------------------------------------
 # Patch OpenCvSharpExtern:
-#  1) limit sources -> core/imgproc/videoio
-#  2) inject ocv_* shim functions so OpenCvSharpExtern won't depend
-#     on OpenCV's internal CMake macros (ocv_target_*)
+#  1) Inject SAFE ocv_* shims (no guessing, handles empty args & missing scope)
+#  2) Reduce sources to core/imgproc/videoio
 # ------------------------------------------------------------
-Write-Info "Patch OpenCvSharpExtern (minimal sources + ocv_* shim)"
-$pyPatch = @"
-import os, pathlib, re
+Write-Info "Patch OpenCvSharpExtern CMakeLists (SAFE ocv_* shim + minimal sources)"
+$pyPatchCMake = @"
+import pathlib, re, os
 
 root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
 src  = root / "src" / "opencvsharp"
 cmake = src / "src" / "OpenCvSharpExtern" / "CMakeLists.txt"
 text = cmake.read_text(encoding="utf-8", errors="ignore")
 
-# (A) Replace add_library(OpenCvSharpExtern SHARED ...) -> minimal 3 files
-pat_add = re.compile(r"add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*", re.S)
-m = pat_add.search(text)
+# ---- (A) SAFE shim for ocv_* helpers (robust, no-guess) ----
+shim = r'''
+# ------------------------------------------------------------
+# [Injected by CI] OpenCV CMake macro shims (SAFE)
+# Purpose:
+#   OpenCvSharpExtern's CMake may call ocv_* helpers that exist only when building
+#   inside OpenCV superbuild. When building standalone (find_package OpenCV),
+#   those commands may be missing.
+# Design:
+#   - tolerate empty argument lists (no-op)
+#   - tolerate missing PUBLIC/PRIVATE/INTERFACE keyword (default PRIVATE)
+#   - map to standard target_* commands
+# ------------------------------------------------------------
+
+function(_ocv_safe_target_call _cmd _target)
+  set(_args ${ARGN})
+  if(NOT _args)
+    return()
+  endif()
+
+  list(GET _args 0 _first)
+  if(_first STREQUAL "PUBLIC" OR _first STREQUAL "PRIVATE" OR _first STREQUAL "INTERFACE")
+    cmake_language(CALL ${_cmd} ${_target} ${_args})
+  else()
+    cmake_language(CALL ${_cmd} ${_target} PRIVATE ${_args})
+  endif()
+endfunction()
+
+if(NOT COMMAND ocv_target_compile_definitions)
+  function(ocv_target_compile_definitions target)
+    _ocv_safe_target_call(target_compile_definitions ${target} ${ARGN})
+  endfunction()
+endif()
+
+if(NOT COMMAND ocv_target_compile_options)
+  function(ocv_target_compile_options target)
+    _ocv_safe_target_call(target_compile_options ${target} ${ARGN})
+  endfunction()
+endif()
+
+if(NOT COMMAND ocv_target_include_directories)
+  function(ocv_target_include_directories target)
+    _ocv_safe_target_call(target_include_directories ${target} ${ARGN})
+  endfunction()
+endif()
+
+if(NOT COMMAND ocv_target_link_libraries)
+  function(ocv_target_link_libraries target)
+    _ocv_safe_target_call(target_link_libraries ${target} ${ARGN})
+  endfunction()
+endif()
+
+if(NOT COMMAND ocv_add_dependencies)
+  function(ocv_add_dependencies target)
+    if(ARGN)
+      add_dependencies(${target} ${ARGN})
+    endif()
+  endfunction()
+endif()
+
+# Rare helpers - keep config robust (no-op)
+if(NOT COMMAND ocv_warnings_disable)
+  function(ocv_warnings_disable) endfunction()
+endif()
+if(NOT COMMAND ocv_append_source_file_compile_definitions)
+  function(ocv_append_source_file_compile_definitions) endfunction()
+endif()
+# ------------------------------------------------------------
+'''
+
+if "OpenCV CMake macro shims (SAFE)" not in text:
+    # insert after project(...) if present; else after cmake_minimum_required(...)
+    mproj = re.search(r"^\s*project\s*\(.*?\)\s*$", text, flags=re.M)
+    if mproj:
+        pos = mproj.end()
+        text = text[:pos] + "\n" + shim + "\n" + text[pos:]
+    else:
+        mcm = re.search(r"^\s*cmake_minimum_required\s*\(.*?\)\s*$", text, flags=re.M)
+        if mcm:
+            pos = mcm.end()
+            text = text[:pos] + "\n" + shim + "\n" + text[pos:]
+        else:
+            text = shim + "\n" + text
+
+# ---- (B) Minimal sources: core/imgproc/videoio ----
+pattern = re.compile(r"add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*", re.S)
+m = pattern.search(text)
 if not m:
     raise SystemExit("Cannot find add_library(OpenCvSharpExtern SHARED ...) in OpenCvSharpExtern/CMakeLists.txt")
 
@@ -72,62 +154,10 @@ minimal = """add_library(OpenCvSharpExtern SHARED
 """
 text = text[:m.start()] + minimal + text[m.end():]
 
-# (B) Inject shim macros for ocv_* (so we don't rely on OpenCV's internal CMake functions)
-# Insert right after the first project(...) if present; otherwise after cmake_minimum_required(...)
-shim = r'''
-# ------------------------------------------------------------
-# [Injected by CI] OpenCV CMake macro shims
-# Purpose: OpenCvSharpExtern's CMake sometimes calls ocv_* helpers that are
-# defined only when building inside OpenCV superbuild. When we link against
-# an exported OpenCV build-tree, those commands may be missing on Windows.
-# These shims map ocv_* to standard target_* commands so configuration is stable.
-# ------------------------------------------------------------
-if(NOT COMMAND ocv_target_compile_definitions)
-  function(ocv_target_compile_definitions target)
-    target_compile_definitions(${target} PRIVATE ${ARGN})
-  endfunction()
-endif()
-
-if(NOT COMMAND ocv_target_compile_options)
-  function(ocv_target_compile_options target)
-    target_compile_options(${target} PRIVATE ${ARGN})
-  endfunction()
-endif()
-
-if(NOT COMMAND ocv_target_include_directories)
-  function(ocv_target_include_directories target)
-    target_include_directories(${target} PRIVATE ${ARGN})
-  endfunction()
-endif()
-
-if(NOT COMMAND ocv_target_link_libraries)
-  function(ocv_target_link_libraries target)
-    target_link_libraries(${target} PRIVATE ${ARGN})
-  endfunction()
-endif()
-'''
-
-# Avoid double-injection
-if "OpenCV CMake macro shims" not in text:
-    # try insert after project(...)
-    mproj = re.search(r"^\s*project\s*\(.*?\)\s*$", text, re.M)
-    if mproj:
-        insert_at = mproj.end()
-        text = text[:insert_at] + "\n" + shim + "\n" + text[insert_at:]
-    else:
-        # fallback: after cmake_minimum_required(...)
-        mcm = re.search(r"^\s*cmake_minimum_required\s*\(.*?\)\s*$", text, re.M)
-        if not mcm:
-            # as a last resort, prepend
-            text = shim + "\n" + text
-        else:
-            insert_at = mcm.end()
-            text = text[:insert_at] + "\n" + shim + "\n" + text[insert_at:]
-
 cmake.write_text(text, encoding="utf-8")
 print("Patched:", cmake)
 "@
-python -c $pyPatch
+python -c $pyPatchCMake
 
 # ------------------------------------------------------------
 # Build OpenCV static (minimal modules, minimize deps)
