@@ -21,7 +21,7 @@ jobs:
         run: |
           set -euxo pipefail
           chmod +x .github/scripts/build_macos_slice.sh
-          OPENCV_VERSION=4.11.0 OPENCVSHARP_REF=main BUILD_LIST=core,imgproc,videoio \
+          OPENCV_VERSION=4.11.0 OPENCVSHARP_REF=4.11.0.20250507 BUILD_LIST=core,imgproc,videoio \
             .github/scripts/build_macos_slice.sh x86_64 10.15
 
       - name: Upload x86_64 artifact
@@ -47,7 +47,7 @@ jobs:
         run: |
           set -euxo pipefail
           chmod +x .github/scripts/build_macos_slice.sh
-          OPENCV_VERSION=4.11.0 OPENCVSHARP_REF=main BUILD_LIST=core,imgproc,videoio \
+          OPENCV_VERSION=4.11.0 OPENCVSHARP_REF=4.11.0.20250507 BUILD_LIST=core,imgproc,videoio \
             .github/scripts/build_macos_slice.sh arm64 11.0
 
       - name: Upload arm64 artifact
@@ -111,7 +111,7 @@ jobs:
         shell: pwsh
         run: |
           $env:OPENCV_VERSION = "4.11.0"
-          $env:OPENCVSHARP_REF = "main"
+          $env:OPENCVSHARP_REF = "4.11.0.20250507"
           $env:BUILD_LIST = "core,imgproc,videoio"
           pwsh -File .github/scripts/build_windows_x64.ps1
 
