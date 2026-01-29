@@ -205,6 +205,7 @@ $SharpBuild = Join-Path $B "opencvsharp"
 cmake -S (Join-Path $SharpSrc "src") -B $SharpBuild -G Ninja `
   -D CMAKE_BUILD_TYPE=Release `
   -D CMAKE_INSTALL_PREFIX="$Out" `
+  -D CMAKE_POLICY_VERSION_MINIMUM=3.5 `
   -D OpenCV_DIR="$OpenCvB"
 
 cmake --build $SharpBuild --config Release
