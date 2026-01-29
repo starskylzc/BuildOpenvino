@@ -21,7 +21,6 @@ function Assert-Exists([string]$p, [string]$msg) {
 }
 
 function Ensure-GeneratedOpenCvHeader([string]$OpenCvBuildDir, [string]$HeaderName) {
-  # Search for generated headers in build tree and copy into build/include/opencv2
   $dstDir = Join-Path $OpenCvBuildDir "include\opencv2"
   New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
 
@@ -29,20 +28,94 @@ function Ensure-GeneratedOpenCvHeader([string]$OpenCvBuildDir, [string]$HeaderNa
            Select-Object -First 1
 
   if ($null -eq $found) {
-    # Provide some debug hints
     Info "DEBUG: Could not find '$HeaderName' under $OpenCvBuildDir"
-    Info "DEBUG: Listing candidates under build tree (top 4 levels) ..."
     Get-ChildItem -Path $OpenCvBuildDir -Recurse -File -ErrorAction SilentlyContinue |
       Where-Object { $_.Name -match 'opencv_modules\.hpp|cvconfig\.h' } |
       Select-Object -First 50 FullName |
       ForEach-Object { Write-Host $_.FullName }
-
     throw "Generated header '$HeaderName' not found under OpenCV build tree: $OpenCvBuildDir"
   }
 
   $dst = Join-Path $dstDir $HeaderName
   Copy-Item -Force $found.FullName $dst
   Info "Copied generated header: $($found.FullName) -> $dst"
+}
+
+function Write-MinimalIncludeOpenCv([string]$HdrPath) {
+  # Minimal include_opencv.h for BUILD_LIST=core,imgproc,videoio
+  # - NO opencv2/opencv.hpp
+  # - NO highgui/imgcodecs/shape/stitching/video/superres/dnn/etc
+  # - Keep C-API headers used by some OpenCvSharpExtern code paths (safe)
+  $content = @'
+#pragma once
+
+#ifndef CV_EXPORTS
+# if (defined _WIN32 || defined WINCE || defined __CYGWIN__)
+#   define CV_EXPORTS __declspec(dllexport)
+# elif defined(__GNUC__) && __GNUC__ >= 4 && defined(__APPLE__)
+#   define CV_EXPORTS __attribute__ ((visibility ("default")))
+# endif
+#endif
+#ifndef CV_EXPORTS
+# define CV_EXPORTS
+#endif
+
+#ifdef _MSC_VER
+#define NOMINMAX
+#define _CRT_SECURE_NO_WARNINGS
+#pragma warning(push)
+#pragma warning(disable: 4244)
+#pragma warning(disable: 4251)
+#pragma warning(disable: 4819)
+#pragma warning(disable: 4996)
+#pragma warning(disable: 6294)
+#include <codeanalysis/warnings.h>
+#pragma warning(disable: ALL_CODE_ANALYSIS_WARNINGS)
+#endif
+
+#define OPENCV_TRAITS_ENABLE_DEPRECATED
+
+// ===== Minimal OpenCV includes (core + imgproc + videoio) =====
+// IMPORTANT: DO NOT include <opencv2/opencv.hpp> because it drags in headers from
+// modules we purposely did not build (imgcodecs/highgui/video/stitching/...).
+#include <opencv2/core.hpp>
+#include <opencv2/core/base.hpp>
+#include <opencv2/core/mat.hpp>
+#include <opencv2/core/types.hpp>
+#include <opencv2/core/utility.hpp>
+
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgproc/types_c.h>
+#include <opencv2/imgproc/imgproc_c.h>  // legacy C API (OpenCvSharpExtern uses some C-APIs)
+
+#include <opencv2/videoio.hpp>
+
+// Some OpenCvSharpExtern code uses core_c in older branches; harmless if present.
+#include <opencv2/core/core_c.h>
+
+// ===== STL =====
+#include <vector>
+#include <algorithm>
+#include <iterator>
+#include <sstream>
+#include <fstream>
+#include <iostream>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+// Additional types/functions used by OpenCvSharpExtern
+#include "my_types.h"
+#include "my_functions.h"
+'@
+
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $HdrPath) | Out-Null
+  Set-Content -Path $HdrPath -Value $content -Encoding UTF8
+  Info "Wrote minimal include_opencv.h -> $HdrPath"
 }
 
 if ([string]::IsNullOrWhiteSpace($OpenCvVersion))  { $OpenCvVersion  = "4.11.0" }
@@ -115,76 +188,17 @@ cmake -S $OpenCvSrc -B $OpenCvB -G Ninja `
 Info "Build OpenCV"
 cmake --build $OpenCvB --config Release
 
-# -----------------------------
-# 1.1) Ensure generated OpenCV headers exist under build/include/opencv2
-#      Fix for: opencv2/opencv.hpp includes opencv2/opencv_modules.hpp (generated)
-# -----------------------------
+# Ensure generated headers exist where our include paths already point
 Info "Ensure generated OpenCV headers are under $OpenCvB/include/opencv2"
 Ensure-GeneratedOpenCvHeader $OpenCvB "opencv_modules.hpp"
 Ensure-GeneratedOpenCvHeader $OpenCvB "cvconfig.h"
 
 # -----------------------------
-# 2) Auto-filter include_opencv.h (optional but recommended)
-#    Include roots considered:
-#      opencv/include
-#      opencv/modules/<build_list>/include
-#      opencv build/include  (generated headers)
+# 2) Overwrite include_opencv.h to minimal version (core/imgproc/videoio only)
 # -----------------------------
-Info "Auto-filter include_opencv.h based on existing OpenCV headers"
-$env:BUILD_LIST = $BuildList
-
-$pyFilter = @"
-import pathlib, re, os
-
-root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
-opencv_src = root / "src" / "opencv"
-opencv_build = root / "build-win-x64" / "opencv"
-
-opencv_include = opencv_src / "include"
-modules_root = opencv_src / "modules"
-build_include = opencv_build / "include"
-
-build_list = [x.strip() for x in os.environ.get("BUILD_LIST","core,imgproc,videoio").split(",") if x.strip()]
-
-include_roots = [opencv_include]
-if build_include.exists():
-    include_roots.append(build_include)
-
-for m in build_list:
-    p = modules_root / m / "include"
-    if p.exists():
-        include_roots.append(p)
-
-hdr = root / "src" / "opencvsharp" / "src" / "OpenCvSharpExtern" / "include_opencv.h"
-text = hdr.read_text(encoding="utf-8", errors="ignore").splitlines()
-
-pat = re.compile(r'^\s*#\s*include\s*<([^>]+)>\s*$')
-
-def exists(rel: str) -> bool:
-    for r in include_roots:
-        if (r / rel).exists():
-            return True
-    return False
-
-out = []
-disabled = 0
-for line in text:
-    m = pat.match(line)
-    if not m:
-        out.append(line)
-        continue
-    inc = m.group(1).strip()
-    if inc.startswith("opencv2/") and not exists(inc):
-        out.append("// [auto-disabled missing header] " + line)
-        disabled += 1
-    else:
-        out.append(line)
-
-hdr.write_text("\n".join(out) + "\n", encoding="utf-8")
-print(f"Filtered include_opencv.h: disabled {disabled} missing includes")
-"@
-
-python -c $pyFilter
+$ExternInclude = Join-Path $SharpSrc "src\OpenCvSharpExtern\include_opencv.h"
+Assert-Exists (Split-Path -Parent $ExternInclude) "OpenCvSharpExtern dir missing: $(Split-Path -Parent $ExternInclude)"
+Write-MinimalIncludeOpenCv $ExternInclude
 
 # -----------------------------
 # 3) Build OpenCvSharpExtern.dll with minimal CMake project (bypass upstream)
@@ -260,7 +274,14 @@ cmake -S $MinProj -B $MinBuild -G Ninja `
   -D CMAKE_BUILD_TYPE=Release
 
 Info "Build OpenCvSharpExtern"
-cmake --build $MinBuild --config Release
+try {
+  cmake --build $MinBuild --config Release
+}
+catch {
+  Info "Build failed. If you see unresolved headers/symbols from imgcodecs/highgui, you MUST add that module to BUILD_LIST."
+  Info "Example: BUILD_LIST=core,imgproc,videoio,imgcodecs"
+  throw
+}
 
 # -----------------------------
 # 4) Collect artifact
