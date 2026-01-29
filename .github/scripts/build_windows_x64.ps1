@@ -1,154 +1,27 @@
 # .github/scripts/build_windows_x64.ps1
 #requires -Version 7.0
 param(
-  [string]$OpenCvVersion   = $env:OPENCV_VERSION,
-  [string]$OpenCvSharpRef  = $env:OPENCVSHARP_REF,
-  [string]$BuildList       = $env:BUILD_LIST
+  [string]$OpenCvVersion  = $env:OPENCV_VERSION,
+  [string]$OpenCvSharpRef = $env:OPENCVSHARP_REF,
+  [string]$BuildList      = $env:BUILD_LIST
 )
 
 $ErrorActionPreference = "Stop"
 
 function Info($msg) { Write-Host "==> $msg" }
 
-function To-CMakePath([string]$p) {
-  if ([string]::IsNullOrWhiteSpace($p)) { return $p }
-  $full = [System.IO.Path]::GetFullPath($p)
-  return ($full -replace '\\','/')
-}
-
-function Assert-Exists([string]$p, [string]$msg) {
-  if (!(Test-Path $p)) { throw $msg }
-}
-
-function Ensure-GeneratedOpenCvHeader([string]$OpenCvBuildDir, [string]$HeaderName) {
-  $dstDir = Join-Path $OpenCvBuildDir "include\opencv2"
-  New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
-
-  $found = Get-ChildItem -Path $OpenCvBuildDir -Recurse -File -Filter $HeaderName -ErrorAction SilentlyContinue |
-           Select-Object -First 1
-
-  if ($null -eq $found) {
-    throw "Generated header '$HeaderName' not found under OpenCV build tree: $OpenCvBuildDir"
-  }
-
-  $dst = Join-Path $dstDir $HeaderName
-  Copy-Item -Force $found.FullName $dst
-  Info "Copied generated header: $($found.FullName) -> $dst"
-}
-
-function Write-MinimalIncludeOpenCv([string]$HdrPath) {
-  # 关键修复：补上 logger.hpp，让 cv::utils::logging 有声明
-  $content = @'
-#pragma once
-
-#ifndef CV_EXPORTS
-# if (defined _WIN32 || defined WINCE || defined __CYGWIN__)
-#   define CV_EXPORTS __declspec(dllexport)
-# elif defined(__GNUC__) && __GNUC__ >= 4 && defined(__APPLE__)
-#   define CV_EXPORTS __attribute__ ((visibility ("default")))
-# endif
-#endif
-#ifndef CV_EXPORTS
-# define CV_EXPORTS
-#endif
-
-#ifdef _MSC_VER
-#define NOMINMAX
-#define _CRT_SECURE_NO_WARNINGS
-#pragma warning(push)
-#pragma warning(disable: 4244)
-#pragma warning(disable: 4251)
-#pragma warning(disable: 4819)
-#pragma warning(disable: 4996)
-#pragma warning(disable: 6294)
-#include <codeanalysis/warnings.h>
-#pragma warning(disable: ALL_CODE_ANALYSIS_WARNINGS)
-#endif
-
-#define OPENCV_TRAITS_ENABLE_DEPRECATED
-
-// ===== Minimal OpenCV includes (core + imgproc + videoio) =====
-// DO NOT include <opencv2/opencv.hpp> (it drags in imgcodecs/highgui/etc).
-#include <opencv2/core.hpp>
-#include <opencv2/core/base.hpp>
-#include <opencv2/core/mat.hpp>
-#include <opencv2/core/types.hpp>
-#include <opencv2/core/utility.hpp>
-
-// ✅ Fix for: cv::utils::logging not found (OpenCvSharpExtern/core.h uses it)
-#include <opencv2/core/utils/logger.hpp>
-
-#include <opencv2/imgproc.hpp>
-#include <opencv2/imgproc/types_c.h>
-#include <opencv2/imgproc/imgproc_c.h>
-
-#include <opencv2/videoio.hpp>
-
-#include <opencv2/core/core_c.h>
-
-// ===== STL =====
-#include <vector>
-#include <algorithm>
-#include <iterator>
-#include <sstream>
-#include <fstream>
-#include <iostream>
-#include <cstdio>
-#include <cstring>
-#include <cstdlib>
-
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-
-#include "my_types.h"
-#include "my_functions.h"
-'@
-
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $HdrPath) | Out-Null
-  Set-Content -Path $HdrPath -Value $content -Encoding UTF8
-  Info "Wrote minimal include_opencv.h -> $HdrPath"
-}
-
-function Patch-RemoveOpenCvHpp([string]$ExternDir) {
-  # Replace any direct include of opencv2/opencv.hpp in OpenCvSharpExtern sources
-  $replacement = @'
-#include <opencv2/core.hpp>
-#include <opencv2/core/utils/logger.hpp>
-#include <opencv2/imgproc.hpp>
-#include <opencv2/videoio.hpp>
-'@.TrimEnd()
-
-  $files = Get-ChildItem -Path $ExternDir -Recurse -File -Include *.h,*.hpp,*.c,*.cc,*.cpp -ErrorAction SilentlyContinue
-  $count = 0
-
-  foreach ($f in $files) {
-    $txt = Get-Content -Path $f.FullName -Raw -ErrorAction SilentlyContinue
-    if ([string]::IsNullOrWhiteSpace($txt)) { continue }
-
-    $new = $txt
-    $new = [regex]::Replace($new, '^\s*#\s*include\s*<opencv2/opencv\.hpp>\s*$', $replacement, "Multiline")
-    $new = [regex]::Replace($new, '^\s*#\s*include\s*"opencv2/opencv\.hpp"\s*$', $replacement, "Multiline")
-
-    if ($new -ne $txt) {
-      Set-Content -Path $f.FullName -Value $new -Encoding UTF8
-      $count++
-    }
-  }
-
-  Info "Patched $count file(s) to remove direct include of opencv2/opencv.hpp"
-}
-
 if ([string]::IsNullOrWhiteSpace($OpenCvVersion))  { $OpenCvVersion  = "4.11.0" }
 if ([string]::IsNullOrWhiteSpace($OpenCvSharpRef)) { $OpenCvSharpRef = "main" }
 if ([string]::IsNullOrWhiteSpace($BuildList))      { $BuildList      = "core,imgproc,videoio" }
 
 $Workspace = ($env:GITHUB_WORKSPACE ?? (Get-Location).Path)
+
 $Root = Join-Path $Workspace "_work"
 $Src  = Join-Path $Root "src"
-$Bld  = Join-Path $Root "build-win-x64"
+$B    = Join-Path $Root "build-win-x64"
 $Out  = Join-Path $Root "out-win-x64"
-New-Item -ItemType Directory -Force -Path $Src,$Bld,$Out | Out-Null
+
+New-Item -ItemType Directory -Force -Path $Src,$B,$Out | Out-Null
 
 Info "Tool versions"
 cmake --version
@@ -163,6 +36,10 @@ function Clone-Or-Update([string]$Url, [string]$Dir, [string]$Ref) {
   git -C $Dir checkout $Ref
 }
 
+function Assert-Exists([string]$p, [string]$msg) {
+  if (!(Test-Path $p)) { throw $msg }
+}
+
 Info "Fetch sources"
 $OpenCvSrc = Join-Path $Src "opencv"
 $Contrib   = Join-Path $Src "opencv_contrib"
@@ -172,13 +49,47 @@ Clone-Or-Update "https://github.com/opencv/opencv.git"         $OpenCvSrc $OpenC
 Clone-Or-Update "https://github.com/opencv/opencv_contrib.git" $Contrib   $OpenCvVersion
 Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    $SharpSrc  $OpenCvSharpRef
 
-# -----------------------------
-# 1) Build OpenCV (STATIC, minimal modules, minimal external deps)
-# -----------------------------
-$OpenCvB = Join-Path $Bld "opencv"
+Info "OpenCvSharp commit/tag"
+git -C $SharpSrc rev-parse HEAD
+git -C $SharpSrc describe --tags --always
+
+# ------------------------------------------------------------
+# Patch OpenCvSharpExtern to build only what you use:
+#   - core.cpp, imgproc.cpp, videoio.cpp
+# （完全照你的 mac 逻辑）
+# ------------------------------------------------------------
+Info "Patch OpenCvSharpExtern CMakeLists to minimal sources (core/imgproc/videoio)"
+python - <<'PY'
+import pathlib, re, os, sys
+
+sharp = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work" / "src" / "opencvsharp"
+cmake = sharp / "src" / "OpenCvSharpExtern" / "CMakeLists.txt"
+text = cmake.read_text(encoding="utf-8", errors="ignore")
+
+pattern = re.compile(r"add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*", re.S)
+m = pattern.search(text)
+if not m:
+    raise SystemExit("Cannot find add_library(OpenCvSharpExtern SHARED ...) in OpenCvSharpExtern/CMakeLists.txt")
+
+minimal = """add_library(OpenCvSharpExtern SHARED
+    core.cpp
+    imgproc.cpp
+    videoio.cpp
+)
+
+"""
+text2 = text[:m.start()] + minimal + text[m.end():]
+cmake.write_text(text2, encoding="utf-8")
+print("Patched:", cmake)
+PY
+
+# ------------------------------------------------------------
+# Build OpenCV (STATIC, minimal modules, minimize deps)
+# ------------------------------------------------------------
+$OpenCvB = Join-Path $B "opencv"
 New-Item -ItemType Directory -Force -Path $OpenCvB | Out-Null
 
-Info "Configure OpenCV (STATIC, minimal, minimal external deps)"
+Info "Build OpenCV static (win-x64)"
 cmake -S $OpenCvSrc -B $OpenCvB -G Ninja `
   -D CMAKE_BUILD_TYPE=Release `
   -D OPENCV_EXTRA_MODULES_PATH="$Contrib\modules" `
@@ -186,6 +97,7 @@ cmake -S $OpenCvSrc -B $OpenCvB -G Ninja `
   -D BUILD_LIST="$BuildList" `
   -D BUILD_TESTS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_EXAMPLES=OFF -D BUILD_DOCS=OFF -D BUILD_opencv_apps=OFF `
   -D OPENCV_FORCE_3RDPARTY_BUILD=ON `
+  `
   -D WITH_FFMPEG=OFF `
   -D WITH_GSTREAMER=OFF `
   -D WITH_OPENCL=OFF `
@@ -204,96 +116,130 @@ cmake -S $OpenCvSrc -B $OpenCvB -G Ninja `
   -D WITH_MSMF=ON `
   -D WITH_DSHOW=ON
 
-Info "Build OpenCV"
 cmake --build $OpenCvB --config Release
 
-# 生成头复制（有些 OpenCV 配置会把它们生成在 build 根目录 / opencv2 下）
+# ------------------------------------------------------------
+# Ensure generated OpenCV headers are where compiler can see them:
+#   - opencv_modules.hpp
+#   - cvconfig.h
+#
+# 有的构建树会把它们生成在:
+#   <build>/opencv2/opencv_modules.hpp
+#   <build>/cvconfig.h
+# 但你的 include path 是 <build>/include
+# 所以这里强制复制到:
+#   <build>/include/opencv2/
+# ------------------------------------------------------------
 Info "Ensure generated OpenCV headers are under $OpenCvB/include/opencv2"
-Ensure-GeneratedOpenCvHeader $OpenCvB "opencv_modules.hpp"
-Ensure-GeneratedOpenCvHeader $OpenCvB "cvconfig.h"
+$gen1 = Join-Path $OpenCvB "opencv2\opencv_modules.hpp"
+$gen2 = Join-Path $OpenCvB "cvconfig.h"
+$dstDir = Join-Path $OpenCvB "include\opencv2"
+New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
 
-# -----------------------------
-# 2) Patch OpenCvSharpExtern to avoid opencv.hpp, keep minimal include_opencv.h
-# -----------------------------
-$ExternDir = Join-Path $SharpSrc "src\OpenCvSharpExtern"
-Assert-Exists $ExternDir "OpenCvSharpExtern dir missing: $ExternDir"
-
-$ExternInclude = Join-Path $ExternDir "include_opencv.h"
-Write-MinimalIncludeOpenCv $ExternInclude
-Patch-RemoveOpenCvHpp $ExternDir
-
-# -----------------------------
-# 3) Build OpenCvSharpExtern.dll with minimal CMake project
-# -----------------------------
-Info "Generate minimal CMake project for OpenCvSharpExtern (bypass upstream CMakeLists)"
-$MinProj   = Join-Path $Bld "opencvsharp_minproj"
-$MinBuild  = Join-Path $Bld "opencvsharp_minbuild"
-New-Item -ItemType Directory -Force -Path $MinProj,$MinBuild | Out-Null
-
-$CoreCpp    = Join-Path $ExternDir "core.cpp"
-$ImgProcCpp = Join-Path $ExternDir "imgproc.cpp"
-$VideoIoCpp = Join-Path $ExternDir "videoio.cpp"
-
-foreach ($f in @($CoreCpp,$ImgProcCpp,$VideoIoCpp)) {
-  Assert-Exists $f "Missing expected source: $f"
+if (Test-Path $gen1) {
+  Copy-Item -Force $gen1 (Join-Path $dstDir "opencv_modules.hpp")
+  Info "Copied generated header: $gen1 -> $(Join-Path $dstDir 'opencv_modules.hpp')"
+}
+if (Test-Path $gen2) {
+  Copy-Item -Force $gen2 (Join-Path $dstDir "cvconfig.h")
+  Info "Copied generated header: $gen2 -> $(Join-Path $dstDir 'cvconfig.h')"
 }
 
-$OpenCvB_CMake     = To-CMakePath $OpenCvB
-$OpenCvSrc_CMake   = To-CMakePath $OpenCvSrc
-$ExternDir_CMake   = To-CMakePath $ExternDir
-$CoreCpp_CMake     = To-CMakePath $CoreCpp
-$ImgProcCpp_CMake  = To-CMakePath $ImgProcCpp
-$VideoIoCpp_CMake  = To-CMakePath $VideoIoCpp
-$OpenCvBuildInclude_CMake = "$OpenCvB_CMake/include"
+# ------------------------------------------------------------
+# Auto-filter include_opencv.h based on *actual compile include roots*,
+# NOT based on opencv_contrib source tree.
+#
+# Compile include roots (matching what compiler uses):
+#   - $OpenCvSrc/include
+#   - $OpenCvSrc/modules/<module>/include      (only BUILD_LIST modules)
+#   - $OpenCvB/include                         (generated headers)
+#
+# Anything else (e.g. opencv_contrib headers like opencv2/shape.hpp)
+# must be commented out, otherwise compilation fails.
+# ------------------------------------------------------------
+Info "Auto-filter include_opencv.h based on compile include roots"
+$env:BUILD_LIST = $BuildList
 
-$CMakeLists = @"
-cmake_minimum_required(VERSION 3.18)
-project(OpenCvSharpExternMin LANGUAGES C CXX)
+python - <<'PY'
+import pathlib, re, os
 
-set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "_work"
+opencv_src = root / "src" / "opencv"
+opencv_build = root / "build-win-x64" / "opencv"
 
-set(OpenCV_DIR "$OpenCvB_CMake")
-find_package(OpenCV REQUIRED CONFIG NO_DEFAULT_PATH)
+opencv_include = opencv_src / "include"
+modules_root = opencv_src / "modules"
+build_include = opencv_build / "include"
 
-add_library(OpenCvSharpExtern SHARED
-  "$CoreCpp_CMake"
-  "$ImgProcCpp_CMake"
-  "$VideoIoCpp_CMake"
-)
+build_list = [x.strip() for x in os.environ.get("BUILD_LIST","core,imgproc,videoio").split(",") if x.strip()]
+module_includes = []
+for m in build_list:
+    p = modules_root / m / "include"
+    if p.exists():
+        module_includes.append(p)
 
-target_include_directories(OpenCvSharpExtern PRIVATE
-  "$ExternDir_CMake"
-  "$ExternDir_CMake/include"
-  "$ExternDir_CMake/.."
-  "$OpenCvSrc_CMake/include"
-  "$OpenCvBuildInclude_CMake"
-  "$OpenCvSrc_CMake/modules/core/include"
-  "$OpenCvSrc_CMake/modules/imgproc/include"
-  "$OpenCvSrc_CMake/modules/videoio/include"
-)
+include_roots = [opencv_include] + module_includes
+if build_include.exists():
+    include_roots.append(build_include)
 
-target_compile_definitions(OpenCvSharpExtern PRIVATE OpenCvSharpExtern_EXPORTS)
-target_link_libraries(OpenCvSharpExtern PRIVATE ${OpenCV_LIBS})
+hdr = root / "src" / "opencvsharp" / "src" / "OpenCvSharpExtern" / "include_opencv.h"
+lines = hdr.read_text(encoding="utf-8", errors="ignore").splitlines()
 
-set_target_properties(OpenCvSharpExtern PROPERTIES OUTPUT_NAME "OpenCvSharpExtern")
-"@
+pat = re.compile(r'^\s*#\s*include\s*<([^>]+)>\s*$')
 
-Set-Content -Path (Join-Path $MinProj "CMakeLists.txt") -Value $CMakeLists -Encoding UTF8
+def visible(rel: str) -> bool:
+    for r in include_roots:
+        if (r / rel).exists():
+            return True
+    return False
 
-Info "Configure OpenCvSharpExtern (win-x64, minimal project)"
-cmake -S $MinProj -B $MinBuild -G Ninja `
-  -D CMAKE_BUILD_TYPE=Release
+out = []
+disabled = 0
+for line in lines:
+    m = pat.match(line)
+    if not m:
+        out.append(line)
+        continue
+    inc = m.group(1).strip()
+    if inc.startswith("opencv2/") and not visible(inc):
+        out.append("// [auto-disabled not in include roots] " + line)
+        disabled += 1
+    else:
+        out.append(line)
 
-Info "Build OpenCvSharpExtern"
-cmake --build $MinBuild --config Release
+hdr.write_text("\n".join(out) + "\n", encoding="utf-8")
+print(f"include_opencv.h filtered: disabled {disabled} includes")
+print("Include roots:")
+for r in include_roots:
+    print("  -", r)
+PY
 
-# -----------------------------
-# 4) Collect artifact
-# -----------------------------
+# ------------------------------------------------------------
+# Build OpenCvSharpExtern
+#   - Use OpenCV BUILD TREE to avoid missing built 3rdparty .lib
+#   - 走 opencvsharp/src 的 CMake（和 mac 一致），不要自己造“最小工程”
+# ------------------------------------------------------------
+Info "Build OpenCvSharpExtern (win-x64)"
+$SharpBuild = Join-Path $B "opencvsharp"
+
+cmake -S (Join-Path $SharpSrc "src") -B $SharpBuild -G Ninja `
+  -D CMAKE_BUILD_TYPE=Release `
+  -D CMAKE_INSTALL_PREFIX="$Out" `
+  -D OpenCV_DIR="$OpenCvB"
+
+cmake --build $SharpBuild --config Release
+cmake --build $SharpBuild --config Release --target install
+
+# ------------------------------------------------------------
+# Collect artifact
+# ------------------------------------------------------------
 Info "Collect artifact"
-$dll = Get-ChildItem -Path $MinBuild -Recurse -Filter "OpenCvSharpExtern.dll" | Select-Object -First 1
-if (-not $dll) { throw "OpenCvSharpExtern.dll not found under $MinBuild" }
+$dll = Get-ChildItem -Path $Out -Recurse -Filter "OpenCvSharpExtern.dll" | Select-Object -First 1
+if (-not $dll) {
+  Info "Out tree listing (top 3 levels):"
+  Get-ChildItem -Path $Out -Recurse -Depth 3 | Select-Object FullName | Out-Host
+  throw "OpenCvSharpExtern.dll not found under $Out"
+}
 
 $final = Join-Path $Out "final"
 New-Item -ItemType Directory -Force -Path $final | Out-Null
