@@ -1,4 +1,4 @@
-name: Extract Cuda 11.6-cuDNN 8.5
+name: Extract Cuda 11.6-cuDNN 8.5-for ORT 1.16.0
 
 on:
   workflow_dispatch:
