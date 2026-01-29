@@ -42,10 +42,6 @@ function Ensure-GeneratedOpenCvHeader([string]$OpenCvBuildDir, [string]$HeaderNa
 }
 
 function Write-MinimalIncludeOpenCv([string]$HdrPath) {
-  # Minimal include_opencv.h for BUILD_LIST=core,imgproc,videoio
-  # - NO opencv2/opencv.hpp
-  # - NO highgui/imgcodecs/shape/stitching/video/superres/dnn/etc
-  # - Keep C-API headers used by some OpenCvSharpExtern code paths (safe)
   $content = @'
 #pragma once
 
@@ -76,8 +72,7 @@ function Write-MinimalIncludeOpenCv([string]$HdrPath) {
 #define OPENCV_TRAITS_ENABLE_DEPRECATED
 
 // ===== Minimal OpenCV includes (core + imgproc + videoio) =====
-// IMPORTANT: DO NOT include <opencv2/opencv.hpp> because it drags in headers from
-// modules we purposely did not build (imgcodecs/highgui/video/stitching/...).
+// DO NOT include <opencv2/opencv.hpp> (it drags in imgcodecs/highgui/etc).
 #include <opencv2/core.hpp>
 #include <opencv2/core/base.hpp>
 #include <opencv2/core/mat.hpp>
@@ -86,11 +81,9 @@ function Write-MinimalIncludeOpenCv([string]$HdrPath) {
 
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgproc/types_c.h>
-#include <opencv2/imgproc/imgproc_c.h>  // legacy C API (OpenCvSharpExtern uses some C-APIs)
+#include <opencv2/imgproc/imgproc_c.h>
 
 #include <opencv2/videoio.hpp>
-
-// Some OpenCvSharpExtern code uses core_c in older branches; harmless if present.
 #include <opencv2/core/core_c.h>
 
 // ===== STL =====
@@ -108,7 +101,6 @@ function Write-MinimalIncludeOpenCv([string]$HdrPath) {
 #pragma warning(pop)
 #endif
 
-// Additional types/functions used by OpenCvSharpExtern
 #include "my_types.h"
 #include "my_functions.h"
 '@
@@ -116,6 +108,36 @@ function Write-MinimalIncludeOpenCv([string]$HdrPath) {
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $HdrPath) | Out-Null
   Set-Content -Path $HdrPath -Value $content -Encoding UTF8
   Info "Wrote minimal include_opencv.h -> $HdrPath"
+}
+
+function Patch-RemoveOpenCvHpp([string]$ExternDir) {
+  # Replace any direct include of opencv2/opencv.hpp in OpenCvSharpExtern sources
+  $replacement = @'
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
+'@.TrimEnd()
+
+  $files = Get-ChildItem -Path $ExternDir -Recurse -File -Include *.h,*.hpp,*.c,*.cc,*.cpp -ErrorAction SilentlyContinue
+  $count = 0
+
+  foreach ($f in $files) {
+    $txt = Get-Content -Path $f.FullName -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($txt)) { continue }
+
+    $new = $txt
+
+    # handle both <> and "" forms
+    $new = [regex]::Replace($new, '^\s*#\s*include\s*<opencv2/opencv\.hpp>\s*$', $replacement, "Multiline")
+    $new = [regex]::Replace($new, '^\s*#\s*include\s*"opencv2/opencv\.hpp"\s*$', $replacement, "Multiline")
+
+    if ($new -ne $txt) {
+      Set-Content -Path $f.FullName -Value $new -Encoding UTF8
+      $count++
+    }
+  }
+
+  Info "Patched $count file(s) to remove direct include of opencv2/opencv.hpp"
 }
 
 if ([string]::IsNullOrWhiteSpace($OpenCvVersion))  { $OpenCvVersion  = "4.11.0" }
@@ -154,7 +176,7 @@ Clone-Or-Update "https://github.com/opencv/opencv_contrib.git" $Contrib   $OpenC
 Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    $SharpSrc  $OpenCvSharpRef
 
 # -----------------------------
-# 1) Build OpenCV (STATIC, minimal modules, minimal external deps)
+# 1) Build OpenCV
 # -----------------------------
 $OpenCvB = Join-Path $Bld "opencv"
 New-Item -ItemType Directory -Force -Path $OpenCvB | Out-Null
@@ -188,32 +210,32 @@ cmake -S $OpenCvSrc -B $OpenCvB -G Ninja `
 Info "Build OpenCV"
 cmake --build $OpenCvB --config Release
 
-# Ensure generated headers exist where our include paths already point
 Info "Ensure generated OpenCV headers are under $OpenCvB/include/opencv2"
 Ensure-GeneratedOpenCvHeader $OpenCvB "opencv_modules.hpp"
 Ensure-GeneratedOpenCvHeader $OpenCvB "cvconfig.h"
 
 # -----------------------------
-# 2) Overwrite include_opencv.h to minimal version (core/imgproc/videoio only)
+# 2) Patch OpenCvSharpExtern headers/sources to avoid opencv.hpp
 # -----------------------------
-$ExternInclude = Join-Path $SharpSrc "src\OpenCvSharpExtern\include_opencv.h"
-Assert-Exists (Split-Path -Parent $ExternInclude) "OpenCvSharpExtern dir missing: $(Split-Path -Parent $ExternInclude)"
+$ExternDir = Join-Path $SharpSrc "src\OpenCvSharpExtern"
+Assert-Exists $ExternDir "OpenCvSharpExtern dir missing: $ExternDir"
+
+$ExternInclude = Join-Path $ExternDir "include_opencv.h"
 Write-MinimalIncludeOpenCv $ExternInclude
 
+Patch-RemoveOpenCvHpp $ExternDir
+
 # -----------------------------
-# 3) Build OpenCvSharpExtern.dll with minimal CMake project (bypass upstream)
+# 3) Build OpenCvSharpExtern.dll with minimal CMake project
 # -----------------------------
 Info "Generate minimal CMake project for OpenCvSharpExtern (bypass upstream CMakeLists)"
-$ExternSrc = Join-Path $SharpSrc "src\OpenCvSharpExtern"
-Assert-Exists $ExternSrc "Extern src missing: $ExternSrc"
-
 $MinProj   = Join-Path $Bld "opencvsharp_minproj"
 $MinBuild  = Join-Path $Bld "opencvsharp_minbuild"
 New-Item -ItemType Directory -Force -Path $MinProj,$MinBuild | Out-Null
 
-$CoreCpp    = Join-Path $ExternSrc "core.cpp"
-$ImgProcCpp = Join-Path $ExternSrc "imgproc.cpp"
-$VideoIoCpp = Join-Path $ExternSrc "videoio.cpp"
+$CoreCpp    = Join-Path $ExternDir "core.cpp"
+$ImgProcCpp = Join-Path $ExternDir "imgproc.cpp"
+$VideoIoCpp = Join-Path $ExternDir "videoio.cpp"
 
 foreach ($f in @($CoreCpp,$ImgProcCpp,$VideoIoCpp)) {
   Assert-Exists $f "Missing expected source: $f"
@@ -221,21 +243,14 @@ foreach ($f in @($CoreCpp,$ImgProcCpp,$VideoIoCpp)) {
 
 $OpenCvB_CMake     = To-CMakePath $OpenCvB
 $OpenCvSrc_CMake   = To-CMakePath $OpenCvSrc
-$ExternSrc_CMake   = To-CMakePath $ExternSrc
+$ExternDir_CMake   = To-CMakePath $ExternDir
 $CoreCpp_CMake     = To-CMakePath $CoreCpp
 $ImgProcCpp_CMake  = To-CMakePath $ImgProcCpp
 $VideoIoCpp_CMake  = To-CMakePath $VideoIoCpp
 
 $OpenCvBuildInclude_CMake = "$OpenCvB_CMake/include"
 
-$moduleIncludeLines = ""
-foreach ($m in ($BuildList -split ",")) {
-  $mm = $m.Trim()
-  if ($mm.Length -gt 0) {
-    $moduleIncludeLines += "  `"$OpenCvSrc_CMake/modules/$mm/include`"`n"
-  }
-}
-
+# keep include dirs minimal and deterministic
 $CMakeLists = @"
 cmake_minimum_required(VERSION 3.18)
 project(OpenCvSharpExternMin LANGUAGES C CXX)
@@ -253,12 +268,14 @@ add_library(OpenCvSharpExtern SHARED
 )
 
 target_include_directories(OpenCvSharpExtern PRIVATE
-  "$ExternSrc_CMake"
-  "$ExternSrc_CMake/include"
-  "$ExternSrc_CMake/.."
+  "$ExternDir_CMake"
+  "$ExternDir_CMake/include"
+  "$ExternDir_CMake/.."
   "$OpenCvSrc_CMake/include"
   "$OpenCvBuildInclude_CMake"
-$moduleIncludeLines
+  "$OpenCvSrc_CMake/modules/core/include"
+  "$OpenCvSrc_CMake/modules/imgproc/include"
+  "$OpenCvSrc_CMake/modules/videoio/include"
 )
 
 target_compile_definitions(OpenCvSharpExtern PRIVATE OpenCvSharpExtern_EXPORTS)
@@ -274,14 +291,7 @@ cmake -S $MinProj -B $MinBuild -G Ninja `
   -D CMAKE_BUILD_TYPE=Release
 
 Info "Build OpenCvSharpExtern"
-try {
-  cmake --build $MinBuild --config Release
-}
-catch {
-  Info "Build failed. If you see unresolved headers/symbols from imgcodecs/highgui, you MUST add that module to BUILD_LIST."
-  Info "Example: BUILD_LIST=core,imgproc,videoio,imgcodecs"
-  throw
-}
+cmake --build $MinBuild --config Release
 
 # -----------------------------
 # 4) Collect artifact
