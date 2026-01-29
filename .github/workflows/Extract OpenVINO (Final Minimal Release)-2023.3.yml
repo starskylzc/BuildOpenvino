@@ -1,0 +1,191 @@
+name: Extract OpenVINO (Final Minimal Release)-2023.3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Download Official Packages
+        run: |
+          set -euxo pipefail
+          mkdir -p downloads
+          echo ">>> Downloading Windows Package..."
+          curl -L -o downloads/win.zip "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/windows/w_openvino_toolkit_windows_2023.3.0.13775.ceeafaf64f3_x86_64.zip"
+
+          echo ">>> Downloading Mac Package..."
+          curl -L -o downloads/mac.tgz "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/macos/m_openvino_toolkit_macos_10_15_2023.3.0.13775.ceeafaf64f3_x86_64.tgz"
+
+      - name: Extract Archives
+        run: |
+          set -euxo pipefail
+          echo ">>> Extracting..."
+          unzip -q downloads/win.zip -d extracted_win
+          mkdir -p extracted_mac
+          tar -xzf downloads/mac.tgz -C extracted_mac
+
+          # 获取动态根目录名
+          WIN_ROOT=$(find extracted_win -maxdepth 1 -type d -name "w_openvino*" | head -n 1)
+          MAC_ROOT=$(find extracted_mac -maxdepth 1 -type d -name "m_openvino*" | head -n 1)
+
+          echo "WIN_ROOT=$WIN_ROOT" >> $GITHUB_ENV
+          echo "MAC_ROOT=$MAC_ROOT" >> $GITHUB_ENV
+
+      # --- Windows 处理 (GPU Only + ONNX Only + Minimal TBB) ---
+      - name: Process Windows Runtime
+        run: |
+          set -euxo pipefail
+          mkdir -p final_output/windows
+
+          SRC_BIN="$WIN_ROOT/runtime/bin/intel64/Release"
+          SRC_TBB="$WIN_ROOT/runtime/3rdparty/tbb/bin"
+          SRC_INC="$WIN_ROOT/runtime/include/ie/c_api"
+          DST="final_output/windows"
+
+          echo ">>> Copying Windows Libraries..."
+
+          # 1. 核心库 & ONNX
+          cp "$SRC_BIN/openvino.dll" "$DST/"
+          cp "$SRC_BIN/openvino_c.dll" "$DST/"
+          cp "$SRC_BIN/openvino_onnx_frontend.dll" "$DST/"
+
+          # 2. 插件 (仅保留 Intel GPU)
+          cp "$SRC_BIN/openvino_intel_gpu_plugin.dll" "$DST/"
+          # GPU 编译缓存配置 (推荐保留，否则初始化很慢)
+          [ -f "$SRC_BIN/cache.json" ] && cp "$SRC_BIN/cache.json" "$DST/"
+
+          # 3. [严格精简] TBB 依赖库
+          echo ">>> Copying Minimal TBB (No bind/proxy/debug)..."
+          cp "$SRC_TBB"/tbb12.dll "$DST/"
+          cp "$SRC_TBB"/tbbmalloc.dll "$DST/"
+
+          # 4. C API 头文件
+          mkdir -p "$DST/include"
+          cp "$SRC_INC/ie_c_api.h" "$DST/include/"
+
+          # 5. 生成 Windows 专用 plugins.xml
+          echo ">>> Generating Windows plugins.xml..."
+          cat <<EOF > "$DST/plugins.xml"
+          <ie>
+              <plugins>
+                  <plugin name="GPU" location="openvino_intel_gpu_plugin.dll">
+                  </plugin>
+              </plugins>
+          </ie>
+          EOF
+
+      # --- Mac 处理 (CPU Only + ONNX Only + Minimal TBB + CLEAN NAMES + Patch) ---
+      - name: Process Mac Runtime (Clean names, no symlink, no 2330)
+        run: |
+          set -euxo pipefail
+          mkdir -p final_output/mac
+
+          SRC_LIB="$MAC_ROOT/runtime/lib/intel64/Release"
+          SRC_TBB="$MAC_ROOT/runtime/3rdparty/tbb/lib"
+          SRC_INC="$MAC_ROOT/runtime/include/ie/c_api"
+          DST="final_output/mac"
+
+          echo ">>> Copying Mac Libraries (REAL files only)..."
+          # 1) 只复制实体版本库（.2023.3.0.dylib），不复制 .dylib / .2330.dylib 软链接
+          cp "$SRC_LIB/libopenvino.2023.3.0.dylib" "$DST/"
+          cp "$SRC_LIB/libopenvino_c.2023.3.0.dylib" "$DST/"
+          cp "$SRC_LIB/libopenvino_onnx_frontend.2023.3.0.dylib" "$DST/"
+
+          # 2) CPU 插件（你的包里是 .so）
+          CPU_PLUGIN=$(find "$SRC_LIB" -maxdepth 1 -type f \( -name "libopenvino_intel_cpu_plugin*.so" -o -name "libopenvino_intel_cpu_plugin*.dylib" \) | head -n 1)
+          if [[ -z "$CPU_PLUGIN" ]]; then
+            echo "ERROR: CPU plugin not found in $SRC_LIB"
+            ls -la "$SRC_LIB"
+            exit 1
+          fi
+          cp "$CPU_PLUGIN" "$DST/"
+          CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
+
+          # 3) 最小 TBB
+          echo ">>> Copying Minimal TBB (Core + Malloc Only)..."
+          cp "$SRC_TBB/libtbb.12.dylib" "$DST/"
+          cp "$SRC_TBB/libtbbmalloc.2.dylib" "$DST/"
+
+          # 4) C API 头文件
+          mkdir -p "$DST/include"
+          cp "$SRC_INC/ie_c_api.h" "$DST/include/"
+
+          # 5) 进入 DST 做“干净改名 + 全本地 patch”
+          cd "$DST"
+
+          echo ">>> Renaming dylibs to CLEAN names..."
+          mv -f "libopenvino.2023.3.0.dylib" "libopenvino.dylib"
+          mv -f "libopenvino_c.2023.3.0.dylib" "libopenvino_c.dylib"
+          mv -f "libopenvino_onnx_frontend.2023.3.0.dylib" "libopenvino_onnx_frontend.dylib"
+
+          # 6) 生成 Mac 专用 plugins.xml（写干净名/真实插件名）
+          echo ">>> Generating Mac plugins.xml..."
+          cat <<EOF > "plugins.xml"
+          <ie>
+              <plugins>
+                  <plugin name="CPU" location="$CPU_PLUGIN_NAME">
+                  </plugin>
+              </plugins>
+          </ie>
+          EOF
+
+          # 7) Patch：把依赖统一改到 @loader_path，并把旧名(2330/2023.3.0/@rpath) 映射到干净名
+          echo ">>> Patching Mac binaries for local execution (CLEAN)..."
+          LIBS=$(ls *.dylib *.so 2>/dev/null || true)
+
+          for LIB in $LIBS; do
+            chmod +w "$LIB" || true
+
+            # A) 自身 ID
+            install_name_tool -id "@loader_path/$LIB" "$LIB" || true
+
+            # B) 显式把 OpenVINO 旧名字映射到干净名字（避免内部仍引用 2330/2023.3.0）
+            install_name_tool -change "@rpath/libopenvino.2330.dylib" "@loader_path/libopenvino.dylib" "$LIB" 2>/dev/null || true
+            install_name_tool -change "@rpath/libopenvino.2023.3.0.dylib" "@loader_path/libopenvino.dylib" "$LIB" 2>/dev/null || true
+            install_name_tool -change "libopenvino.2330.dylib" "@loader_path/libopenvino.dylib" "$LIB" 2>/dev/null || true
+            install_name_tool -change "libopenvino.2023.3.0.dylib" "@loader_path/libopenvino.dylib" "$LIB" 2>/dev/null || true
+
+            install_name_tool -change "@rpath/libopenvino_c.2330.dylib" "@loader_path/libopenvino_c.dylib" "$LIB" 2>/dev/null || true
+            install_name_tool -change "@rpath/libopenvino_c.2023.3.0.dylib" "@loader_path/libopenvino_c.dylib" "$LIB" 2>/dev/null || true
+            install_name_tool -change "libopenvino_c.2330.dylib" "@loader_path/libopenvino_c.dylib" "$LIB" 2>/dev/null || true
+            install_name_tool -change "libopenvino_c.2023.3.0.dylib" "@loader_path/libopenvino_c.dylib" "$LIB" 2>/dev/null || true
+
+            install_name_tool -change "@rpath/libopenvino_onnx_frontend.2330.dylib" "@loader_path/libopenvino_onnx_frontend.dylib" "$LIB" 2>/dev/null || true
+            install_name_tool -change "@rpath/libopenvino_onnx_frontend.2023.3.0.dylib" "@loader_path/libopenvino_onnx_frontend.dylib" "$LIB" 2>/dev/null || true
+            install_name_tool -change "libopenvino_onnx_frontend.2330.dylib" "@loader_path/libopenvino_onnx_frontend.dylib" "$LIB" 2>/dev/null || true
+            install_name_tool -change "libopenvino_onnx_frontend.2023.3.0.dylib" "@loader_path/libopenvino_onnx_frontend.dylib" "$LIB" 2>/dev/null || true
+
+            # C) 通用闭包：所有非系统依赖，只要本目录有同名文件，就改为 @loader_path
+            DEPS=$(otool -L "$LIB" | tail -n +2 | awk '{print $1}' | grep -v "^/usr/lib/" | grep -v "^/System/" || true)
+            for DEP_PATH in $DEPS; do
+              DEP_NAME=$(basename "$DEP_PATH")
+              if [[ -f "$DEP_NAME" ]]; then
+                install_name_tool -change "$DEP_PATH" "@loader_path/$DEP_NAME" "$LIB" || true
+              fi
+            done
+          done
+
+          echo ">>> Verify dylibs:"
+          ls -la libopenvino*.dylib libtbb*.dylib "$CPU_PLUGIN_NAME" plugins.xml
+
+          echo ">>> Verify deps (onnx frontend):"
+          otool -L libopenvino_onnx_frontend.dylib || true
+          echo ">>> Verify deps (cpu plugin):"
+          otool -L "$CPU_PLUGIN_NAME" || true
+
+          cd ../..
+
+      - name: Zip and Upload
+        run: |
+          set -euxo pipefail
+          cd final_output
+          zip -r openvino_final_minimal.zip .
+          echo ">>> Final Package Contents:"
+          ls -R
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvino_runtime_final
+          path: final_output/openvino_final_minimal.zip
