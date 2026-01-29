@@ -43,7 +43,7 @@ Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    (Join-Path $Src "
 
 # ------------------------------------------------------------
 # Patch OpenCvSharpExtern:
-#  1) Inject SAFE ocv_* shims (no guessing, handles empty args & missing scope)
+#  1) Inject SAFE ocv_* shims (NO cmake_language, no parse risk)
 #  2) Reduce sources to core/imgproc/videoio
 # ------------------------------------------------------------
 Write-Info "Patch OpenCvSharpExtern CMakeLists (SAFE ocv_* shim + minimal sources)"
@@ -55,55 +55,67 @@ src  = root / "src" / "opencvsharp"
 cmake = src / "src" / "OpenCvSharpExtern" / "CMakeLists.txt"
 text = cmake.read_text(encoding="utf-8", errors="ignore")
 
-# ---- (A) SAFE shim for ocv_* helpers (robust, no-guess) ----
 shim = r'''
 # ------------------------------------------------------------
-# [Injected by CI] OpenCV CMake macro shims (SAFE)
-# Purpose:
-#   OpenCvSharpExtern's CMake may call ocv_* helpers that exist only when building
-#   inside OpenCV superbuild. When building standalone (find_package OpenCV),
-#   those commands may be missing.
-# Design:
-#   - tolerate empty argument lists (no-op)
-#   - tolerate missing PUBLIC/PRIVATE/INTERFACE keyword (default PRIVATE)
-#   - map to standard target_* commands
+# [Injected by CI] OpenCV CMake macro shims (SAFE, parse-proof)
+# - handles empty args (no-op)
+# - handles missing PUBLIC/PRIVATE/INTERFACE keyword (default PRIVATE)
+# - avoids cmake_language(CALL ...) to prevent CMake parse issues
 # ------------------------------------------------------------
-
-function(_ocv_safe_target_call _cmd _target)
-  set(_args ${ARGN})
-  if(NOT _args)
-    return()
-  endif()
-
-  list(GET _args 0 _first)
-  if(_first STREQUAL "PUBLIC" OR _first STREQUAL "PRIVATE" OR _first STREQUAL "INTERFACE")
-    cmake_language(CALL ${_cmd} ${_target} ${_args})
-  else()
-    cmake_language(CALL ${_cmd} ${_target} PRIVATE ${_args})
-  endif()
-endfunction()
 
 if(NOT COMMAND ocv_target_compile_definitions)
   function(ocv_target_compile_definitions target)
-    _ocv_safe_target_call(target_compile_definitions ${target} ${ARGN})
+    if(NOT ARGN)
+      return()
+    endif()
+    list(GET ARGN 0 _first)
+    if(_first STREQUAL "PUBLIC" OR _first STREQUAL "PRIVATE" OR _first STREQUAL "INTERFACE")
+      target_compile_definitions(${target} ${ARGN})
+    else()
+      target_compile_definitions(${target} PRIVATE ${ARGN})
+    endif()
   endfunction()
 endif()
 
 if(NOT COMMAND ocv_target_compile_options)
   function(ocv_target_compile_options target)
-    _ocv_safe_target_call(target_compile_options ${target} ${ARGN})
+    if(NOT ARGN)
+      return()
+    endif()
+    list(GET ARGN 0 _first)
+    if(_first STREQUAL "PUBLIC" OR _first STREQUAL "PRIVATE" OR _first STREQUAL "INTERFACE")
+      target_compile_options(${target} ${ARGN})
+    else()
+      target_compile_options(${target} PRIVATE ${ARGN})
+    endif()
   endfunction()
 endif()
 
 if(NOT COMMAND ocv_target_include_directories)
   function(ocv_target_include_directories target)
-    _ocv_safe_target_call(target_include_directories ${target} ${ARGN})
+    if(NOT ARGN)
+      return()
+    endif()
+    list(GET ARGN 0 _first)
+    if(_first STREQUAL "PUBLIC" OR _first STREQUAL "PRIVATE" OR _first STREQUAL "INTERFACE")
+      target_include_directories(${target} ${ARGN})
+    else()
+      target_include_directories(${target} PRIVATE ${ARGN})
+    endif()
   endfunction()
 endif()
 
 if(NOT COMMAND ocv_target_link_libraries)
   function(ocv_target_link_libraries target)
-    _ocv_safe_target_call(target_link_libraries ${target} ${ARGN})
+    if(NOT ARGN)
+      return()
+    endif()
+    list(GET ARGN 0 _first)
+    if(_first STREQUAL "PUBLIC" OR _first STREQUAL "PRIVATE" OR _first STREQUAL "INTERFACE")
+      target_link_libraries(${target} ${ARGN})
+    else()
+      target_link_libraries(${target} PRIVATE ${ARGN})
+    endif()
   endfunction()
 endif()
 
@@ -115,7 +127,7 @@ if(NOT COMMAND ocv_add_dependencies)
   endfunction()
 endif()
 
-# Rare helpers - keep config robust (no-op)
+# keep config robust for rare helpers
 if(NOT COMMAND ocv_warnings_disable)
   function(ocv_warnings_disable) endfunction()
 endif()
@@ -125,8 +137,7 @@ endif()
 # ------------------------------------------------------------
 '''
 
-if "OpenCV CMake macro shims (SAFE)" not in text:
-    # insert after project(...) if present; else after cmake_minimum_required(...)
+if "OpenCV CMake macro shims (SAFE, parse-proof)" not in text:
     mproj = re.search(r"^\s*project\s*\(.*?\)\s*$", text, flags=re.M)
     if mproj:
         pos = mproj.end()
@@ -139,7 +150,7 @@ if "OpenCV CMake macro shims (SAFE)" not in text:
         else:
             text = shim + "\n" + text
 
-# ---- (B) Minimal sources: core/imgproc/videoio ----
+# Minimal sources: core/imgproc/videoio
 pattern = re.compile(r"add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*", re.S)
 m = pattern.search(text)
 if not m:
