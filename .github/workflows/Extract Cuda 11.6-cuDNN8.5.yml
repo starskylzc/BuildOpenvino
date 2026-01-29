@@ -1,0 +1,116 @@
+name: Extract Cuda 11.6-cuDNN8.5
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: windows-latest
+    steps:
+      - name: Prepare folders
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force downloads, extracted, final_output\win-x64 | Out-Null
+
+      - name: Download NVIDIA redistributables
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+
+          $urls = @(
+            # CUDA Runtime (cudart) 11.6.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-11.6.55-archive.zip",
+
+            # cuBLAS (incl cublasLt) 11.8.1.74
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-11.8.1.74-archive.zip",
+
+            # cuFFT 10.7.0.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-10.7.0.55-archive.zip",
+
+            # cuRAND 10.2.9.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.2.9.55-archive.zip",
+
+            # cuSOLVER 11.3.2.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcusolver/windows-x86_64/libcusolver-windows-x86_64-11.3.2.55-archive.zip",
+
+            # cuSPARSE 11.7.1.55
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/windows-x86_64/libcusparse-windows-x86_64-11.7.1.55-archive.zip",
+
+            # cuDNN 8.5.0.96 (CUDA 11)
+            "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-8.5.0.96_cuda11-archive.zip"
+          )
+
+          foreach ($u in $urls) {
+            $name = Split-Path $u -Leaf
+            $out  = Join-Path "downloads" $name
+            Write-Host ">>> Downloading $name"
+            Invoke-WebRequest -Uri $u -OutFile $out
+          }
+
+      - name: Extract archives
+        shell: pwsh
+        run: |
+          Get-ChildItem downloads -Filter *.zip | ForEach-Object {
+            $dest = Join-Path "extracted" $_.BaseName
+            New-Item -ItemType Directory -Force $dest | Out-Null
+            Write-Host ">>> Extracting $($_.Name) -> $dest"
+            Expand-Archive -Path $_.FullName -DestinationPath $dest -Force
+          }
+
+      - name: Collect minimal inference runtime DLLs (CUDA + cuDNN infer)
+        shell: pwsh
+        run: |
+          $dst = "final_output\win-x64"
+
+          # CUDA 11.6 推理常用最小集合
+          $needCuda = @(
+            "cudart64_110.dll",
+            "cublas64_11.dll",
+            "cublasLt64_11.dll",
+            "cufft64_10.dll",
+            "curand64_10.dll",
+            "cusolver64_11.dll",
+            "cusparse64_11.dll"
+          )
+
+          # cuDNN 8.5：只要推理（infer）
+          $needCudnnInfer = @(
+            "cudnn64_8.dll",
+            "cudnn_ops_infer64_8.dll",
+            "cudnn_cnn_infer64_8.dll",
+            "cudnn_adv_infer64_8.dll"
+          )
+
+          function Copy-One($name) {
+            $f = Get-ChildItem -Path extracted -Recurse -File -Filter $name | Select-Object -First 1
+            if (-not $f) { throw "Missing DLL: $name" }
+            Copy-Item -Force $f.FullName (Join-Path $dst $name)
+            Write-Host "OK  $name  <-  $($f.FullName)"
+          }
+
+          Write-Host "=== Copy CUDA DLLs ==="
+          foreach ($n in $needCuda) { Copy-One $n }
+
+          Write-Host "=== Copy cuDNN (infer only) DLLs ==="
+          foreach ($n in $needCudnnInfer) { Copy-One $n }
+
+          # 输出清单（方便你比对、排查缺失）
+          Get-ChildItem $dst | Sort-Object Name | ForEach-Object {
+            "{0}`t{1}" -f $_.Name, $_.Length
+          } | Out-File -Encoding UTF8 (Join-Path $dst "manifest.txt")
+
+          Write-Host "=== Final output ==="
+          Get-ChildItem $dst | Select-Object Name, Length
+
+      - name: Zip and upload
+        shell: pwsh
+        run: |
+          Compress-Archive -Path final_output\win-x64\* -DestinationPath final_output\cuda116_cudnn85_infer_win-x64.zip -Force
+          Write-Host "Zipped:"
+          Get-ChildItem final_output
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuda116_cudnn85_infer_win-x64
+          path: final_output/cuda116_cudnn85_infer_win-x64.zip
