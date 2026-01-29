@@ -10,40 +10,49 @@ jobs:
       - name: Prepare folders
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force downloads, extracted, ort, final_output\win-x64 | Out-Null
+          New-Item -ItemType Directory -Force downloads, extracted, ort_from_nuget, final_output\win-x64 | Out-Null
 
-      # 确保有 dumpbin（VS 开发者环境）
       - name: Setup MSVC (for dumpbin)
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Download ORT GPU package (1.16.0)
+      # 1) 下载 NuGet nupkg（更稳，不依赖 GitHub release）
+      - name: Download Microsoft.ML.OnnxRuntime.Gpu nupkg (1.16.0)
         shell: pwsh
         env:
-          ORT_URL: https://github.com/microsoft/onnxruntime/releases/download/v1.16.0/onnxruntime-win-x64-gpu-1.16.0.zip
+          NUPKG_URL: https://globalcdn.nuget.org/packages/microsoft.ml.onnxruntime.gpu.1.16.0.nupkg?packageVersion=1.16.0
         run: |
           $ProgressPreference = "SilentlyContinue"
-          $out = "downloads\onnxruntime-win-x64-gpu-1.16.0.zip"
+          $out = "downloads\microsoft.ml.onnxruntime.gpu.1.16.0.nupkg"
+          Write-Host ">>> Download nupkg: $env:NUPKG_URL"
+          Invoke-WebRequest -Uri $env:NUPKG_URL -OutFile $out
 
-          # 用 GITHUB_TOKEN 走授权下载，避免偶发限流/拿到HTML
-          $headers = @{
-            "Authorization" = "Bearer $env:GITHUB_TOKEN"
-            "Accept"        = "application/octet-stream"
-            "User-Agent"    = "actions"
-          }
-
-          Write-Host ">>> Download ORT: $env:ORT_URL"
-          Invoke-WebRequest -Uri $env:ORT_URL -OutFile $out -Headers $headers
-
-          # 简单 sanity check：zip 头
+          # sanity: nupkg 是 zip，头应该是 PK
           $sig = Get-Content -Path $out -Encoding Byte -TotalCount 4
           if (-not ($sig[0] -eq 0x50 -and $sig[1] -eq 0x4B)) {
-            throw "ORT zip does not look like a ZIP (maybe downloaded HTML)."
+            throw "Downloaded nupkg does not look like a ZIP (maybe HTML)."
           }
 
-          Expand-Archive -Path $out -DestinationPath ort -Force
-          Write-Host ">>> ORT extracted:"
-          Get-ChildItem ort | Select-Object -First 20 | ForEach-Object { $_.FullName }
+          Expand-Archive -Path $out -DestinationPath ort_from_nuget -Force
+          Write-Host ">>> Extracted nupkg top entries:"
+          Get-ChildItem ort_from_nuget | Select-Object -First 30 | ForEach-Object { $_.FullName }
 
+      # 2) 找到 win-x64 native dll 目录
+      - name: Locate ORT native DLLs from nupkg
+        shell: pwsh
+        run: |
+          # 典型路径：runtimes/win-x64/native/*.dll
+          $nativeDir = Get-ChildItem -Path ort_from_nuget -Recurse -Directory |
+            Where-Object { $_.FullName -match "runtimes\\win-x64\\native$" } |
+            Select-Object -First 1
+
+          if (-not $nativeDir) { throw "Cannot find runtimes/win-x64/native in nupkg" }
+
+          "ORT_NATIVE_DIR=$($nativeDir.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "ORT_NATIVE_DIR=$($nativeDir.FullName)"
+          Write-Host ">>> Native DLLs:"
+          Get-ChildItem $nativeDir.FullName -Filter *.dll | Select-Object Name, Length
+
+      # 3) 下载 NVIDIA redistributables
       - name: Download NVIDIA redistributables (CUDA 11.6 + cuDNN 8.5)
         shell: pwsh
         run: |
@@ -82,21 +91,25 @@ jobs:
       - name: Extract NVIDIA archives
         shell: pwsh
         run: |
-          Get-ChildItem downloads -Filter *.zip | Where-Object { $_.Name -notlike "onnxruntime-*" } | ForEach-Object {
+          Get-ChildItem downloads -Filter *.zip | ForEach-Object {
+            if ($_.Name -like "*.nupkg") { return } # ignore
             $dest = Join-Path "extracted" $_.BaseName
             New-Item -ItemType Directory -Force $dest | Out-Null
             Write-Host ">>> Extracting $($_.Name) -> $dest"
             Expand-Archive -Path $_.FullName -DestinationPath $dest -Force
           }
 
+      # 4) 用 dumpbin 扫 ORT CUDA provider 的依赖
       - name: Analyze ORT CUDA provider dependencies (dumpbin)
         shell: pwsh
         run: |
-          # 找到 ORT 目录里关键 DLL（不同 zip 内层目录名可能变化，递归找）
-          $cudaProvider = Get-ChildItem -Path ort -Recurse -File -Filter "onnxruntime_providers_cuda.dll" | Select-Object -First 1
-          if (-not $cudaProvider) { throw "onnxruntime_providers_cuda.dll not found in ORT zip" }
+          $nativeDir = $env:ORT_NATIVE_DIR
+          if (-not $nativeDir) { throw "ORT_NATIVE_DIR env missing" }
 
-          $sharedProvider = Get-ChildItem -Path ort -Recurse -File -Filter "onnxruntime_providers_shared.dll" | Select-Object -First 1
+          $cudaProvider = Get-ChildItem -Path $nativeDir -Filter "onnxruntime_providers_cuda.dll" | Select-Object -First 1
+          if (-not $cudaProvider) { throw "onnxruntime_providers_cuda.dll not found in nupkg native dir" }
+
+          $sharedProvider = Get-ChildItem -Path $nativeDir -Filter "onnxruntime_providers_shared.dll" | Select-Object -First 1
 
           Write-Host "CUDA Provider: $($cudaProvider.FullName)"
           if ($sharedProvider) { Write-Host "Shared Provider: $($sharedProvider.FullName)" }
@@ -104,7 +117,6 @@ jobs:
           function Get-Dependents($dllPath) {
             $out = (dumpbin /nologo /dependents $dllPath) 2>&1
             $lines = $out -split "`r?`n"
-            # 提取看起来像 xxx.dll 的行
             $dlls = $lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -match "^[A-Za-z0-9_\-\.]+\.dll$" }
             return $dlls
           }
@@ -113,7 +125,7 @@ jobs:
           foreach ($d in (Get-Dependents $cudaProvider.FullName)) { [void]$deps.Add($d) }
           if ($sharedProvider) { foreach ($d in (Get-Dependents $sharedProvider.FullName)) { [void]$deps.Add($d) } }
 
-          # 只关注 CUDA/cuDNN 相关（你要打包的用户态运行时）
+          # 只关注我们能打包的 CUDA/cuDNN 用户态 DLL（不包含 nvcuda.dll）
           $want = $deps | Where-Object {
             $_ -match "^(cudart|cublas|cublasLt|cufft|curand|cusolver|cusparse|cudnn).*\.dll$"
           } | Sort-Object
@@ -127,7 +139,8 @@ jobs:
 
           $want | Out-File -Encoding UTF8 "final_output\win-x64\ort_cuda_deps.txt"
 
-      - name: Collect minimal runtime DLLs (closure for CUDA + cuDNN infer-only)
+      # 5) 按闭包提取最小 DLL（CUDA 闭包 + cuDNN 推理 infer-only）
+      - name: Collect minimal runtime DLLs (CUDA closure + cuDNN infer-only)
         shell: pwsh
         run: |
           $dst = "final_output\win-x64"
@@ -139,16 +152,17 @@ jobs:
             Write-Host "OK  $name  <-  $($f.FullName)"
           }
 
-          # 1) 先按 dumpbin 闭包拷 CUDA 相关（静态导入依赖）
+          # (1) CUDA：dumpbin 静态导入闭包决定（100% 不猜）
           $deps = Get-Content -Path "final_output\win-x64\ort_cuda_deps.txt" | Where-Object { $_ -and $_.Trim().Length -gt 0 }
+
           Write-Host "=== Copy CUDA deps (from dumpbin closure) ==="
           foreach ($n in $deps) {
-            # 只从 extracted 里拷，不动系统/ORT自带
+            # nvcuda.dll 来自驱动，不能也不需要打包
+            if ($n -ieq "nvcuda.dll") { continue }
             Copy-OneFromExtracted $n
           }
 
-          # 2) cuDNN：按“推理 only”固定带（避免 delay-load 漏检）
-          #    你明确不要 train，所以只带 infer + cudnn64_8.dll
+          # (2) cuDNN：推理 only（避免 delay-load 漏检）
           $needCudnnInfer = @(
             "cudnn64_8.dll",
             "cudnn_ops_infer64_8.dll",
@@ -158,14 +172,15 @@ jobs:
 
           Write-Host "=== Ensure cuDNN infer-only DLLs ==="
           foreach ($n in $needCudnnInfer) {
-            if (-not (Test-Path (Join-Path $dst $n))) {
+            $p = Join-Path $dst $n
+            if (-not (Test-Path $p)) {
               Copy-OneFromExtracted $n
             } else {
               Write-Host "SKIP $n (already copied by dumpbin closure)"
             }
           }
 
-          # 输出清单
+          # 清单输出
           Get-ChildItem $dst | Sort-Object Name | ForEach-Object {
             "{0}`t{1}" -f $_.Name, $_.Length
           } | Out-File -Encoding UTF8 (Join-Path $dst "manifest.txt")
