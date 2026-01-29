@@ -56,11 +56,10 @@ Clone-Or-Update "https://github.com/opencv/opencv_contrib.git" (Join-Path $SRC "
 Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    (Join-Path $SRC "opencvsharp")    $OPENCVSHARP_REF
 
 # ============================================================
-# 3. Patch OpenCvSharpExtern (包含报错修复)
+# 3. Patch OpenCvSharpExtern (逻辑大修: 顺序修复)
 # ============================================================
 Write-Host "==> Patch OpenCvSharpExtern CMakeLists to minimal sources"
 
-# 这里使用了 $SRC_SLASH 避免反斜杠问题
 $pyScriptPatchCMake = @"
 import pathlib, re
 
@@ -68,26 +67,32 @@ src_path = pathlib.Path(r'$SRC_SLASH')
 cmake = src_path / 'opencvsharp' / 'src' / 'OpenCvSharpExtern' / 'CMakeLists.txt'
 text = cmake.read_text(encoding='utf-8', errors='ignore')
 
-# [FIX] 替换 OpenCV 内部命令 ocv_target_compile_definitions 为标准 CMake 命令
-# 这是之前导致 'Unknown CMake command' 报错的原因
-text = text.replace('ocv_target_compile_definitions', 'target_compile_definitions')
+# [Step A] 直接注释掉原有的 ocv_target_compile_definitions 防止报错
+# 因为原文件通常把这个调用放在 add_library 之前，如果直接改成 target_compile_definitions 会报 target not found
+text = text.replace('ocv_target_compile_definitions', '# ocv_target_compile_definitions')
 
-# 寻找并替换 add_library 部分为最小化编译
+# [Step B] 寻找并替换 add_library 部分
+# 在 add_library 之后显式追加 target_compile_definitions
 pattern = re.compile(r'add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*', re.S)
 m = pattern.search(text)
+
 if not m:
     print('WARNING: Cannot find add_library target to patch.')
 else:
+    # 注意: 这里我们在 add_library 闭合括号后面，手动加上了 if(MSVC)...
     minimal = '''add_library(OpenCvSharpExtern SHARED
     core.cpp
     imgproc.cpp
     videoio.cpp
 )
 
+if(MSVC)
+    target_compile_definitions(OpenCvSharpExtern PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 '''
     text2 = text[:m.start()] + minimal + text[m.end():]
     cmake.write_text(text2, encoding='utf-8')
-    print(f'Patched and Fixed: {cmake}')
+    print(f'Patched: {cmake}')
 "@
 
 $pyScriptPatchCMake | python -
@@ -167,7 +172,6 @@ for line in lines:
         out.append(line)
         continue
     inc = m.group(1).strip()
-    # 只过滤 opencv2/ 开头且不存在于 include roots 的头文件
     if inc.startswith('opencv2/') and not visible_header_exists(inc):
         out.append('// [auto-disabled] ' + line)
         disabled += 1
@@ -189,7 +193,6 @@ $SRC_SHARP = "$SRC_SLASH/opencvsharp/src"
 $BUILD_SHARP = "$B_DIR_SLASH/opencvsharp"
 $INSTALL_PREFIX = "$OUT_DIR_SLASH"
 
-# 指向刚才编译的 build 目录，让它找到 OpenCVConfig.cmake
 cmake -S "$SRC_SHARP" -B "$BUILD_SHARP" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D CMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" `
@@ -205,7 +208,6 @@ ninja -C "$BUILD_SHARP" install
 $FINAL_DIR = Join-Path $OUT_DIR "final"
 New-Item -ItemType Directory -Force -Path $FINAL_DIR | Out-Null
 
-# 在安装目录中查找生成的 DLL (使用递归查找，因为 cmake install 可能放在 bin/ 子目录)
 $DllSource = Get-ChildItem -Path $OUT_DIR -Filter "OpenCvSharpExtern.dll" -Recurse | Select-Object -First 1
 
 if (-not $DllSource) {
