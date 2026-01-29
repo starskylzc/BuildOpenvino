@@ -10,6 +10,13 @@ $ErrorActionPreference = "Stop"
 
 function Info($msg) { Write-Host "==> $msg" }
 
+function To-CMakePath([string]$p) {
+  if ([string]::IsNullOrWhiteSpace($p)) { return $p }
+  # 取绝对路径 + 反斜杠转正斜杠，避免 CMake "\a" 这类转义坑
+  $full = [System.IO.Path]::GetFullPath($p)
+  return ($full -replace '\\','/')
+}
+
 if ([string]::IsNullOrWhiteSpace($OpenCvVersion))  { $OpenCvVersion  = "4.11.0" }
 if ([string]::IsNullOrWhiteSpace($OpenCvSharpRef)) { $OpenCvSharpRef = "main" }
 if ([string]::IsNullOrWhiteSpace($BuildList))      { $BuildList      = "core,imgproc,videoio" }
@@ -81,8 +88,6 @@ cmake --build $OpenCvB --config Release
 
 # -----------------------------
 # 2) Auto-filter include_opencv.h (optional but recommended)
-#    Only keep includes that exist in:
-#      opencv/include + modules/<build_list>/include
 # -----------------------------
 Info "Auto-filter include_opencv.h based on existing OpenCV headers"
 $env:BUILD_LIST = $BuildList
@@ -151,6 +156,14 @@ foreach ($f in @($CoreCpp,$ImgProcCpp,$VideoIoCpp)) {
   if (!(Test-Path $f)) { throw "Missing expected source: $f" }
 }
 
+# ---- Convert paths to CMake-friendly (forward slashes) ----
+$OpenCvB_CMake     = To-CMakePath $OpenCvB
+$ExternSrc_CMake   = To-CMakePath $ExternSrc
+$CoreCpp_CMake     = To-CMakePath $CoreCpp
+$ImgProcCpp_CMake  = To-CMakePath $ImgProcCpp
+$VideoIoCpp_CMake  = To-CMakePath $VideoIoCpp
+
+# CMakeLists content (all paths use /)
 $CMakeLists = @"
 cmake_minimum_required(VERSION 3.18)
 project(OpenCvSharpExternMin LANGUAGES C CXX)
@@ -158,32 +171,28 @@ project(OpenCvSharpExternMin LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Point this to OpenCV build tree
-# (OpenCVConfig.cmake exists there after configure)
-set(OpenCV_DIR "${OpenCvB}")
+# OpenCV build tree (OpenCVConfig.cmake is generated there)
+set(OpenCV_DIR "$OpenCvB_CMake")
 
 find_package(OpenCV REQUIRED)
 
 add_library(OpenCvSharpExtern SHARED
-  "${CoreCpp}"
-  "${ImgProcCpp}"
-  "${VideoIoCpp}"
+  "$CoreCpp_CMake"
+  "$ImgProcCpp_CMake"
+  "$VideoIoCpp_CMake"
 )
 
 target_include_directories(OpenCvSharpExtern PRIVATE
-  "${ExternSrc}"
-  "${ExternSrc}\..\OpenCvSharpExtern"
-  "${ExternSrc}\include"
-  "${ExternSrc}\.."
+  "$ExternSrc_CMake"
+  "$ExternSrc_CMake/include"
+  "$ExternSrc_CMake/.."
   ${OpenCV_INCLUDE_DIRS}
 )
 
-# OpenCvSharpExtern code expects this export define
 target_compile_definitions(OpenCvSharpExtern PRIVATE OpenCvSharpExtern_EXPORTS)
 
 target_link_libraries(OpenCvSharpExtern PRIVATE ${OpenCV_LIBS})
 
-# Make output name match expected "OpenCvSharpExtern.dll"
 set_target_properties(OpenCvSharpExtern PROPERTIES
   OUTPUT_NAME "OpenCvSharpExtern"
 )
