@@ -1,5 +1,5 @@
 # ------------------------------------------------------------
-# build_windows_multi_arch.ps1
+# build_windows_x64.ps1 (实际已升级为支持 x64, x86, arm64)
 # ------------------------------------------------------------
 $ErrorActionPreference = "Stop"
 
@@ -229,7 +229,7 @@ foreach ($ARCH_NAME in $ARCH_LIST) {
     # ============================================================
     # 7. 收集产物 (按架构分目录存放，防止冲突)
     # ============================================================
-    # 这里创建 final/x64, final/x86, final/arm64
+    # 最终产物位置: _work/final/x64, _work/final/x86, _work/final/arm64
     $FINAL_DIR = Join-Path $ROOT "final" $ARCH_NAME
     New-Item -ItemType Directory -Force -Path $FINAL_DIR | Out-Null
 
