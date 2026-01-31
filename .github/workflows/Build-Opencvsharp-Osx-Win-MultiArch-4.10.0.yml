@@ -63,22 +63,24 @@ jobs:
   # Windows Matrix Jobs (x64, x86, arm64)
   # ============================================================
   build_windows_matrix:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # target: 传递给 PowerShell 脚本的 -TargetArch 参数
-          # arch:   传递给 ilammy/msvc-dev-cmd 用于设置 Ninja 的编译器环境
-          
           - target: x64
             arch: x64
+            os: windows-latest
             
           - target: x86
             arch: x86
+            os: windows-latest
             
           - target: arm64
-            arch: amd64_arm64  # 使用 x64 主机交叉编译 arm64
+            # [修改点2] 使用原生架构 arm64 (原 amd64_arm64 是交叉编译)
+            arch: arm64
+            # [修改点3] 指定 Github 的 ARM Runner
+            os: windows-11-arm
 
     steps:
       - uses: actions/checkout@v4
