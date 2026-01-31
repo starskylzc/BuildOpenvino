@@ -1,10 +1,10 @@
-name: Build-Opencvsharp-Osx-Universal-Win64-4.10.0
+name: Build-Opencvsharp-Osx-Win-MultiArch-4.10.0
 
 on:
   workflow_dispatch:
 
 jobs:
-  build_x64:
+  build_osx_x64:
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +30,7 @@ jobs:
           name: osx-x64-slice
           path: _work/out-x86_64/final/libOpenCvSharpExtern.dylib
 
-  build_arm64:
+  build_osx_arm64:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -56,67 +56,45 @@ jobs:
           name: osx-arm64-slice
           path: _work/out-arm64/final/libOpenCvSharpExtern.dylib
 
-  lipo_universal:
-    runs-on: macos-15
-    needs: [build_x64, build_arm64]
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: osx-x64-slice
-          path: slices/x86_64
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: osx-arm64-slice
-          path: slices/arm64
-
-      - name: Create universal dylib
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p out
-
-          lipo -create \
-            slices/x86_64/libOpenCvSharpExtern.dylib \
-            slices/arm64/libOpenCvSharpExtern.dylib \
-            -output out/libOpenCvSharpExtern.dylib
-
-          install_name_tool -id "@rpath/libOpenCvSharpExtern.dylib" out/libOpenCvSharpExtern.dylib || true
-          lipo -info out/libOpenCvSharpExtern.dylib
-          otool -L out/libOpenCvSharpExtern.dylib
-
-      - name: Upload universal artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: libOpenCvSharpExtern-osx-universal
-          path: out/libOpenCvSharpExtern.dylib
-
-  build_windows_x64:
+  build_windows_multi:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 关键：让 cl/link 环境就绪（MSVC）
-      - uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Install tools (cmake/ninja)
+      - name: Install tools (cmake)
         shell: pwsh
         run: |
-          choco install -y ninja cmake
           cmake --version
-          ninja --version
           python --version
 
-      - name: Build OpenCvSharpExtern (win-x64)
+      - name: Build OpenCvSharpExtern (Multi-Arch)
         shell: pwsh
         run: |
           $env:OPENCV_VERSION = "4.10.0"
           $env:OPENCVSHARP_REF = "4.11.0.20250507"
           $env:BUILD_LIST = "core,imgproc,videoio"
+          
+          # 执行修改后的多架构构建脚本
           pwsh -File .github/scripts/build_windows_x64.ps1
 
+      # ---------------------------------------------------
+      # 分别上传 3 个架构的产物
+      # ---------------------------------------------------
+      
       - name: Upload win-x64 artifact
         uses: actions/upload-artifact@v4
         with:
           name: OpenCvSharpExtern-win-x64
-          path: _work/out-win-x64/final/OpenCvSharpExtern.dll
+          path: _work/final/x64/OpenCvSharpExtern.dll
+
+      - name: Upload win-x86 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCvSharpExtern-win-x86
+          path: _work/final/x86/OpenCvSharpExtern.dll
+
+      - name: Upload win-arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCvSharpExtern-win-arm64
+          path: _work/final/arm64/OpenCvSharpExtern.dll
