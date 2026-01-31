@@ -25,16 +25,21 @@ $BUILD_LIST = if ($env:BUILD_LIST) { $env:BUILD_LIST } else { "core,imgproc,vide
 $ROOT = Join-Path (Get-Location) "_work"
 $SRC = Join-Path $ROOT "src"
 
-# [修改点] 使用参数动态生成目录，实现隔离
-$B_DIR = Join-Path $ROOT "build-win-$TargetArch"
-$OUT_DIR = Join-Path $ROOT "out-win-$TargetArch"
+# [关键修复] 彻底清理构建目录，防止 CMakeCache 残留导致架构识别错误
+if (Test-Path $B_DIR) {
+    Write-Host "Cleaning existing build directory: $B_DIR"
+    Remove-Item -Path $B_DIR -Recurse -Force
+}
+if (Test-Path $OUT_DIR) {
+    Write-Host "Cleaning existing output directory: $OUT_DIR"
+    Remove-Item -Path $OUT_DIR -Recurse -Force
+}
 
-# 确保目录存在
+# 创建新目录
 New-Item -ItemType Directory -Force -Path $SRC | Out-Null
 New-Item -ItemType Directory -Force -Path $B_DIR | Out-Null
 New-Item -ItemType Directory -Force -Path $OUT_DIR | Out-Null
 
-# 准备 Python 脚本用的路径（统一替换为 / 防止转义问题）
 $SRC_SLASH = $SRC.Replace("\", "/")
 $B_DIR_SLASH = $B_DIR.Replace("\", "/")
 $OUT_DIR_SLASH = $OUT_DIR.Replace("\", "/")
