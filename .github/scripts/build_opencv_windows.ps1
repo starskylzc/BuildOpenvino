@@ -127,7 +127,14 @@ Write-Host "==> Build OpenCV static (Windows $TargetArch)"
 $SRC_OPENCV = "$SRC_SLASH/opencv"
 $SRC_CONTRIB = "$SRC_SLASH/opencv_contrib/modules"
 $BUILD_OPENCV = "$B_DIR_SLASH/opencv"
-
+# [关键修复] 针对 ARM64 定义交叉编译参数
+# 这会告诉 CMake 不要尝试运行(try_run)生成的二进制文件，防止在 x64 机器上报错或静默失败
+$EXTRA_OPENCV_ARGS = @()
+if ($TargetArch -eq "arm64") {
+    Write-Host "Detected ARM64 target. Adding Cross-Compiling flags..." 
+    $EXTRA_OPENCV_ARGS += "-D", "CMAKE_SYSTEM_NAME=Windows"
+    $EXTRA_OPENCV_ARGS += "-D", "CMAKE_SYSTEM_PROCESSOR=ARM64"
+}
 cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D OPENCV_EXTRA_MODULES_PATH="$SRC_CONTRIB" `
@@ -217,11 +224,19 @@ Write-Host "==> Build OpenCvSharpExtern (Windows $TargetArch)"
 $SRC_SHARP = "$SRC_SLASH/opencvsharp/src"
 $BUILD_SHARP = "$B_DIR_SLASH/opencvsharp"
 $INSTALL_PREFIX = "$OUT_DIR_SLASH"
-
+# [关键修复] 针对 ARM64 定义交叉编译参数
+# 这会告诉 CMake 不要尝试运行(try_run)生成的二进制文件，防止在 x64 机器上报错或静默失败
+$EXTRA_OPENCV_ARGS = @()
+if ($TargetArch -eq "arm64") {
+    Write-Host "Detected ARM64 target. Adding Cross-Compiling flags..." 
+    $EXTRA_OPENCV_ARGS += "-D", "CMAKE_SYSTEM_NAME=Windows"
+    $EXTRA_OPENCV_ARGS += "-D", "CMAKE_SYSTEM_PROCESSOR=ARM64"
+}
 cmake -S "$SRC_SHARP" -B "$BUILD_SHARP" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D CMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" `
   -D CMAKE_POLICY_VERSION_MINIMUM=3.5 `
+  -D CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
   -D OpenCV_DIR="$BUILD_OPENCV"
 
 ninja -C "$BUILD_SHARP"
