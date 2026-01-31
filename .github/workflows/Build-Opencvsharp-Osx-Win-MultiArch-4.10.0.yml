@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ============================================================
+  # Mac Jobs (保留，移除了 lipo_universal)
+  # ============================================================
   build_x64:
     runs-on: macos-15-intel
     steps:
@@ -56,43 +59,56 @@ jobs:
           name: osx-arm64-slice
           path: _work/out-arm64/final/libOpenCvSharpExtern.dylib
 
-  build_windows_multi:
+  # ============================================================
+  # Windows Matrix Jobs (x64, x86, arm64)
+  # ============================================================
+  build_windows_matrix:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # target: 传递给 PowerShell 脚本的 -TargetArch 参数
+          # arch:   传递给 ilammy/msvc-dev-cmd 用于设置 Ninja 的编译器环境
+          
+          - target: x64
+            arch: x64
+            
+          - target: x86
+            arch: x86
+            
+          - target: arm64
+            arch: amd64_arm64  # 使用 x64 主机交叉编译 arm64
+
     steps:
       - uses: actions/checkout@v4
 
-      # [Important] 移除了 ilammy/msvc-dev-cmd，脚本会自动处理多架构环境
+      # 关键步骤：根据 Matrix 设置正确的 MSVC 环境 (Ninja 必须)
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
 
-      - name: Install tools (cmake)
+      - name: Install tools (cmake/ninja)
         shell: pwsh
         run: |
+          choco install -y ninja cmake
           cmake --version
+          ninja --version
           python --version
 
-      - name: Build OpenCvSharpExtern (Multi-Arch)
+      - name: Build OpenCvSharpExtern (${{ matrix.target }})
         shell: pwsh
         run: |
           $env:OPENCV_VERSION = "4.10.0"
           $env:OPENCVSHARP_REF = "4.11.0.20250507"
           $env:BUILD_LIST = "core,imgproc,videoio"
           
-          # 运行支持多架构的脚本
-          pwsh -File .github/scripts/build_windows_x64.ps1
+          # 调用上一条回答中的通用参数化脚本，传入 Matrix 中的 target
+          pwsh -File .github/scripts/build_opencv_windows.ps1 -TargetArch ${{ matrix.target }}
 
-      - name: Upload win-x64 artifact
+      - name: Upload win-${{ matrix.target }} artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OpenCvSharpExtern-win-x64
-          path: _work/final/x64/OpenCvSharpExtern.dll
-
-      - name: Upload win-x86 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenCvSharpExtern-win-x86
-          path: _work/final/x86/OpenCvSharpExtern.dll
-
-      - name: Upload win-arm64 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenCvSharpExtern-win-arm64
-          path: _work/final/arm64/OpenCvSharpExtern.dll
+          name: OpenCvSharpExtern-win-${{ matrix.target }}
+          # 路径与脚本中生成的参数化输出目录一致
+          path: _work/out-win-${{ matrix.target }}/final/OpenCvSharpExtern.dll
