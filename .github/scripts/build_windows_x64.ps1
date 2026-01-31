@@ -1,12 +1,13 @@
 # ------------------------------------------------------------
-# build_windows_x64.ps1 (Modified for Multi-Arch: x64, x86, arm64)
+# build_windows_x64.ps1
+# (Actual behavior: Builds x64, x86, arm64 sequentially)
 # ------------------------------------------------------------
 $ErrorActionPreference = "Stop"
 
 # ============================================================
 # 1. 环境变量与路径配置
 # ============================================================
-$OPENCV_VERSION = if ($env:OPENCV_VERSION) { $env:OPENCV_VERSION } else { "4.10.0" }
+$OPENCV_VERSION = if ($env:OPENCV_VERSION) { $env:OPENCV_VERSION } else { "4.11.0" }
 $OPENCVSHARP_REF = if ($env:OPENCVSHARP_REF) { $env:OPENCVSHARP_REF } else { "main" }
 $BUILD_LIST = if ($env:BUILD_LIST) { $env:BUILD_LIST } else { "core,imgproc,videoio" }
 
@@ -17,7 +18,7 @@ $SRC = Join-Path $ROOT "src"
 # 确保源码目录存在
 New-Item -ItemType Directory -Force -Path $SRC | Out-Null
 
-# 准备 Python 脚本用的路径（统一替换为 / 防止转义问题）
+# 准备 Python 脚本用的路径
 $SRC_SLASH = $SRC.Replace("\", "/")
 
 Write-Host "==> Tool versions"
@@ -25,7 +26,7 @@ cmake --version
 python --version
 
 # ============================================================
-# 2. 拉取源码 (只执行一次，所有架构共用源码)
+# 2. 拉取源码 (所有架构共用一套源码)
 # ============================================================
 function Clone-Or-Update($url, $dir, $ref) {
     if (-not (Test-Path (Join-Path $dir ".git"))) {
@@ -49,7 +50,7 @@ Clone-Or-Update "https://github.com/opencv/opencv_contrib.git" (Join-Path $SRC "
 Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    (Join-Path $SRC "opencvsharp")    $OPENCVSHARP_REF
 
 # ============================================================
-# 3. Patch OpenCvSharpExtern (针对源码修改，只需执行一次)
+# 3. Patch OpenCvSharpExtern (只需执行一次)
 # ============================================================
 Write-Host "==> Patch OpenCvSharpExtern CMakeLists to minimal sources"
 
@@ -60,19 +61,16 @@ src_path = pathlib.Path(r'$SRC_SLASH')
 cmake = src_path / 'opencvsharp' / 'src' / 'OpenCvSharpExtern' / 'CMakeLists.txt'
 text = cmake.read_text(encoding='utf-8', errors='ignore')
 
-# [Step A] 直接注释掉原有的 ocv_target_compile_definitions 防止报错
-# 因为原文件通常把这个调用放在 add_library 之前，如果直接改成 target_compile_definitions 会报 target not found
+# [Step A] Comment out ocv_target_compile_definitions
 text = text.replace('ocv_target_compile_definitions', '# ocv_target_compile_definitions')
 
-# [Step B] 寻找并替换 add_library 部分
-# 在 add_library 之后显式追加 target_compile_definitions
+# [Step B] Patch add_library
 pattern = re.compile(r'add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*', re.S)
 m = pattern.search(text)
 
 if not m:
     print('WARNING: Cannot find add_library target to patch.')
 else:
-    # 注意: 这里我们在 add_library 闭合括号后面，手动加上了 if(MSVC)...
     minimal = '''add_library(OpenCvSharpExtern SHARED
     core.cpp
     imgproc.cpp
@@ -91,16 +89,17 @@ endif()
 $pyScriptPatchCMake | python -
 
 # ============================================================
-# 4. 自动过滤 include_opencv.h (针对源码修改，只需执行一次)
+# 4. 自动过滤 include_opencv.h (只需执行一次)
 # ============================================================
 Write-Host "==> Auto-filter include_opencv.h based on compile include roots"
 
-$SRC_OPENCV_RAW = "$SRC_SLASH/opencv"
+# 定义源码路径供 Filter 脚本使用
+$SRC_OPENCV = "$SRC_SLASH/opencv"
 
 $pyScriptFilterHeader = @"
 import pathlib, re
 
-opencv_root = pathlib.Path(r'$SRC_OPENCV_RAW')
+opencv_root = pathlib.Path(r'$SRC_OPENCV')
 opencv_include = opencv_root / 'include'
 modules_root = opencv_root / 'modules'
 
@@ -142,46 +141,41 @@ print(f'include_opencv.h filtered: disabled {disabled} includes')
 
 $pyScriptFilterHeader | python -
 
-
 # ============================================================
-# 开始多架构循环 (x64, x86, arm64)
+# 5. 多架构构建循环 (x64, x86, arm64)
 # ============================================================
 $ARCH_LIST = "x64", "x86", "arm64"
 
 foreach ($ARCH_NAME in $ARCH_LIST) {
-    
-    # 确定 CMake 的架构参数
+    # 映射 PowerShell 架构名到 CMake -A 参数
     $CMAKE_ARCH_FLAG = $ARCH_NAME
     if ($ARCH_NAME -eq "x86") { $CMAKE_ARCH_FLAG = "Win32" }
     if ($ARCH_NAME -eq "arm64") { $CMAKE_ARCH_FLAG = "ARM64" }
     if ($ARCH_NAME -eq "x64") { $CMAKE_ARCH_FLAG = "x64" }
 
-    Write-Host "`n------------------------------------------------------------"
-    Write-Host "STARTING BUILD FOR: $ARCH_NAME (CMake Arch: $CMAKE_ARCH_FLAG)"
-    Write-Host "------------------------------------------------------------"
+    Write-Host "`n============================================================"
+    Write-Host "STARTING BUILD FOR: $ARCH_NAME (CMake: $CMAKE_ARCH_FLAG)"
+    Write-Host "============================================================"
 
-    # 定义当前架构的构建与输出目录 (隔离路径，防止冲突)
+    # 定义独立的构建和输出目录
     $B_DIR = Join-Path $ROOT "build-win-$ARCH_NAME"
     $OUT_DIR = Join-Path $ROOT "out-win-$ARCH_NAME"
 
-    # 确保目录存在
     New-Item -ItemType Directory -Force -Path $B_DIR | Out-Null
     New-Item -ItemType Directory -Force -Path $OUT_DIR | Out-Null
 
     $B_DIR_SLASH = $B_DIR.Replace("\", "/")
     $OUT_DIR_SLASH = $OUT_DIR.Replace("\", "/")
 
-    # ============================================================
-    # 5. 编译 OpenCV Static
-    # ============================================================
+    # ------------------------------------------------------------
+    # A. 编译 OpenCV Static
+    # ------------------------------------------------------------
     Write-Host "==> [$ARCH_NAME] Build OpenCV static"
 
-    $SRC_OPENCV = "$SRC_SLASH/opencv"
     $SRC_CONTRIB = "$SRC_SLASH/opencv_contrib/modules"
     $BUILD_OPENCV = "$B_DIR_SLASH/opencv"
 
-    # 切换到 Visual Studio Generator 以支持多架构 (-A)
-    # 替换原有的 Ninja 生成器，因为 Ninja 需要手动配环境，VS Generator 自动配
+    # [CHANGE] Switch from Ninja to Visual Studio Generator for multi-arch support
     cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Visual Studio 17 2022" -A "$CMAKE_ARCH_FLAG" `
       -D CMAKE_BUILD_TYPE=Release `
       -D OPENCV_EXTRA_MODULES_PATH="$SRC_CONTRIB" `
@@ -208,12 +202,12 @@ foreach ($ARCH_NAME in $ARCH_LIST) {
       -D WITH_1394=OFF `
       -D VIDEOIO_ENABLE_PLUGINS=OFF
 
-    # 替换 Ninja 命令为 cmake --build
+    # [CHANGE] Use cmake --build instead of ninja
     cmake --build "$BUILD_OPENCV" --config Release --parallel
 
-    # ============================================================
-    # 6. 编译 OpenCvSharpExtern DLL
-    # ============================================================
+    # ------------------------------------------------------------
+    # B. 编译 OpenCvSharpExtern DLL
+    # ------------------------------------------------------------
     Write-Host "==> [$ARCH_NAME] Build OpenCvSharpExtern"
 
     $SRC_SHARP = "$SRC_SLASH/opencvsharp/src"
@@ -226,19 +220,16 @@ foreach ($ARCH_NAME in $ARCH_LIST) {
       -D CMAKE_POLICY_VERSION_MINIMUM=3.5 `
       -D OpenCV_DIR="$BUILD_OPENCV"
 
-    # 替换 Ninja 命令
     cmake --build "$BUILD_SHARP" --config Release --parallel
     cmake --build "$BUILD_SHARP" --config Release --target install
 
-    # ============================================================
-    # 7. 收集产物
-    # ============================================================
-    # 为当前架构创建独立的 final 目录
+    # ------------------------------------------------------------
+    # C. 收集产物
+    # ------------------------------------------------------------
     $FINAL_DIR = Join-Path $ROOT "final" $ARCH_NAME
     New-Item -ItemType Directory -Force -Path $FINAL_DIR | Out-Null
 
-    # 在 VS 生成模式下，Release 产物通常位于构建目录的 Release 子文件夹中
-    # 搜索 $OUT_DIR 和构建目录，确保找到 dll
+    # 在 VS 生成模式下，产物通常在 Release 子目录，搜索范围涵盖 OUT_DIR 和 BUILD_SHARP
     $DllSource = Get-ChildItem -Path "$OUT_DIR", "$BUILD_SHARP" -Filter "OpenCvSharpExtern.dll" -Recurse | Select-Object -First 1
 
     if (-not $DllSource) {
@@ -248,8 +239,7 @@ foreach ($ARCH_NAME in $ARCH_LIST) {
 
     Write-Host "Found DLL: $($DllSource.FullName)"
     Copy-Item -Path $DllSource.FullName -Destination $FINAL_DIR -Force
-
-    Write-Host "==> [$ARCH_NAME] Done: $FINAL_DIR\OpenCvSharpExtern.dll"
+    Write-Host "==> [$ARCH_NAME] Copied to $FINAL_DIR"
 }
 
 Write-Host "`nAll builds completed successfully."
