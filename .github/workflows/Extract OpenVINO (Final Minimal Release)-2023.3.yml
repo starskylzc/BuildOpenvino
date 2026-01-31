@@ -32,17 +32,17 @@ jobs:
           echo "MAC_ROOT=$MAC_ROOT" >> $GITHUB_ENV
 
       # --- Windows 处理 (GPU Only + ONNX Only + Minimal TBB) ---
-      - name: Process Windows Runtime
+      - name: Process Windows Runtime (GPU)
         run: |
           set -euxo pipefail
-          mkdir -p final_output/windows
+          mkdir -p final_output/windows_gpu
 
           SRC_BIN="$WIN_ROOT/runtime/bin/intel64/Release"
           SRC_TBB="$WIN_ROOT/runtime/3rdparty/tbb/bin"
           SRC_INC="$WIN_ROOT/runtime/include/ie/c_api"
-          DST="final_output/windows"
+          DST="final_output/windows_gpu"
 
-          echo ">>> Copying Windows Libraries..."
+          echo ">>> Copying Windows Libraries (GPU)..."
 
           # 1. 核心库 & ONNX
           cp "$SRC_BIN/openvino.dll" "$DST/"
@@ -63,11 +63,64 @@ jobs:
           cp "$SRC_INC/ie_c_api.h" "$DST/include/"
 
           # 5. 生成 Windows plugins.xml
-          echo ">>> Generating Windows plugins.xml..."
+          echo ">>> Generating Windows GPU plugins.xml..."
           cat <<EOF > "$DST/plugins.xml"
           <ie>
               <plugins>
                   <plugin name="GPU" location="openvino_intel_gpu_plugin.dll">
+                  </plugin>
+              </plugins>
+          </ie>
+          EOF
+
+      # --- Windows 处理 (CPU Only + ONNX Only + Minimal TBB) ---
+      - name: Process Windows Runtime (CPU)
+        run: |
+          set -euxo pipefail
+          mkdir -p final_output/windows_cpu
+
+          SRC_BIN="$WIN_ROOT/runtime/bin/intel64/Release"
+          SRC_TBB="$WIN_ROOT/runtime/3rdparty/tbb/bin"
+          SRC_INC="$WIN_ROOT/runtime/include/ie/c_api"
+          DST="final_output/windows_cpu"
+
+          echo ">>> Copying Windows Libraries (CPU)..."
+
+          # 1. 核心库 & ONNX
+          cp "$SRC_BIN/openvino.dll" "$DST/"
+          cp "$SRC_BIN/openvino_c.dll" "$DST/"
+          cp "$SRC_BIN/openvino_onnx_frontend.dll" "$DST/"
+
+          # 2. 插件 (仅保留 Intel CPU)
+          CPU_PLUGIN="$SRC_BIN/openvino_intel_cpu_plugin.dll"
+          if [[ ! -f "$CPU_PLUGIN" ]]; then
+            CPU_PLUGIN=$(find "$SRC_BIN" -maxdepth 1 -type f -name "openvino_intel_cpu_plugin*.dll" | head -n 1 || true)
+          fi
+          if [[ -z "${CPU_PLUGIN:-}" || ! -f "$CPU_PLUGIN" ]]; then
+            echo "ERROR: Windows CPU plugin not found in $SRC_BIN"
+            ls -la "$SRC_BIN"
+            exit 1
+          fi
+          cp "$CPU_PLUGIN" "$DST/"
+          CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
+
+          [ -f "$SRC_BIN/cache.json" ] && cp "$SRC_BIN/cache.json" "$DST/"
+
+          # 3. 最小 TBB
+          echo ">>> Copying Minimal TBB (No bind/proxy/debug)..."
+          cp "$SRC_TBB"/tbb12.dll "$DST/"
+          cp "$SRC_TBB"/tbbmalloc.dll "$DST/"
+
+          # 4. C API 头文件
+          mkdir -p "$DST/include"
+          cp "$SRC_INC/ie_c_api.h" "$DST/include/"
+
+          # 5. 生成 Windows plugins.xml
+          echo ">>> Generating Windows CPU plugins.xml..."
+          cat <<EOF > "$DST/plugins.xml"
+          <ie>
+              <plugins>
+                  <plugin name="CPU" location="$CPU_PLUGIN_NAME">
                   </plugin>
               </plugins>
           </ie>
