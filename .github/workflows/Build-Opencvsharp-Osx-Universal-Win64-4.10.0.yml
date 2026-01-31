@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build_osx_x64:
+  build_x64:
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +30,7 @@ jobs:
           name: osx-x64-slice
           path: _work/out-x86_64/final/libOpenCvSharpExtern.dylib
 
-  build_osx_arm64:
+  build_arm64:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +61,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 注意：已移除 ilammy/msvc-dev-cmd，以防止与 CMake VS 生成器冲突
+
       - name: Install tools (cmake)
         shell: pwsh
         run: |
@@ -74,13 +76,12 @@ jobs:
           $env:OPENCVSHARP_REF = "4.11.0.20250507"
           $env:BUILD_LIST = "core,imgproc,videoio"
           
-          # 执行修改后的多架构构建脚本
+          # 运行更新后的多架构构建脚本
           pwsh -File .github/scripts/build_windows_x64.ps1
 
-      # ---------------------------------------------------
-      # 分别上传 3 个架构的产物
-      # ---------------------------------------------------
-      
+      # ----------------------------------------------
+      # 分别上传 Windows 的 3 个版本产物
+      # ----------------------------------------------
       - name: Upload win-x64 artifact
         uses: actions/upload-artifact@v4
         with:
