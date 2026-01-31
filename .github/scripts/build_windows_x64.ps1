@@ -1,5 +1,5 @@
 # ------------------------------------------------------------
-# build_windows_x64.ps1 (实际已升级为支持 x64, x86, arm64)
+# build_windows_x64.ps1 (Modified for Multi-Arch: x64, x86, arm64)
 # ------------------------------------------------------------
 $ErrorActionPreference = "Stop"
 
@@ -25,7 +25,7 @@ cmake --version
 python --version
 
 # ============================================================
-# 2. 拉取源码
+# 2. 拉取源码 (只执行一次，所有架构共用源码)
 # ============================================================
 function Clone-Or-Update($url, $dir, $ref) {
     if (-not (Test-Path (Join-Path $dir ".git"))) {
@@ -49,7 +49,7 @@ Clone-Or-Update "https://github.com/opencv/opencv_contrib.git" (Join-Path $SRC "
 Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    (Join-Path $SRC "opencvsharp")    $OPENCVSHARP_REF
 
 # ============================================================
-# 3. Patch OpenCvSharpExtern (只需执行一次)
+# 3. Patch OpenCvSharpExtern (针对源码修改，只需执行一次)
 # ============================================================
 Write-Host "==> Patch OpenCvSharpExtern CMakeLists to minimal sources"
 
@@ -61,15 +61,18 @@ cmake = src_path / 'opencvsharp' / 'src' / 'OpenCvSharpExtern' / 'CMakeLists.txt
 text = cmake.read_text(encoding='utf-8', errors='ignore')
 
 # [Step A] 直接注释掉原有的 ocv_target_compile_definitions 防止报错
+# 因为原文件通常把这个调用放在 add_library 之前，如果直接改成 target_compile_definitions 会报 target not found
 text = text.replace('ocv_target_compile_definitions', '# ocv_target_compile_definitions')
 
 # [Step B] 寻找并替换 add_library 部分
+# 在 add_library 之后显式追加 target_compile_definitions
 pattern = re.compile(r'add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*', re.S)
 m = pattern.search(text)
 
 if not m:
     print('WARNING: Cannot find add_library target to patch.')
 else:
+    # 注意: 这里我们在 add_library 闭合括号后面，手动加上了 if(MSVC)...
     minimal = '''add_library(OpenCvSharpExtern SHARED
     core.cpp
     imgproc.cpp
@@ -88,7 +91,7 @@ endif()
 $pyScriptPatchCMake | python -
 
 # ============================================================
-# 4. 自动过滤 include_opencv.h (只需执行一次)
+# 4. 自动过滤 include_opencv.h (针对源码修改，只需执行一次)
 # ============================================================
 Write-Host "==> Auto-filter include_opencv.h based on compile include roots"
 
@@ -141,13 +144,13 @@ $pyScriptFilterHeader | python -
 
 
 # ============================================================
-# 开始多架构循环构建 (x86, x64, arm64)
+# 开始多架构循环 (x64, x86, arm64)
 # ============================================================
 $ARCH_LIST = "x64", "x86", "arm64"
 
 foreach ($ARCH_NAME in $ARCH_LIST) {
     
-    # 映射架构名称到 CMake 参数
+    # 确定 CMake 的架构参数
     $CMAKE_ARCH_FLAG = $ARCH_NAME
     if ($ARCH_NAME -eq "x86") { $CMAKE_ARCH_FLAG = "Win32" }
     if ($ARCH_NAME -eq "arm64") { $CMAKE_ARCH_FLAG = "ARM64" }
@@ -157,7 +160,7 @@ foreach ($ARCH_NAME in $ARCH_LIST) {
     Write-Host "STARTING BUILD FOR: $ARCH_NAME (CMake Arch: $CMAKE_ARCH_FLAG)"
     Write-Host "------------------------------------------------------------"
 
-    # 定义当前架构的构建目录 (隔离构建中间产物)
+    # 定义当前架构的构建与输出目录 (隔离路径，防止冲突)
     $B_DIR = Join-Path $ROOT "build-win-$ARCH_NAME"
     $OUT_DIR = Join-Path $ROOT "out-win-$ARCH_NAME"
 
@@ -177,7 +180,8 @@ foreach ($ARCH_NAME in $ARCH_LIST) {
     $SRC_CONTRIB = "$SRC_SLASH/opencv_contrib/modules"
     $BUILD_OPENCV = "$B_DIR_SLASH/opencv"
 
-    # 切换到 Visual Studio 生成器以支持多架构
+    # 切换到 Visual Studio Generator 以支持多架构 (-A)
+    # 替换原有的 Ninja 生成器，因为 Ninja 需要手动配环境，VS Generator 自动配
     cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Visual Studio 17 2022" -A "$CMAKE_ARCH_FLAG" `
       -D CMAKE_BUILD_TYPE=Release `
       -D OPENCV_EXTRA_MODULES_PATH="$SRC_CONTRIB" `
@@ -227,13 +231,14 @@ foreach ($ARCH_NAME in $ARCH_LIST) {
     cmake --build "$BUILD_SHARP" --config Release --target install
 
     # ============================================================
-    # 7. 收集产物 (按架构分目录存放，防止冲突)
+    # 7. 收集产物
     # ============================================================
-    # 最终产物位置: _work/final/x64, _work/final/x86, _work/final/arm64
+    # 为当前架构创建独立的 final 目录
     $FINAL_DIR = Join-Path $ROOT "final" $ARCH_NAME
     New-Item -ItemType Directory -Force -Path $FINAL_DIR | Out-Null
 
     # 在 VS 生成模式下，Release 产物通常位于构建目录的 Release 子文件夹中
+    # 搜索 $OUT_DIR 和构建目录，确保找到 dll
     $DllSource = Get-ChildItem -Path "$OUT_DIR", "$BUILD_SHARP" -Filter "OpenCvSharpExtern.dll" -Recurse | Select-Object -First 1
 
     if (-not $DllSource) {
