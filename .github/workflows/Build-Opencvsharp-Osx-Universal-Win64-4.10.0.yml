@@ -61,7 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 注意：已移除 ilammy/msvc-dev-cmd，以防止与 CMake VS 生成器冲突
+      # [Important] 移除了 ilammy/msvc-dev-cmd，脚本会自动处理多架构环境
 
       - name: Install tools (cmake)
         shell: pwsh
@@ -76,12 +76,9 @@ jobs:
           $env:OPENCVSHARP_REF = "4.11.0.20250507"
           $env:BUILD_LIST = "core,imgproc,videoio"
           
-          # 运行更新后的多架构构建脚本
+          # 运行支持多架构的脚本
           pwsh -File .github/scripts/build_windows_x64.ps1
 
-      # ----------------------------------------------
-      # 分别上传 Windows 的 3 个版本产物
-      # ----------------------------------------------
       - name: Upload win-x64 artifact
         uses: actions/upload-artifact@v4
         with:
