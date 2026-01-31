@@ -1,8 +1,16 @@
 # ------------------------------------------------------------
-# build_windows_x64.ps1
+# build_opencv_windows.ps1
+# 参数化版本：接受 -TargetArch 参数 (如 x64, x86, arm64)
 # ------------------------------------------------------------
+param(
+    [string]$TargetArch = "x64"
+)
+
 $ErrorActionPreference = "Stop"
 
+Write-Host "============================================================"
+Write-Host "STARTING BUILD FOR ARCHITECTURE: $TargetArch"
+Write-Host "============================================================"
 
 # ============================================================
 # 1. 环境变量与路径配置
@@ -14,34 +22,27 @@ $BUILD_LIST = if ($env:BUILD_LIST) { $env:BUILD_LIST } else { "core,imgproc,vide
 
 
 # 使用当前位置作为根目录
-
 $ROOT = Join-Path (Get-Location) "_work"
 $SRC = Join-Path $ROOT "src"
-$B_DIR = Join-Path $ROOT "build-win-x64"
-$OUT_DIR = Join-Path $ROOT "out-win-x64"
 
-
+# [修改点] 使用参数动态生成目录，实现隔离
+$B_DIR = Join-Path $ROOT "build-win-$TargetArch"
+$OUT_DIR = Join-Path $ROOT "out-win-$TargetArch"
 
 # 确保目录存在
 New-Item -ItemType Directory -Force -Path $SRC | Out-Null
 New-Item -ItemType Directory -Force -Path $B_DIR | Out-Null
 New-Item -ItemType Directory -Force -Path $OUT_DIR | Out-Null
 
-
-
 # 准备 Python 脚本用的路径（统一替换为 / 防止转义问题）
-
 $SRC_SLASH = $SRC.Replace("\", "/")
 $B_DIR_SLASH = $B_DIR.Replace("\", "/")
 $OUT_DIR_SLASH = $OUT_DIR.Replace("\", "/")
-
 
 Write-Host "==> Tool versions"
 cmake --version
 ninja --version
 python --version
-
-
 
 # ============================================================
 # 2. 拉取源码
@@ -68,7 +69,6 @@ Write-Host "==> Fetch sources"
 Clone-Or-Update "https://github.com/opencv/opencv.git"         (Join-Path $SRC "opencv")         $OPENCV_VERSION
 Clone-Or-Update "https://github.com/opencv/opencv_contrib.git" (Join-Path $SRC "opencv_contrib") $OPENCV_VERSION
 Clone-Or-Update "https://github.com/shimat/opencvsharp.git"    (Join-Path $SRC "opencvsharp")    $OPENCVSHARP_REF
-
 
 
 # ============================================================
@@ -122,7 +122,7 @@ $pyScriptPatchCMake | python -
 # 4. 编译 OpenCV Static
 # ============================================================
 
-Write-Host "==> Build OpenCV static (Windows x64)"
+Write-Host "==> Build OpenCV static (Windows $TargetArch)"
 
 $SRC_OPENCV = "$SRC_SLASH/opencv"
 $SRC_CONTRIB = "$SRC_SLASH/opencv_contrib/modules"
@@ -212,7 +212,7 @@ $pyScriptFilterHeader | python -
 # 6. 编译 OpenCvSharpExtern DLL
 # ============================================================
 
-Write-Host "==> Build OpenCvSharpExtern (Windows x64)"
+Write-Host "==> Build OpenCvSharpExtern (Windows $TargetArch)"
 
 $SRC_SHARP = "$SRC_SLASH/opencvsharp/src"
 $BUILD_SHARP = "$B_DIR_SLASH/opencvsharp"
