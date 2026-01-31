@@ -20,42 +20,20 @@ $OPENCV_VERSION = if ($env:OPENCV_VERSION) { $env:OPENCV_VERSION } else { "4.11.
 $OPENCVSHARP_REF = if ($env:OPENCVSHARP_REF) { $env:OPENCVSHARP_REF } else { "main" }
 $BUILD_LIST = if ($env:BUILD_LIST) { $env:BUILD_LIST } else { "core,imgproc,videoio" }
 
-# [关键修复] 显式获取当前路径字符串，避免对象类型导致的 Join-Path 异常
-$CurrentDirStr = $PWD.Path
-$ROOT = Join-Path -Path $CurrentDirStr -ChildPath "_work"
-$SRC = Join-Path -Path $ROOT -ChildPath "src"
+# 使用当前位置作为根目录
+$ROOT = Join-Path (Get-Location) "_work"
+$SRC = Join-Path $ROOT "src"
 
-# [动态路径] 
-$B_DIR_NAME = "build-win-$TargetArch"
-$OUT_DIR_NAME = "out-win-$TargetArch"
-$B_DIR = Join-Path -Path $ROOT -ChildPath $B_DIR_NAME
-$OUT_DIR = Join-Path -Path $ROOT -ChildPath $OUT_DIR_NAME
+# 使用参数动态生成目录，实现隔离
+$B_DIR = Join-Path $ROOT "build-win-$TargetArch"
+$OUT_DIR = Join-Path $ROOT "out-win-$TargetArch"
 
-# [调试输出] 打印路径以验证变量是否正确赋值
-Write-Host "DEBUG INFO:"
-Write-Host "  ROOT:    $ROOT"
-Write-Host "  B_DIR:   $B_DIR"
-Write-Host "  OUT_DIR: $OUT_DIR"
-
-if (-not $B_DIR -or -not $OUT_DIR) {
-    Write-Error "CRITICAL ERROR: Build directory path variables are null."
-    exit 1
-}
-
-# [清理旧构建] 
-if (Test-Path -Path $B_DIR) {
-    Write-Host "Cleaning existing build directory: $B_DIR"
-    Remove-Item -Path $B_DIR -Recurse -Force -ErrorAction SilentlyContinue
-}
-if (Test-Path -Path $OUT_DIR) {
-    Write-Host "Cleaning existing output directory: $OUT_DIR"
-    Remove-Item -Path $OUT_DIR -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-# 创建新目录
+# 确保目录存在
 New-Item -ItemType Directory -Force -Path $SRC | Out-Null
 New-Item -ItemType Directory -Force -Path $B_DIR | Out-Null
 New-Item -ItemType Directory -Force -Path $OUT_DIR | Out-Null
+
+# 准备 Python 脚本用的路径（统一替换为 / 防止转义问题）
 $SRC_SLASH = $SRC.Replace("\", "/")
 $B_DIR_SLASH = $B_DIR.Replace("\", "/")
 $OUT_DIR_SLASH = $OUT_DIR.Replace("\", "/")
