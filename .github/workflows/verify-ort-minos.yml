@@ -14,7 +14,7 @@ on:
 
 jobs:
   windows_verify:
-    name: Windows - native min OS inference (ORT GPU/DirectML)
+    name: Windows - GPU/DirectML packages (min OS inference)
     runs-on: windows-latest
 
     steps:
@@ -24,7 +24,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: 8.0.x
 
       - name: Prepare directories
         shell: pwsh
@@ -34,30 +34,34 @@ jobs:
       - name: Build ApiMinWin tool
         shell: pwsh
         run: |
-          # Expect these files in repo: .github/scripts/ApiMinWin.csproj + ApiMinWin.cs
+          # Expect these 2 files to live at: .github/scripts/ApiMinWin.csproj + .github/scripts/ApiMinWin.cs
           dotnet publish .github/scripts/ApiMinWin.csproj -c Release -o tools/ApiMinWin
-          if (-not (Test-Path 'tools/ApiMinWin/ApiMinWin.dll')) { throw "ApiMinWin.dll not found after publish" }
-          Write-Host "ApiMinWin built at: tools/ApiMinWin/ApiMinWin.dll"
+          if (!(Test-Path tools/ApiMinWin/ApiMinWin.dll)) { throw "ApiMinWin publish failed." }
 
       - name: Download Windows.Win32.winmd (Win32Metadata)
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
           $id = "Microsoft.Windows.SDK.Win32Metadata"
-          $lower = $id.ToLowerInvariant()
+          $lower = $id.ToLower()
           $indexUrl = "https://api.nuget.org/v3-flatcontainer/$lower/index.json"
+          Write-Host "Fetch win32metadata versions: $indexUrl"
           $versions = (Invoke-RestMethod -Uri $indexUrl -Method Get).versions
-          if (-not $versions -or $versions.Count -lt 1) { throw "Could not fetch versions for $id" }
+          if (-not $versions -or $versions.Count -lt 1) { throw "Could not fetch Win32Metadata versions." }
           $ver = $versions[-1]
+
           $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$lower/$ver/$lower.$ver.nupkg"
           $nupkgPath = "downloads\$lower.$ver.nupkg"
-          Write-Host "Download Win32Metadata: $nupkgUrl"
+          Write-Host "Download: $nupkgUrl"
           Invoke-WebRequest -Uri $nupkgUrl -OutFile $nupkgPath
+
           $outDir = "extracted\win32metadata.$ver"
           if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
           Expand-Archive -Path $nupkgPath -DestinationPath $outDir -Force
+
           $winmd = Get-ChildItem $outDir -Recurse -File -Filter "Windows.Win32.winmd" | Select-Object -First 1
           if (-not $winmd) { throw "Windows.Win32.winmd not found inside $nupkgPath" }
+
           $winmdPath = $winmd.FullName
           "WINMD_PATH=$winmdPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "WINMD_PATH = $winmdPath"
@@ -68,7 +72,7 @@ jobs:
           $ProgressPreference = "SilentlyContinue"
 
           function Get-Versions([string]$id) {
-            $lower = $id.ToLowerInvariant()
+            $lower = $id.ToLower()
             $url = "https://api.nuget.org/v3-flatcontainer/$lower/index.json"
             Write-Host "Fetch versions: $url"
             $json = Invoke-RestMethod -Uri $url -Method Get
@@ -164,7 +168,7 @@ jobs:
           $list = New-Object System.Collections.Generic.List[object]
           foreach ($p in $pkgIds) {
             foreach ($v in $all.$p) {
-              # NOTE: start is usually the newer/higher version, end is older/lower.
+              # NOTE: We assume start_version is the newer (upper) bound and end_version is the older (lower) bound.
               if ((Compare-Ver $v $start) -le 0 -and (Compare-Ver $v $end) -ge 0) {
                 $list.Add([PSCustomObject]@{ id=$p; version=$v })
               }
@@ -177,17 +181,18 @@ jobs:
           Write-Host "Verify items count = $($sorted.Count)"
           $sorted | Select-Object -First 20 | Format-Table -AutoSize
 
-      - name: Download & analyze native DLLs (Windows min build)
+      - name: Download & analyze Windows native DLLs (min build)
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
-          $ErrorActionPreference = "Stop"
 
           $tool = (Resolve-Path "tools/ApiMinWin/ApiMinWin.dll").Path
           $winmd = $env:WINMD_PATH
-          if (-not $winmd -or -not (Test-Path $winmd)) { throw "WINMD_PATH missing or not found: $winmd" }
+          if (-not $winmd) { throw "WINMD_PATH is empty." }
+          if (-not (Test-Path $winmd)) { throw "WINMD_PATH does not exist: $winmd" }
 
           $items = Get-Content out\verify_windows_list.json -Raw | ConvertFrom-Json
+          if (-not $items -or $items.Count -eq 0) { throw "No verify items." }
 
           $rows = New-Object System.Collections.Generic.List[object]
 
@@ -196,12 +201,12 @@ jobs:
             $ver = [string]$it.version
             if ([string]::IsNullOrWhiteSpace($pkg) -or [string]::IsNullOrWhiteSpace($ver)) { continue }
 
-            $lower = $pkg.ToLowerInvariant()
+            $lower = $pkg.ToLower()
             $nupkg = "downloads\$lower.$ver.nupkg"
             $url = "https://api.nuget.org/v3-flatcontainer/$lower/$ver/$lower.$ver.nupkg"
 
-            if (-not (Test-Path $nupkg)) {
-              Write-Host "Download: $pkg $ver"
+            if (!(Test-Path $nupkg)) {
+              Write-Host "Download: $url"
               Invoke-WebRequest -Uri $url -OutFile $nupkg
             } else {
               Write-Host "Skip download (cached): $nupkg"
@@ -216,18 +221,18 @@ jobs:
               Where-Object { $_.FullName -match "\\runtimes\\win-[^\\]+\\native\\" }
 
             if (-not $dlls -or $dlls.Count -eq 0) {
-              Write-Host "No runtimes/win-*/native/*.dll found for $pkg $ver (skip)"
+              Write-Host "No native DLLs found for $pkg $ver (skip)"
               continue
             }
 
             foreach ($dll in $dlls) {
-              $m = [regex]::Match($dll.FullName, "runtimes\\(win-[^\\]+)\\native", "IgnoreCase")
+              $m = [regex]::Match($dll.FullName, "runtimes\\(win-[^\\]+)\\native")
               $rid = if ($m.Success) { $m.Groups[1].Value } else { "UNKNOWN" }
 
               $json = & dotnet $tool --winmd $winmd --pe $dll.FullName --json
               $res = $json | ConvertFrom-Json
 
-              $rows.Add([pscustomobject]@{
+              $rows.Add([PSCustomObject]@{
                 package = $pkg
                 version = $ver
                 runtimeRid = $rid
