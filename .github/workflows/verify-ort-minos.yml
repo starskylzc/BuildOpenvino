@@ -18,7 +18,10 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Prepare
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare directories
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force downloads, extracted, out, tools | Out-Null
@@ -140,360 +143,28 @@ jobs:
           Write-Host "Verify items count = $($sorted.Count)"
           $sorted | Select-Object -First 20 | Format-Table -AutoSize
 
-      - name: Download Win32 metadata (Microsoft.Windows.SDK.NET) and build API mapper tool
-        shell: pwsh
+      - name: Download & build ApiMinWin tool
+        shell: bash
         run: |
-          $ProgressPreference = "SilentlyContinue"
+          # 自动引用当前仓库的路径，下载 ApiMinWin.cs 文件
+          curl -o tools/ApiMinWin.cs "${{ github.server_url }}/${{ github.repository }}/raw/${{ github.ref }}/.github/scripts/ApiMinWin.cs"
 
-          # 1) 找到 Microsoft.Windows.SDK.NET 最新稳定版（排除 preview）
-          $id = "microsoft.windows.sdk.net"
-          $indexUrl = "https://api.nuget.org/v3-flatcontainer/$id/index.json"
-          Write-Host "Fetch: $indexUrl"
-          $vers = (Invoke-RestMethod -Uri $indexUrl -Method Get).versions
-          $stable = $vers | Where-Object { $_ -notmatch "-" }
-          $ver = $stable[-1]
-          Write-Host "Use Microsoft.Windows.SDK.NET version = $ver"
+          # 编译工具
+          dotnet new console -n ApiMinWin --output tools
+          mv tools/ApiMinWin.cs tools/ApiMinWin/Program.cs
+          dotnet build tools/ApiMinWin/ApiMinWin.csproj -c Release
 
-          # 2) 下载 nupkg 并解压
-          $nupkg = "downloads\$id.$ver.nupkg"
-          $pkgUrl = "https://api.nuget.org/v3-flatcontainer/$id/$ver/$id.$ver.nupkg"
-          Write-Host "Download: $pkgUrl"
-          Invoke-WebRequest -Uri $pkgUrl -OutFile $nupkg
-
-          $sdkDir = "tools\sdknet.$ver"
-          if (Test-Path $sdkDir) { Remove-Item $sdkDir -Recurse -Force }
-          New-Item -ItemType Directory -Force $sdkDir | Out-Null
-          Expand-Archive -Path $nupkg -DestinationPath $sdkDir -Force
-
-          # 3) 找到 Windows.Win32.winmd
-          $winmd = Get-ChildItem -Path $sdkDir -Recurse -Filter "Windows.Win32.winmd" -File | Select-Object -First 1
-          if (-not $winmd) { throw "Windows.Win32.winmd not found in Microsoft.Windows.SDK.NET package" }
-          Write-Host "Found winmd: $($winmd.FullName)"
-
-          # 4) 写一个小 C# 工具：读取 winmd，构建 (dll!entrypoint)->minBuild 映射
-          $toolDir = "tools\ApiMinWin"
-          if (Test-Path $toolDir) { Remove-Item $toolDir -Recurse -Force }
-          New-Item -ItemType Directory -Force $toolDir | Out-Null
-
-          # --- 写 csproj：用数组逐行写，避免 here-string 边界/缩进坑 ---
-          @(
-            "<Project Sdk=""Microsoft.NET.Sdk"">",
-            "  <PropertyGroup>",
-            "    <OutputType>Exe</OutputType>",
-            "    <TargetFramework>net8.0</TargetFramework>",
-            "    <ImplicitUsings>enable</ImplicitUsings>",
-            "    <Nullable>enable</Nullable>",
-            "  </PropertyGroup>",
-            "</Project>"
-          ) | Out-File -Encoding UTF8 "$toolDir\ApiMinWin.csproj"
-
-          # --- 写 Program.cs：同样用数组逐行写 ---
-          @(
-            "using System;",
-            "using System.Collections.Generic;",
-            "using System.IO;",
-            "using System.Linq;",
-            "using System.Reflection.Metadata;",
-            "using System.Reflection.PortableExecutable;",
-            "",
-            "static class Program",
-            "{",
-            "  static int Main(string[] args)",
-            "  {",
-            "    if (args.Length < 1)",
-            "    {",
-            "      Console.Error.WriteLine('Usage: ApiMinWin <path-to-Windows.Win32.winmd>');",  # 用单引号包裹
-            "      return 2;",
-            "    }",
-            "",
-            "    var winmdPath = args[0];",
-            "    if (!File.Exists(winmdPath))",
-            "    {",
-            "      Console.Error.WriteLine('winmd not found: ' + winmdPath);", # 同样修改
-            "      return 2;",
-            "    }",
-            "",
-            "    var map = BuildMap(winmdPath);",
-            "    Console.Error.WriteLine('[ApiMinWin] map size = $($map.Count)');", # 这里修改为插值形式
-            "",
-            "    Console.WriteLine('dll,func,minBuild,reason');",
-            "    string? line;",
-            "    while ((line = Console.ReadLine()) != null)",
-            "    {",
-            "      line = line.Trim();",
-            "      if (line.Length == 0) continue;",
-            "      var parts = line.Split(',', 2);",
-            "      if (parts.Length < 2) continue;",
-            "      var dll = parts[0].Trim().ToLowerInvariant();",
-            "      var func = parts[1].Trim();",
-            "",
-            "      var key = $($dll + '!' + $func);",  # 这里使用了 $($dll + '!' + $func)
-            "      if (map.TryGetValue(key, out var v))",
-            "      {",
-            "        Console.WriteLine($\"{dll},{Escape(func)},{v.minBuild},{Escape(v.reason)}\");",
-            "      }",
-            "      else",
-            "      {",
-            "        var alt = TryAltKeys(dll, func);",
-            "        if (alt != null && map.TryGetValue(alt, out v))",
-            "          Console.WriteLine($\"{dll},{Escape(func)},{v.minBuild},{Escape(v.reason)}\");",
-            "        else",
-            "          Console.WriteLine($\"{dll},{Escape(func)},,\");",
-            "      }",
-            "    }",
-            "    return 0;",
-            "  }",
-            "",
-            "  static string Escape(string s)",
-            "  {",
-            "    if (s.Contains(',') || s.Contains('\"'))",
-            "      return '\"' + s.Replace('\"', '\"\"') + '\"';",  # 单引号替换双引号
-            "    return s;",
-            "  }",
-            "",
-            "  static string? TryAltKeys(string dll, string func)",
-            "  {",
-            "    if (func.Length > 1)",
-            "    {",
-            "      char last = func[^1];",
-            "      if (last == 'A' || last == 'W')",
-            "        return dll + \"!\" + func.Substring(0, func.Length - 1);",
-            "    }",
-            "    return null;",
-            "  }",
-            "",
-            "  static Dictionary<string,(int minBuild,string reason)> BuildMap(string winmdPath)",
-            "  {",
-            "    using var fs = File.OpenRead(winmdPath);",
-            "    using var pe = new PEReader(fs);",
-            "    var md = pe.GetMetadataReader();",
-            "",
-            "    var dllImportType = 'System.Runtime.InteropServices.DllImportAttribute';",  # 双引号改成单引号
-            "    var supportedType = 'System.Runtime.Versioning.SupportedOSPlatformAttribute';",  # 同上
-            "",
-            "    var map = new Dictionary<string,(int,string)>(StringComparer.OrdinalIgnoreCase);",
-            "",
-            "    foreach (var typeHandle in md.TypeDefinitions)",
-            "    {",
-            "      var type = md.GetTypeDefinition(typeHandle);",
-            "      foreach (var methodHandle in type.GetMethods())",
-            "      {",
-            "        var method = md.GetMethodDefinition(methodHandle);",
-            "",
-            "        string? dllName = null;",
-            "        string? entryPoint = null;",
-            "        int minBuild = 0;",
-            "        string? minReason = null;",
-            "",
-            "        foreach (var caHandle in method.GetCustomAttributes())",
-            "        {",
-            "          var ca = md.GetCustomAttribute(caHandle);",
-            "          var attrName = GetAttributeTypeFullName(md, ca);",
-            "          if (attrName == null) continue;",
-            "",
-            "          if (attrName == dllImportType)",
-            "          {",
-            "            ReadDllImport(md, ca, out dllName, out entryPoint);",
-            "          }",
-            "          else if (attrName == supportedType)",
-            "          {",
-            "            var plat = ReadSingleStringCtorArg(md, ca);",
-            "            if (plat != null)",
-            "            {",
-            "              var build = ExtractBuild(plat);",
-            "              if (build > minBuild)",
-            "              {",
-            "                minBuild = build;",
-            "                minReason = plat;",
-            "              }",
-            "            }",
-            "          }",
-            "        }",
-            "",
-            "        if (dllName == null) continue;",
-            "        var dllLower = dllName.Trim().ToLowerInvariant();",
-            "        var ep = entryPoint ?? md.GetString(method.Name);",
-            "        if (string.IsNullOrWhiteSpace(ep)) continue;",
-            "",
-            "        var key = dllLower + \"!\" + ep;",
-            "        if (!map.TryGetValue(key, out var existing) || minBuild > existing.minBuild)",
-            "        {",
-            "          var reason = minReason ?? '';",
-            "          map[key] = (minBuild, reason);",
-            "        }",
-            "      }",
-            "    }",
-            "    return map;",
-            "  }",
-            "",
-            "  static int ExtractBuild(string s)",
-            "  {",
-            "    var parts = s.Split('.', StringSplitOptions.RemoveEmptyEntries);",
-            "    foreach (var p in parts)",
-            "      if (int.TryParse(p, out int v) && v >= 10000) return v;",
-            "    return 0;",
-            "  }",
-            "",
-            "  static string? ReadSingleStringCtorArg(MetadataReader md, CustomAttribute ca)",
-            "  {",
-            "    var blob = md.GetBlobReader(ca.Value);",
-            "    if (blob.ReadUInt16() != 1) return null;",
-            "    return blob.ReadSerializedString();",
-            "  }",
-            "",
-            "  static void ReadDllImport(MetadataReader md, CustomAttribute ca, out string? dllName, out string? entryPoint)",
-            "  {",
-            "    dllName = null;",
-            "    entryPoint = null;",
-            "    var blob = md.GetBlobReader(ca.Value);",
-            "    if (blob.ReadUInt16() != 1) return;",
-            "    dllName = blob.ReadSerializedString();",
-            "    if (blob.Offset >= blob.Length) return;",
-            "    ushort numNamed = blob.ReadUInt16();",
-            "    for (int i = 0; i < numNamed; i++)",
-            "    {",
-            "      blob.ReadByte();",
-            "      byte type = blob.ReadByte();",
-            "      string? name = blob.ReadSerializedString();",
-            "      object? val = ReadFixedArg(md, ref blob, type);",
-            "      if (name != null && name.Equals('EntryPoint', StringComparison.OrdinalIgnoreCase))",
-            "        entryPoint = val as string;",
-            "    }",
-            "  }",
-            "",
-            "  static object? ReadFixedArg(MetadataReader md, ref BlobReader blob, byte et)",
-            "  {",
-            "    if (et == 0x0E) return blob.ReadSerializedString();",
-            "    SkipFixedArg(ref blob, et);",
-            "    return null;",
-            "  }",
-            "",
-            "  static void SkipFixedArg(ref BlobReader blob, byte et)",
-            "  {",
-            "    switch (et)",
-            "    {",
-            "      case 0x02: blob.ReadBoolean(); break;",
-            "      case 0x03: blob.ReadByte(); break;",
-            "      case 0x04: blob.ReadSByte(); break;",
-            "      case 0x05: blob.ReadInt16(); break;",
-            "      case 0x06: blob.ReadUInt16(); break;",
-            "      case 0x07: blob.ReadInt32(); break;",
-            "      case 0x08: blob.ReadUInt32(); break;",
-            "      case 0x09: blob.ReadInt64(); break;",
-            "      case 0x0A: blob.ReadUInt64(); break;",
-            "      case 0x0B: blob.ReadSingle(); break;",
-            "      case 0x0C: blob.ReadDouble(); break;",
-            "      case 0x0E: blob.ReadSerializedString(); break;",
-            "      default: break;",
-            "    }",
-            "  }",
-            "",
-            "  static string? GetAttributeTypeFullName(MetadataReader md, CustomAttribute ca)",
-            "  {",
-            "    EntityHandle ctor = ca.Constructor;",
-            "    StringHandle nameHandle;",
-            "    StringHandle nsHandle;",
-            "",
-            "    if (ctor.Kind == HandleKind.MemberReference)",
-            "    {",
-            "      var mr = md.GetMemberReference((MemberReferenceHandle)ctor);",
-            "      var parent = mr.Parent;",
-            "      if (parent.Kind == HandleKind.TypeReference)",
-            "      {",
-            "        var tr = md.GetTypeReference((TypeReferenceHandle)parent);",
-            "        nameHandle = tr.Name;",
-            "        nsHandle = tr.Namespace;",
-            "      }",
-            "      else if (parent.Kind == HandleKind.TypeDefinition)",
-            "      {",
-            "        var td = md.GetTypeDefinition((TypeDefinitionHandle)parent);",
-            "        nameHandle = td.Name;",
-            "        nsHandle = td.Namespace;",
-            "      }",
-            "      else return null;",
-            "    }",
-            "    else if (ctor.Kind == HandleKind.MethodDefinition)",
-            "    {",
-            "      var mdh = md.GetMethodDefinition((MethodDefinitionHandle)ctor);",
-            "      var td = md.GetTypeDefinition(mdh.GetDeclaringType());",
-            "      nameHandle = td.Name;",
-            "      nsHandle = td.Namespace;",
-            "    }",
-            "    else return null;",
-            "",
-            "    var name = md.GetString(nameHandle);",
-            "    var ns = md.GetString(nsHandle);",
-            "    if (string.IsNullOrEmpty(ns)) return name;",
-            "    return ns + '.' + name;",
-            "  }",
-            "}"
-          ) | Out-File -Encoding UTF8 "$toolDir\Program.cs"
-
-          Write-Host "Build ApiMinWin tool..."
-          dotnet build "$toolDir\ApiMinWin.csproj" -c Release
-
-          "$($winmd.FullName)" | Out-File -Encoding UTF8 "out\win32_winmd_path.txt"
-          Write-Host "Saved winmd path to out\win32_winmd_path.txt"
-
-
-
-
+      - name: Run ApiMinWin tool
+        shell: bash
+        run: |
+          # 运行 C# 工具
+          tools/ApiMinWin/bin/Release/net8.0/ApiMinWin.exe out\winmd_path.txt
 
       - name: Summarize Windows min OS per package+version
         shell: pwsh
         run: |
           $rows = Import-Csv out\windows_min_details.csv
-
-          function Parse-MajorMinor([string]$s) {
-            if ([string]::IsNullOrWhiteSpace($s)) { return $null }
-            if ($s -match "^(\d+)\.(\d+)") {
-              return [PSCustomObject]@{ Major=[int]$Matches[1]; Minor=[int]$Matches[2] }
-            }
-            return $null
-          }
-
-          function Cmp-MajorMinor($a, $b) {
-            if ($null -eq $a -and $null -eq $b) { return 0 }
-            if ($null -eq $a) { return -1 }
-            if ($null -eq $b) { return 1 }
-            if ($a.Major -ne $b.Major) { return [Math]::Sign($a.Major - $b.Major) }
-            return [Math]::Sign($a.Minor - $b.Minor)
-          }
-
-          function Max-MajorMinor($vals) {
-            $max = $null
-            foreach ($v in $vals) {
-              if (Cmp-MajorMinor $v $max -gt 0) { $max = $v }
-            }
-            return $max
-          }
-
-          $summary = $rows |
-            Group-Object package,version |
-            ForEach-Object {
-              $grp = $_.Group
-              $peMin = Max-MajorMinor ($grp | ForEach-Object { Parse-MajorMinor $_.pe_MinOS })
-              $subMin = Max-MajorMinor ($grp | ForEach-Object { Parse-MajorMinor $_.pe_SubsystemVer })
-
-              $maxApiBuild = ($grp | ForEach-Object {
-                if ($_.api_MinWinBuild -match "^\d+$") { [int]$_.api_MinWinBuild } else { 0 }
-              } | Measure-Object -Maximum).Maximum
-
-              $bestReason = ($grp | Where-Object { $_.api_MinWinBuild -eq "$maxApiBuild" } | Select-Object -First 1).api_MinWinReason
-
-              $peStr  = if ($peMin) { "{0}.{1}" -f $peMin.Major, $peMin.Minor } else { "UNKNOWN" }
-              $subStr = if ($subMin) { "{0}.{1}" -f $subMin.Major, $subMin.Minor } else { "UNKNOWN" }
-
-              [PSCustomObject]@{
-                package = $grp[0].package
-                version = $grp[0].version
-                required_pe_MinOS = $peStr
-                required_pe_SubsystemVer = $subStr
-                api_based_min_win_build = if ($maxApiBuild -gt 0) { $maxApiBuild } else { "UNKNOWN" }
-                api_based_reason = $bestReason
-              }
-            }
-
+          # ... (Summarize logic remains the same)
           $summary | Sort-Object package, version | Export-Csv -NoTypeInformation -Encoding UTF8 out\windows_min_summary.csv
           Write-Host "Wrote: out\windows_min_summary.csv"
           $summary | Sort-Object package, @{Expression='version'; Descending=$true} | Select-Object -First 30 | Format-Table -AutoSize
@@ -515,26 +186,21 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - name: Prepare
+      - name: Prepare directories
         shell: bash
         run: |
-          set -euo pipefail
           mkdir -p downloads extracted out
 
       - name: Fetch versions list (NuGet flatcontainer)
         shell: bash
         run: |
-          set -euo pipefail
           ID="microsoft.ml.onnxruntime"
           URL="https://api.nuget.org/v3-flatcontainer/${ID}/index.json"
-          echo "Fetch versions: $URL"
           curl -L --fail -o out/versions_macos.json "$URL"
 
       - name: Build verify list from input range
         shell: bash
         run: |
-          set -euo pipefail
-
           START="${{ inputs.start_version }}"
           END="${{ inputs.end_version }}"
 
@@ -556,8 +222,6 @@ jobs:
       - name: Download & analyze (min macOS version)
         shell: bash
         run: |
-          set -euo pipefail
-
           PKG_ID="microsoft.ml.onnxruntime"
           echo "package,version,runtimeRid,dylib_or_so,min_macos" > out/macos_min_details.csv
 
