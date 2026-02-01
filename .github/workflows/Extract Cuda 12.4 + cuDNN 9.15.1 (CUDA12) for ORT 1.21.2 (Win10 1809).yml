@@ -1,4 +1,4 @@
-name: Extract Cuda 11.6-cuDNN 8.5-for ORT 1.16.0
+name: Extract Cuda 12.4 + cuDNN 9.15.1 (CUDA12) for ORT 1.21.2 (Win10 1809)
 
 on:
   workflow_dispatch:
@@ -15,13 +15,13 @@ jobs:
       - name: Setup MSVC (for dumpbin)
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Download Microsoft.ML.OnnxRuntime.Gpu nupkg (1.16.0)
+      - name: Download Microsoft.ML.OnnxRuntime.Gpu nupkg (1.21.2)
         shell: pwsh
         env:
-          NUPKG_URL: https://globalcdn.nuget.org/packages/microsoft.ml.onnxruntime.gpu.1.16.0.nupkg?packageVersion=1.16.0
+          NUPKG_URL: https://globalcdn.nuget.org/packages/microsoft.ml.onnxruntime.gpu.1.21.2.nupkg
         run: |
           $ProgressPreference = "SilentlyContinue"
-          $out = "downloads\microsoft.ml.onnxruntime.gpu.1.16.0.nupkg"
+          $out = "downloads\microsoft.ml.onnxruntime.gpu.1.21.2.nupkg"
 
           Write-Host ">>> Download nupkg: $env:NUPKG_URL"
           Invoke-WebRequest -Uri $env:NUPKG_URL -OutFile $out
@@ -34,7 +34,7 @@ jobs:
 
           # ZIP starts with 'PK' (0x50 0x4B)
           if (-not ($bytes[0] -eq 0x50 -and $bytes[1] -eq 0x4B)) {
-            # print first 200 chars as text to help debug (likely HTML)
+            # print first 400 chars as text to help debug (likely HTML)
             $head = [System.Text.Encoding]::UTF8.GetString($bytes[0..([Math]::Min($bytes.Length-1, 400))])
             Write-Host "----- Downloaded content head (as UTF-8) -----"
             Write-Host $head
@@ -60,19 +60,22 @@ jobs:
           Write-Host ">>> Native DLLs:"
           Get-ChildItem $nativeDir.FullName -Filter *.dll | Select-Object Name, Length
 
-      - name: Download NVIDIA redistributables (CUDA 11.6 + cuDNN 8.5)
+      - name: Download NVIDIA redistributables (CUDA 12.4 + cuDNN 9.15.1 for CUDA 12)
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
 
           $urls = @(
-            "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-11.6.55-archive.zip",
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-11.8.1.74-archive.zip",
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-10.7.0.55-archive.zip",
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.2.9.55-archive.zip",
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcusolver/windows-x86_64/libcusolver-windows-x86_64-11.3.2.55-archive.zip",
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/windows-x86_64/libcusparse-windows-x86_64-11.7.1.55-archive.zip",
-            "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-8.5.0.96_cuda11-archive.zip"
+            # CUDA 12.4 component redistributables (Windows x86_64)
+            "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip",
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip",
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-11.2.1.3-archive.zip",
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.5.147-archive.zip",
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcusolver/windows-x86_64/libcusolver-windows-x86_64-11.6.1.9-archive.zip",
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/windows-x86_64/libcusparse-windows-x86_64-12.4.1.24-archive.zip",
+
+            # cuDNN (CUDA 12 build)
+            "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.15.1.9_cuda12-archive.zip"
           )
 
           foreach ($u in $urls) {
@@ -91,6 +94,56 @@ jobs:
             Write-Host ">>> Extracting $($_.Name) -> $dest"
             Expand-Archive -Path $_.FullName -DestinationPath $dest -Force
           }
+
+      - name: Ensure zlibwapi.dll (only if ORT CUDA provider references it and redists don't include it)
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+
+          $nativeDir = $env:ORT_NATIVE_DIR
+          if (-not $nativeDir) { throw "ORT_NATIVE_DIR env missing" }
+
+          $cudaProvider = Get-ChildItem -Path $nativeDir -Filter "onnxruntime_providers_cuda.dll" | Select-Object -First 1
+          if (-not $cudaProvider) { throw "onnxruntime_providers_cuda.dll not found in nupkg native dir" }
+
+          $sharedProvider = Get-ChildItem -Path $nativeDir -Filter "onnxruntime_providers_shared.dll" | Select-Object -First 1
+
+          function Get-Dependents($dllPath) {
+            $out = (dumpbin /nologo /dependents $dllPath) 2>&1
+            $lines = $out -split "`r?`n"
+            $dlls = $lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -match "^[A-Za-z0-9_\-\.]+\.dll$" }
+            return $dlls
+          }
+
+          $deps = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+          foreach ($d in (Get-Dependents $cudaProvider.FullName)) { [void]$deps.Add($d) }
+          if ($sharedProvider) { foreach ($d in (Get-Dependents $sharedProvider.FullName)) { [void]$deps.Add($d) } }
+
+          if (-not $deps.Contains("zlibwapi.dll")) {
+            Write-Host "zlibwapi.dll not referenced by ORT CUDA provider dependents. Skipping."
+            return
+          }
+
+          $existing = Get-ChildItem -Path extracted -Recurse -File -Filter "zlibwapi.dll" | Select-Object -First 1
+          if ($existing) {
+            Write-Host "zlibwapi.dll already present in extracted redists: $($existing.FullName)"
+            return
+          }
+
+          # zlibwapi.dll is sometimes required by cuDNN on Windows. If not included in NVIDIA redists, fetch a known zlibwapi build.
+          $zlibUrl = "https://www.winimage.com/zLibDll/zlib123dllx64.zip"
+          $zlibZip = "downloads\zlib123dllx64.zip"
+          $zlibDst = "extracted\zlib123dllx64"
+          Write-Host ">>> Downloading zlibwapi.dll bundle: $zlibUrl"
+          Invoke-WebRequest -Uri $zlibUrl -OutFile $zlibZip
+
+          New-Item -ItemType Directory -Force $zlibDst | Out-Null
+          Expand-Archive -Path $zlibZip -DestinationPath $zlibDst -Force
+
+          $check = Get-ChildItem -Path $zlibDst -Recurse -File -Filter "zlibwapi.dll" | Select-Object -First 1
+          if (-not $check) { throw "Downloaded zlib bundle, but zlibwapi.dll not found inside." }
+
+          Write-Host "OK zlibwapi.dll fetched: $($check.FullName)"
 
       - name: Analyze ORT CUDA provider dependencies (dumpbin)
         shell: pwsh
@@ -117,12 +170,13 @@ jobs:
           foreach ($d in (Get-Dependents $cudaProvider.FullName)) { [void]$deps.Add($d) }
           if ($sharedProvider) { foreach ($d in (Get-Dependents $sharedProvider.FullName)) { [void]$deps.Add($d) } }
 
+          # CUDA + cuDNN + (optional) zlibwapi closure
           $want = $deps | Where-Object {
-            $_ -match "^(cudart|cublas|cublasLt|cufft|curand|cusolver|cusparse|cudnn).*\.dll$"
+            $_ -match "^(cudart|cublas|cublasLt|cufft|curand|cusolver|cusparse|cudnn|zlibwapi).*\.dll$"
           } | Sort-Object
 
           if (-not $want -or $want.Count -eq 0) {
-            throw "No CUDA-related dlls found from dumpbin output (unexpected)."
+            throw "No CUDA/cuDNN-related dlls found from dumpbin output (unexpected)."
           }
 
           Write-Host "=== dumpbin detected CUDA/cuDNN deps ==="
@@ -130,42 +184,44 @@ jobs:
 
           $want | Out-File -Encoding UTF8 "final_output\win-x64\ort_cuda_deps.txt"
 
-      - name: Collect minimal runtime DLLs (CUDA closure + cuDNN infer-only)
+      - name: Collect minimal runtime DLLs (CUDA closure + cuDNN DLLs)
         shell: pwsh
         run: |
           $dst = "final_output\win-x64"
 
           function Copy-OneFromExtracted($name) {
             $f = Get-ChildItem -Path extracted -Recurse -File -Filter $name | Select-Object -First 1
-            if (-not $f) { throw "Missing DLL in NVIDIA redist: $name" }
+            if (-not $f) { throw "Missing DLL in extracted redists: $name" }
             Copy-Item -Force $f.FullName (Join-Path $dst $name)
             Write-Host "OK  $name  <-  $($f.FullName)"
           }
 
           $deps = Get-Content -Path "final_output\win-x64\ort_cuda_deps.txt" | Where-Object { $_ -and $_.Trim().Length -gt 0 }
 
-          Write-Host "=== Copy CUDA deps (from dumpbin closure) ==="
+          Write-Host "=== Copy CUDA/cuDNN deps (from dumpbin closure) ==="
           foreach ($n in $deps) {
             if ($n -ieq "nvcuda.dll") { continue } # driver-provided
             Copy-OneFromExtracted $n
           }
 
-          # cuDNN infer-only (avoid delay-load漏检)
-          $needCudnnInfer = @(
-            "cudnn64_8.dll",
-            "cudnn_ops_infer64_8.dll",
-            "cudnn_cnn_infer64_8.dll",
-            "cudnn_adv_infer64_8.dll"
-          )
+          # cuDNN often uses delay-load / indirect loading. To avoid missing DLLs, copy all cudnn*.dll we downloaded.
+          Write-Host "=== Ensure all cuDNN DLLs from redist are present ==="
+          $cudnnAll = Get-ChildItem -Path extracted -Recurse -File -Filter "cudnn*.dll" |
+            Select-Object -ExpandProperty Name -Unique | Sort-Object
 
-          Write-Host "=== Ensure cuDNN infer-only DLLs ==="
-          foreach ($n in $needCudnnInfer) {
+          foreach ($n in $cudnnAll) {
             $p = Join-Path $dst $n
             if (-not (Test-Path $p)) {
               Copy-OneFromExtracted $n
             } else {
-              Write-Host "SKIP $n (already copied by dumpbin closure)"
+              Write-Host "SKIP $n (already copied)"
             }
+          }
+
+          # If zlibwapi.dll exists in extracted (or was downloaded) and not yet in output, copy it too (only when referenced).
+          $needZlib = $deps | Where-Object { $_ -ieq "zlibwapi.dll" }
+          if ($needZlib -and -not (Test-Path (Join-Path $dst "zlibwapi.dll"))) {
+            Copy-OneFromExtracted "zlibwapi.dll"
           }
 
           # manifest
@@ -179,12 +235,12 @@ jobs:
       - name: Zip and upload
         shell: pwsh
         run: |
-          Compress-Archive -Path final_output\win-x64\* -DestinationPath final_output\cuda116_cudnn85_infer_win-x64.zip -Force
+          Compress-Archive -Path final_output\win-x64\* -DestinationPath final_output\cuda124_cudnn9151_cuda12_infer_win-x64.zip -Force
           Write-Host "Zipped:"
           Get-ChildItem final_output
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cuda116_cudnn85_infer_win-x64
-          path: final_output/cuda116_cudnn85_infer_win-x64.zip
+          name: cuda124_cudnn9151_cuda12_infer_win-x64
+          path: final_output/cuda124_cudnn9151_cuda12_infer_win-x64.zip
