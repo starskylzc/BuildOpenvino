@@ -1,4 +1,4 @@
-name: Verify ORT NuGet Native Min OS (Windows + macOS) - No Python
+name: Verify ORT NuGet Native Min OS (Windows + macOS)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
 
 jobs:
   windows_verify:
-    name: Windows - GPU/DirectML packages (min OS inference)
+    name: Windows - dumpbin imports/headers -> min OS
     runs-on: windows-latest
 
     steps:
@@ -24,7 +24,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: "8.0.x"
 
       - name: Prepare directories
         shell: pwsh
@@ -34,37 +34,47 @@ jobs:
       - name: Build ApiMinWin tool
         shell: pwsh
         run: |
-          # Expect these 2 files to live at: .github/scripts/ApiMinWin.csproj + .github/scripts/ApiMinWin.cs
           dotnet publish .github/scripts/ApiMinWin.csproj -c Release -o tools/ApiMinWin
-          if (!(Test-Path tools/ApiMinWin/ApiMinWin.dll)) { throw "ApiMinWin publish failed." }
+          if (-not (Test-Path 'tools/ApiMinWin/ApiMinWin.dll')) { throw "ApiMinWin.dll not found after publish" }
+          Write-Host "ApiMinWin built at: tools/ApiMinWin/ApiMinWin.dll"
+
+      - name: Locate Visual Studio (dumpbin) via vswhere
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found: $vswhere" }
+
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw "Visual Studio with VC Tools not found" }
+
+          $devCmd = Join-Path $vsPath "Common7\Tools\VsDevCmd.bat"
+          if (-not (Test-Path $devCmd)) { throw "VsDevCmd.bat not found: $devCmd" }
+
+          "VSDEVCMD=$devCmd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "VSDEVCMD=$devCmd"
 
       - name: Download Windows.Win32.winmd (Win32Metadata)
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
           $id = "Microsoft.Windows.SDK.Win32Metadata"
-          $lower = $id.ToLower()
+          $lower = $id.ToLowerInvariant()
           $indexUrl = "https://api.nuget.org/v3-flatcontainer/$lower/index.json"
-          Write-Host "Fetch win32metadata versions: $indexUrl"
           $versions = (Invoke-RestMethod -Uri $indexUrl -Method Get).versions
-          if (-not $versions -or $versions.Count -lt 1) { throw "Could not fetch Win32Metadata versions." }
+          if (-not $versions -or $versions.Count -lt 1) { throw "Could not fetch versions for $id" }
           $ver = $versions[-1]
-
           $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$lower/$ver/$lower.$ver.nupkg"
           $nupkgPath = "downloads\$lower.$ver.nupkg"
-          Write-Host "Download: $nupkgUrl"
+          Write-Host "Download Win32Metadata: $nupkgUrl"
           Invoke-WebRequest -Uri $nupkgUrl -OutFile $nupkgPath
-
           $outDir = "extracted\win32metadata.$ver"
           if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
           Expand-Archive -Path $nupkgPath -DestinationPath $outDir -Force
-
           $winmd = Get-ChildItem $outDir -Recurse -File -Filter "Windows.Win32.winmd" | Select-Object -First 1
           if (-not $winmd) { throw "Windows.Win32.winmd not found inside $nupkgPath" }
-
           $winmdPath = $winmd.FullName
           "WINMD_PATH=$winmdPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "WINMD_PATH = $winmdPath"
+          Write-Host "WINMD_PATH=$winmdPath"
 
       - name: Fetch versions list (NuGet flatcontainer)
         shell: pwsh
@@ -72,7 +82,7 @@ jobs:
           $ProgressPreference = "SilentlyContinue"
 
           function Get-Versions([string]$id) {
-            $lower = $id.ToLower()
+            $lower = $id.ToLowerInvariant()
             $url = "https://api.nuget.org/v3-flatcontainer/$lower/index.json"
             Write-Host "Fetch versions: $url"
             $json = Invoke-RestMethod -Uri $url -Method Get
@@ -168,7 +178,6 @@ jobs:
           $list = New-Object System.Collections.Generic.List[object]
           foreach ($p in $pkgIds) {
             foreach ($v in $all.$p) {
-              # NOTE: We assume start_version is the newer (upper) bound and end_version is the older (lower) bound.
               if ((Compare-Ver $v $start) -le 0 -and (Compare-Ver $v $end) -ge 0) {
                 $list.Add([PSCustomObject]@{ id=$p; version=$v })
               }
@@ -181,19 +190,27 @@ jobs:
           Write-Host "Verify items count = $($sorted.Count)"
           $sorted | Select-Object -First 20 | Format-Table -AutoSize
 
-      - name: Download & analyze Windows native DLLs (min build)
+      - name: Download & analyze (dumpbin imports/headers -> min build)
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
+          $ErrorActionPreference = "Stop"
 
           $tool = (Resolve-Path "tools/ApiMinWin/ApiMinWin.dll").Path
           $winmd = $env:WINMD_PATH
-          if (-not $winmd) { throw "WINMD_PATH is empty." }
-          if (-not (Test-Path $winmd)) { throw "WINMD_PATH does not exist: $winmd" }
+          if (-not $winmd -or -not (Test-Path $winmd)) { throw "WINMD_PATH missing or not found: $winmd" }
+
+          $devCmd = $env:VSDEVCMD
+          if (-not $devCmd -or -not (Test-Path $devCmd)) { throw "VSDEVCMD missing or not found: $devCmd" }
+
+          function Run-VS([string]$cmdLine) {
+            # Run a command under VS developer environment so dumpbin.exe is on PATH
+            $full = "`"$devCmd`" -arch=amd64 -host_arch=amd64 && $cmdLine"
+            cmd.exe /c $full | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Command failed: $cmdLine" }
+          }
 
           $items = Get-Content out\verify_windows_list.json -Raw | ConvertFrom-Json
-          if (-not $items -or $items.Count -eq 0) { throw "No verify items." }
-
           $rows = New-Object System.Collections.Generic.List[object]
 
           foreach ($it in $items) {
@@ -201,15 +218,13 @@ jobs:
             $ver = [string]$it.version
             if ([string]::IsNullOrWhiteSpace($pkg) -or [string]::IsNullOrWhiteSpace($ver)) { continue }
 
-            $lower = $pkg.ToLower()
+            $lower = $pkg.ToLowerInvariant()
             $nupkg = "downloads\$lower.$ver.nupkg"
             $url = "https://api.nuget.org/v3-flatcontainer/$lower/$ver/$lower.$ver.nupkg"
 
-            if (!(Test-Path $nupkg)) {
-              Write-Host "Download: $url"
+            if (-not (Test-Path $nupkg)) {
+              Write-Host "Download: $pkg $ver"
               Invoke-WebRequest -Uri $url -OutFile $nupkg
-            } else {
-              Write-Host "Skip download (cached): $nupkg"
             }
 
             $outdir = "extracted\$lower.$ver"
@@ -221,24 +236,37 @@ jobs:
               Where-Object { $_.FullName -match "\\runtimes\\win-[^\\]+\\native\\" }
 
             if (-not $dlls -or $dlls.Count -eq 0) {
-              Write-Host "No native DLLs found for $pkg $ver (skip)"
+              Write-Host "No runtimes/win-*/native/*.dll found for $pkg $ver (skip)"
               continue
             }
 
             foreach ($dll in $dlls) {
-              $m = [regex]::Match($dll.FullName, "runtimes\\(win-[^\\]+)\\native")
+              $m = [regex]::Match($dll.FullName, "runtimes\\(win-[^\\]+)\\native", "IgnoreCase")
               $rid = if ($m.Success) { $m.Groups[1].Value } else { "UNKNOWN" }
 
-              $json = & dotnet $tool --winmd $winmd --pe $dll.FullName --json
+              $baseName = [IO.Path]::GetFileNameWithoutExtension($dll.Name)
+              $impTxt = "out\imports\$lower.$ver.$rid.$baseName.imports.txt"
+              $hdrTxt = "out\imports\$lower.$ver.$rid.$baseName.headers.txt"
+              New-Item -ItemType Directory -Force (Split-Path $impTxt) | Out-Null
+
+              # dumpbin /imports + /headers
+              Run-VS "dumpbin /nologo /imports `"$($dll.FullName)`" > `"$impTxt`""
+              Run-VS "dumpbin /nologo /headers `"$($dll.FullName)`" > `"$hdrTxt`""
+
+              $json = & dotnet $tool --winmd $winmd --imports $impTxt --headers $hdrTxt --json
               $res = $json | ConvertFrom-Json
 
-              $rows.Add([PSCustomObject]@{
+              $rows.Add([pscustomobject]@{
                 package = $pkg
                 version = $ver
                 runtimeRid = $rid
                 pe = $dll.Name
                 requiredMinBuild = [int]$res.requiredMinBuild
                 requiredMinReason = [string]$res.requiredMinReason
+                apiMinBuild = [int]$res.apiMinBuild
+                apiMinReason = [string]$res.apiMinReason
+                headerMinBuild = [int]$res.headerMinBuild
+                headerMinReason = [string]$res.headerMinReason
                 importCount = [int]$res.importCount
                 mappedImportCount = [int]$res.mappedImportCount
               })
@@ -251,6 +279,8 @@ jobs:
           function Build-ToWindowsName([int]$build) {
             if ($build -le 0) { return "UNKNOWN" }
             $map = [ordered]@{
+              6000  = "Windows Vista (6000)"
+              7600  = "Windows 7 (7600)"
               7601  = "Windows 7 SP1 (7601)"
               9200  = "Windows 8 (9200)"
               9600  = "Windows 8.1 (9600)"
@@ -313,6 +343,12 @@ jobs:
         with:
           name: windows_min_summary
           path: out/windows_min_summary.csv
+
+      - name: Upload dumpbin logs (imports/headers)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows_dumpbin_logs
+          path: out/imports
 
   macos_verify:
     name: macOS - Microsoft.ML.OnnxRuntime (min macOS from Mach-O)
