@@ -34,9 +34,6 @@ jobs:
 
           PACKAGES=(
             "Microsoft.ML.OnnxRuntime"
-            "Microsoft.ML.OnnxRuntime.Gpu"
-            "Microsoft.ML.OnnxRuntime.DirectML"
-            "Microsoft.ML.OnnxRuntime.Gpu.Windows"
           )
 
           # ---- helpers ----
@@ -59,15 +56,15 @@ jobs:
           }
 
           list_versions () {
-            # prints sorted desc stable versions within range
+            # IMPORTANT:
+            # - stdout: ONLY versions
+            # - stderr: progress logs
             local pkg_lc="$1"
             local idx_url="https://api.nuget.org/v3-flatcontainer/${pkg_lc}/index.json"
 
-            echo ">>> Fetch versions: $idx_url"
+            echo ">>> Fetch versions: $idx_url" >&2
             curl -L --fail -o "downloads/${pkg_lc}.index.json" "$idx_url"
 
-            # extract "x.y.z" (ignore prerelease)
-            # then filter in range and sort desc numeric
             grep -Eo '"[0-9]+\.[0-9]+\.[0-9]+"' "downloads/${pkg_lc}.index.json" \
               | tr -d '"' \
               | while read -r v; do
@@ -83,6 +80,7 @@ jobs:
             # returns "min|TAG"
             local dylib="$1"
             local min=""
+
             # LC_BUILD_VERSION -> minos
             min="$(otool -l "$dylib" | awk '
               $1=="cmd" && $2=="LC_BUILD_VERSION"{in=1}
@@ -128,7 +126,8 @@ jobs:
             echo "PACKAGE: $pkg"
             echo "=============================="
 
-            versions="$(list_versions "$pkg_lc" || true)"
+            # 关键：不要把 stderr 混进 versions
+            versions="$(list_versions "$pkg_lc" 2>/dev/null || true)"
             if [[ -z "${versions}" ]]; then
               echo "WARN: No versions found in range for $pkg"
               continue
@@ -149,7 +148,6 @@ jobs:
               mkdir -p "$outdir"
               unzip -q "$nupkg" -d "$outdir"
 
-              # find dylibs
               mapfile -t dylibs < <(find "$outdir" -type f \( -path "*/runtimes/osx-*/native/*.dylib" -o -path "*/runtimes/osx-*/native/*.so" \) 2>/dev/null || true)
 
               if [[ "${#dylibs[@]}" -eq 0 ]]; then
@@ -174,7 +172,6 @@ jobs:
                 echo "  dylib: $rt/$lib -> min_macos=$min ($tag)"
                 echo "${pkg},${ver},${rt},${lib},${min},${tag}" >> results/macos_min_details.csv
 
-                # track runtimes
                 if [[ "$runtimes_set" != *"|$rt|"* ]]; then
                   runtimes_set="${runtimes_set}|$rt|"
                 fi
@@ -183,7 +180,6 @@ jobs:
                 if [[ -n "$num" ]]; then
                   if [[ -z "$worst_num" || "$num" -gt "$worst_num" ]]; then
                     worst_num="$num"
-                    # normalize to a.b.c
                     IFS='.' read -r a b c <<<"$min"
                     c="${c:-0}"
                     worst_txt="${a}.${b}.${c}"
@@ -214,6 +210,7 @@ jobs:
             results/macos_min_summary.csv
             results/macos_min_details.csv
 
+
   windows_verify:
     name: Windows min OS from PE headers (dumpbin)
     runs-on: windows-latest
@@ -236,8 +233,8 @@ jobs:
           $ProgressPreference = "SilentlyContinue"
 
           $packages = @(
-            "Microsoft.ML.OnnxRuntime",
             "Microsoft.ML.OnnxRuntime.Gpu",
+            "Microsoft.ML.OnnxRuntime.Gpu.Windows",
             "Microsoft.ML.OnnxRuntime.DirectML"
           )
 
