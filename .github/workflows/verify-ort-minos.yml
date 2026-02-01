@@ -59,18 +59,88 @@ jobs:
           $start = "${{ inputs.start_version }}"
           $end   = "${{ inputs.end_version }}"
 
+          function Parse-SemVer([string]$v) {
+            # NuGet versions are usually SemVer-ish: MAJOR.MINOR.PATCH[.REV][-prerelease][+build]
+            # We compare only numeric core + prerelease (build metadata ignored).
+            $v = ($v ?? "").Trim()
+            $v = $v -replace "\+.*$", ""  # drop build metadata
+
+            $core = $v
+            $pre  = $null
+            if ($v -match "-") {
+              $parts = $v.Split('-', 2)
+              $core = $parts[0]
+              $pre  = $parts[1]
+            }
+
+            $nums = @()
+            foreach ($seg in $core.Split('.')) {
+              # allow things like "0-alpha" (rare but possible) by taking the leading digits only
+              if ($seg -match "^(\d+)") {
+                $nums += [int]$Matches[1]
+              } else {
+                $nums += 0
+              }
+            }
+
+            $preIds = @()
+            if ($pre) {
+              $preIds = $pre.Split('.')
+            }
+
+            return [PSCustomObject]@{ nums=$nums; pre=$preIds; hasPre=([bool]$pre) }
+          }
+
+          function Compare-Pre([string[]]$aPre, [string[]]$bPre) {
+            # SemVer prerelease precedence:
+            # - release (no prerelease) > prerelease
+            # - compare dot-separated identifiers; numeric < non-numeric; numeric compare by int; otherwise lexicographic
+            $len = [Math]::Max($aPre.Count, $bPre.Count)
+            for ($i=0; $i -lt $len; $i++) {
+              if ($i -ge $aPre.Count) { return -1 } # shorter is lower precedence
+              if ($i -ge $bPre.Count) { return 1 }
+
+              $ai = $aPre[$i]
+              $bi = $bPre[$i]
+
+              $aIsNum = $ai -match "^\d+$"
+              $bIsNum = $bi -match "^\d+$"
+
+              if ($aIsNum -and $bIsNum) {
+                $an = [int]$ai
+                $bn = [int]$bi
+                if ($an -lt $bn) { return -1 }
+                if ($an -gt $bn) { return 1 }
+                continue
+              }
+              if ($aIsNum -and -not $bIsNum) { return -1 }
+              if (-not $aIsNum -and $bIsNum) { return 1 }
+
+              $cmp = [string]::Compare($ai, $bi, $true)
+              if ($cmp -lt 0) { return -1 }
+              if ($cmp -gt 0) { return 1 }
+            }
+            return 0
+          }
+
           function Compare-Ver([string]$a, [string]$b) {
             # returns: -1 if a<b, 0 if equal, 1 if a>b
-            $pa = $a.Split('.') | ForEach-Object { [int]$_ }
-            $pb = $b.Split('.') | ForEach-Object { [int]$_ }
-            $len = [Math]::Max($pa.Count, $pb.Count)
+            $pa = Parse-SemVer $a
+            $pb = Parse-SemVer $b
+
+            $len = [Math]::Max($pa.nums.Count, $pb.nums.Count)
             for ($i=0; $i -lt $len; $i++) {
-              $va = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }
-              $vb = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
+              $va = if ($i -lt $pa.nums.Count) { $pa.nums[$i] } else { 0 }
+              $vb = if ($i -lt $pb.nums.Count) { $pb.nums[$i] } else { 0 }
               if ($va -lt $vb) { return -1 }
               if ($va -gt $vb) { return 1 }
             }
-            return 0
+
+            # numeric core equal -> prerelease rules
+            if (-not $pa.hasPre -and -not $pb.hasPre) { return 0 }
+            if (-not $pa.hasPre -and $pb.hasPre) { return 1 }  # release > prerelease
+            if ($pa.hasPre -and -not $pb.hasPre) { return -1 }
+            return (Compare-Pre $pa.pre $pb.pre)
           }
 
           $all = Get-Content out\versions_windows.json -Raw | ConvertFrom-Json
@@ -200,11 +270,81 @@ jobs:
           $csv | Out-File -Encoding UTF8 out\windows_min_details.csv
           Write-Host "Wrote: out\windows_min_details.csv"
 
+      - name: Summarize Windows min OS per package+version
+        shell: pwsh
+        run: |
+          $rows = Import-Csv out\windows_min_details.csv
+
+          function Parse-MajorMinor([string]$s) {
+            if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+            if ($s -match "^(\d+)\.(\d+)") {
+              return [PSCustomObject]@{ Major=[int]$Matches[1]; Minor=[int]$Matches[2] }
+            }
+            return $null
+          }
+
+          function Cmp-MajorMinor($a, $b) {
+            if ($null -eq $a -and $null -eq $b) { return 0 }
+            if ($null -eq $a) { return -1 }
+            if ($null -eq $b) { return 1 }
+            if ($a.Major -ne $b.Major) { return [Math]::Sign($a.Major - $b.Major) }
+            return [Math]::Sign($a.Minor - $b.Minor)
+          }
+
+          function Max-MajorMinor($vals) {
+            $max = $null
+            foreach ($v in $vals) {
+              if (Cmp-MajorMinor $v $max -gt 0) { $max = $v }
+            }
+            return $max
+          }
+
+          function Rank-Guess([string]$g) {
+            if ($g -match "19041") { return 4 }
+            if ($g -match "18362") { return 3 }
+            if ($g -match "17763") { return 2 }
+            if ($g -match "16299") { return 1 }
+            return 0
+          }
+
+          $summary = $rows |
+            Group-Object package,version |
+            ForEach-Object {
+              $grp = $_.Group
+              $peMin = Max-MajorMinor ($grp | ForEach-Object { Parse-MajorMinor $_.pe_MinOS })
+              $subMin = Max-MajorMinor ($grp | ForEach-Object { Parse-MajorMinor $_.pe_SubsystemVer })
+
+              $bestGuess = ($grp |
+                Sort-Object @{Expression={ Rank-Guess $_.imports_MinWinGuess }; Descending=$true} |
+                Select-Object -First 1).imports_MinWinGuess
+
+              $peStr  = if ($peMin) { "{0}.{1}" -f $peMin.Major, $peMin.Minor } else { "UNKNOWN" }
+              $subStr = if ($subMin) { "{0}.{1}" -f $subMin.Major, $subMin.Minor } else { "UNKNOWN" }
+
+              [PSCustomObject]@{
+                package = $grp[0].package
+                version = $grp[0].version
+                required_pe_MinOS = $peStr
+                required_pe_SubsystemVer = $subStr
+                imports_based_min_win_guess = $bestGuess
+              }
+            }
+
+          $summary | Sort-Object package, version | Export-Csv -NoTypeInformation -Encoding UTF8 out\windows_min_summary.csv
+          Write-Host "Wrote: out\windows_min_summary.csv"
+          $summary | Sort-Object package, @{Expression='version'; Descending=$true} | Select-Object -First 30 | Format-Table -AutoSize
+
       - name: Upload Windows CSV
         uses: actions/upload-artifact@v4
         with:
           name: windows_min_details
           path: out/windows_min_details.csv
+
+      - name: Upload Windows summary CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows_min_summary
+          path: out/windows_min_summary.csv
 
   macos_verify:
     name: macOS - Microsoft.ML.OnnxRuntime (min macOS from Mach-O)
@@ -268,21 +408,13 @@ jobs:
             local min=""
 
             # LC_BUILD_VERSION path
-            # otool -l prints:
-            #   cmd LC_BUILD_VERSION
-            #   ...
-            #   minos 10.15
-            #   sdk 13.3
             min="$(otool -l "$f" 2>/dev/null | awk '
               $1=="cmd" && $2=="LC_BUILD_VERSION" {in=1}
               in==1 && $1=="minos" {print $2; exit}
             ' || true)"
 
             if [[ -z "$min" ]]; then
-              # LC_VERSION_MIN_MACOSX path:
-              #   cmd LC_VERSION_MIN_MACOSX
-              #   ...
-              #   version 10.14
+              # LC_VERSION_MIN_MACOSX path
               min="$(otool -l "$f" 2>/dev/null | awk '
                 $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX" {in=1}
                 in==1 && $1=="version" {print $2; exit}
@@ -315,7 +447,6 @@ jobs:
             unzip -q "$nupkg" -d "$outdir"
 
             # Collect dylib/so under runtimes/osx-*/native
-            # NOTE: macos runner default bash doesn't have `mapfile`, so use while-read.
             dylibs=()
             while IFS= read -r f; do
               [[ -z "$f" ]] && continue
@@ -328,7 +459,6 @@ jobs:
             fi
 
             for f in "${dylibs[@]}"; do
-              # rid: extract "osx-x86_64" or "osx-arm64" from path
               rid="$(echo "$f" | sed -n 's#.*runtimes/\(osx-[^/]*\)/native/.*#\1#p')"
               base="$(basename "$f")"
               minos="$(get_min_macos "$f")"
@@ -340,8 +470,29 @@ jobs:
           echo "Wrote: out/macos_min_details.csv"
           head -n 20 out/macos_min_details.csv || true
 
+      - name: Summarize macOS min version per package+version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # For each package+version, take the *maximum* min_macos across all native binaries.
+          echo "package,version,required_min_macos" > out/macos_min_summary.csv
+          tail -n +2 out/macos_min_details.csv \
+            | awk -F',' 'NF>=5 {print $1","$2","$5}' \
+            | sort -t',' -k1,1 -k2,2 -k3,3V \
+            | awk -F',' '{k=$1","$2; last[k]=$3} END {for (k in last) print k","last[k]}' \
+            | sort -t',' -k1,1 -k2,2V >> out/macos_min_summary.csv
+
+          echo "Wrote: out/macos_min_summary.csv"
+          head -n 30 out/macos_min_summary.csv || true
+
       - name: Upload macOS CSV
         uses: actions/upload-artifact@v4
         with:
           name: macos_min_details
           path: out/macos_min_details.csv
+
+      - name: Upload macOS summary CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos_min_summary
+          path: out/macos_min_summary.csv
