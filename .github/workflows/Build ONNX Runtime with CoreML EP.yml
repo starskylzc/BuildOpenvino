@@ -1,46 +1,82 @@
-name: Build ONNX Runtime with CoreML EP
+name: Build ONNX Runtime with CoreML
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动触发
+    inputs:
+      build_type:
+        description: 'Build Configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+        - Release
+        - RelWithDebInfo
 
 jobs:
   build:
-    runs-on: macos-latest
+    name: Build ORT ${{ matrix.ort_version }} (CoreML)
+    runs-on: macos-14 # 使用 Apple Silicon M1 运行器，编译速度更快
+    strategy:
+      fail-fast: false
+      matrix:
+        ort_version: ['v1.16.3', 'v1.19.2']
 
     steps:
-      # Checkout the repo to access the code
-      - name: Checkout onnxruntime repo
-        uses: actions/checkout@v2
-
-      # Install dependencies
-      - name: Install dependencies
-        run: |
-          brew install cmake
-          brew install python3
-          pip3 install -U pip
-          pip3 install onnx
-
-      # Build ONNX Runtime 1.16.3 with CoreML EP
-      - name: Build ONNX Runtime 1.16.3 with CoreML EP
-        run: |
-          # Checkout version 1.16.3
-          git checkout tags/v1.16.3
-          ./build.sh --config Release --use_coreml --build_shared_lib --skip_tests
-
-      # Build ONNX Runtime 1.19.2 with CoreML EP
-      - name: Build ONNX Runtime 1.19.2 with CoreML EP
-        run: |
-          # Checkout version 1.19.2
-          git checkout tags/v1.19.2
-          ./build.sh --config Release --use_coreml --build_shared_lib --skip_tests
-
-      # Archive the build output for both versions
-      - name: Archive Build Output
-        uses: actions/upload-artifact@v6.0.0
+      - name: Checkout ONNX Runtime
+        uses: actions/checkout@v4
         with:
-          name: onnxruntime-builds
-          path: |
-            build/Release/libonnxruntime.dylib
-            build/Release/libonnxruntime_providers_shared.dylib
-            build/Release/libonnxruntime_providers_coreml.dylib
+          repository: microsoft/onnxruntime
+          ref: ${{ matrix.ort_version }}
+          submodules: recursive # 必须递归拉取子模块
+          fetch-depth: 1        # 浅克隆以节省时间
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          brew install cmake ninja
+          pip install numpy
+
+      - name: Build Shared Library (macOS Universal)
+        shell: bash
+        run: |
+          # 运行官方构建脚本
+          # --use_coreml: 启用 CoreML EP
+          # --osx_arch: 构建通用二进制 (Intel + Apple Silicon)
+          # --build_shared_lib: 生成 .dylib 动态库
+          # --skip_tests: 跳过测试以节省时间
+          
+          python3 tools/ci_build/build.py \
+            --build_dir build \
+            --config ${{ inputs.build_type }} \
+            --use_coreml \
+            --parallel \
+            --build_shared_lib \
+            --skip_tests \
+            --skip_submodule_sync \
+            --osx_arch "x86_64;arm64" 
+
+      - name: Organize Artifacts
+        run: |
+          mkdir -p artifacts
+          
+          # 复制生成的动态库
+          cp build/${{ inputs.build_type }}/libonnxruntime*.dylib artifacts/
+          
+          # 尝试复制头文件 (可选，方便开发使用)
+          mkdir -p artifacts/include
+          cp -r include/onnxruntime/core/session/*.h artifacts/include/ || true
+          
+          # 创建版本说明
+          echo "Version: ${{ matrix.ort_version }}" > artifacts/version.txt
+          echo "Build: CoreML" >> artifacts/version.txt
+          echo "Arch: Universal (x86_64;arm64)" >> artifacts/version.txt
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnxruntime-${{ matrix.ort_version }}-coreml-macos
+          path: artifacts/
