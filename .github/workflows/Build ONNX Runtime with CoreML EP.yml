@@ -1,7 +1,7 @@
-name: Build ONNX Runtime with CoreML
+name: Build ORT CoreML (Specific Arch)
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
     inputs:
       build_type:
         description: 'Build Configuration'
@@ -14,12 +14,18 @@ on:
 
 jobs:
   build:
-    name: Build ORT ${{ matrix.ort_version }} (CoreML)
-    runs-on: macos-14 # 使用 Apple Silicon M1 运行器，编译速度更快
+    name: Build ${{ matrix.ort_version }} (${{ matrix.arch }})
+    runs-on: macos-14 # 使用 M1 运行器 (编译速度最快，支持交叉编译 x86)
     strategy:
       fail-fast: false
       matrix:
-        ort_version: ['v1.16.3', 'v1.19.2']
+        include:
+          # === 在这里定义版本和架构的对应关系 ===
+          - ort_version: 'v1.16.3'
+            arch: 'x86_64'
+            
+          - ort_version: 'v1.19.2'
+            arch: 'arm64'
 
     steps:
       - name: Checkout ONNX Runtime
@@ -27,8 +33,8 @@ jobs:
         with:
           repository: microsoft/onnxruntime
           ref: ${{ matrix.ort_version }}
-          submodules: recursive # 必须递归拉取子模块
-          fetch-depth: 1        # 浅克隆以节省时间
+          submodules: recursive
+          fetch-depth: 1
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -40,15 +46,12 @@ jobs:
           brew install cmake ninja
           pip install numpy
 
-      - name: Build Shared Library (macOS Universal)
+      - name: Build Shared Library
         shell: bash
         run: |
-          # 运行官方构建脚本
-          # --use_coreml: 启用 CoreML EP
-          # --osx_arch: 构建通用二进制 (Intel + Apple Silicon)
-          # --build_shared_lib: 生成 .dylib 动态库
-          # --skip_tests: 跳过测试以节省时间
+          echo ">>> Building ORT ${{ matrix.ort_version }} for ${{ matrix.arch }}..."
           
+          # 直接传入对应的架构参数
           python3 tools/ci_build/build.py \
             --build_dir build \
             --config ${{ inputs.build_type }} \
@@ -57,26 +60,36 @@ jobs:
             --build_shared_lib \
             --skip_tests \
             --skip_submodule_sync \
-            --osx_arch "x86_64;arm64" 
+            --osx_arch ${{ matrix.arch }}
+
+      - name: Check Output
+        run: |
+          # 验证生成文件的架构类型
+          FILE_PATH="build/${{ inputs.build_type }}/libonnxruntime.dylib"
+          ls -lh $FILE_PATH
+          lipo -info $FILE_PATH
 
       - name: Organize Artifacts
         run: |
           mkdir -p artifacts
-          
-          # 复制生成的动态库
           cp build/${{ inputs.build_type }}/libonnxruntime*.dylib artifacts/
           
-          # 尝试复制头文件 (可选，方便开发使用)
+          # 尝试复制头文件
           mkdir -p artifacts/include
-          cp -r include/onnxruntime/core/session/*.h artifacts/include/ || true
+          if [ -d "include/onnxruntime/core/session" ]; then
+             cp -r include/onnxruntime/core/session/*.h artifacts/include/
+          fi
           
-          # 创建版本说明
+          # 生成版本信息文件
           echo "Version: ${{ matrix.ort_version }}" > artifacts/version.txt
-          echo "Build: CoreML" >> artifacts/version.txt
-          echo "Arch: Universal (x86_64;arm64)" >> artifacts/version.txt
+          echo "Arch: ${{ matrix.arch }}" >> artifacts/version.txt
+          echo "Provider: CoreML" >> artifacts/version.txt
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: onnxruntime-${{ matrix.ort_version }}-coreml-macos
+          # 产物名称会明确带上版本和架构，例如：
+          # onnxruntime-v1.16.3-x86_64-coreml
+          # onnxruntime-v1.19.2-arm64-coreml
+          name: onnxruntime-${{ matrix.ort_version }}-${{ matrix.arch }}-coreml
           path: artifacts/
