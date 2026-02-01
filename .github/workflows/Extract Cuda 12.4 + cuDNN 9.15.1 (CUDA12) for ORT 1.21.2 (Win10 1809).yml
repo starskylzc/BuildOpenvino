@@ -18,10 +18,10 @@ jobs:
       - name: Download Microsoft.ML.OnnxRuntime.Gpu nupkg (1.21.2)
         shell: pwsh
         env:
-          NUPKG_URL: https://globalcdn.nuget.org/packages/microsoft.ml.onnxruntime.gpu.1.21.2.nupkg
+          NUPKG_URL: https://globalcdn.nuget.org/packages/microsoft.ml.onnxruntime.gpu.windows.1.21.2.nupkg
         run: |
           $ProgressPreference = "SilentlyContinue"
-          $out = "downloads\microsoft.ml.onnxruntime.gpu.1.21.2.nupkg"
+          $out = "downloads\microsoft.ml.onnxruntime.gpu.windows.1.21.2.nupkg"
 
           Write-Host ">>> Download nupkg: $env:NUPKG_URL"
           Invoke-WebRequest -Uri $env:NUPKG_URL -OutFile $out
