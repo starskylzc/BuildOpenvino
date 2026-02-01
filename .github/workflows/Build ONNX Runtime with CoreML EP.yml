@@ -1,0 +1,46 @@
+name: Build ONNX Runtime with CoreML EP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      # Checkout the repo to access the code
+      - name: Checkout onnxruntime repo
+        uses: actions/checkout@v2
+
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          brew install cmake
+          brew install python3
+          pip3 install -U pip
+          pip3 install onnx
+
+      # Build ONNX Runtime 1.16.3 with CoreML EP
+      - name: Build ONNX Runtime 1.16.3 with CoreML EP
+        run: |
+          # Checkout version 1.16.3
+          git checkout tags/v1.16.3
+          ./build.sh --config Release --use_coreml --build_shared_lib --skip_tests
+
+      # Build ONNX Runtime 1.19.2 with CoreML EP
+      - name: Build ONNX Runtime 1.19.2 with CoreML EP
+        run: |
+          # Checkout version 1.19.2
+          git checkout tags/v1.19.2
+          ./build.sh --config Release --use_coreml --build_shared_lib --skip_tests
+
+      # Archive the build output for both versions
+      - name: Archive Build Output
+        uses: actions/upload-artifact@v2
+        with:
+          name: onnxruntime-builds
+          path: |
+            build/Release/libonnxruntime.dylib
+            build/Release/libonnxruntime_providers_shared.dylib
+            build/Release/libonnxruntime_providers_coreml.dylib
+
