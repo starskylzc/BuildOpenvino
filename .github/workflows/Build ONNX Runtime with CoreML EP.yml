@@ -36,7 +36,7 @@ jobs:
 
       # Archive the build output for both versions
       - name: Archive Build Output
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: onnxruntime-builds
           path: |
