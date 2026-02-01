@@ -21,7 +21,7 @@ jobs:
       - name: Prepare
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force downloads, extracted, out | Out-Null
+          New-Item -ItemType Directory -Force downloads, extracted, out, tools | Out-Null
 
       - name: Setup MSVC (dumpbin)
         uses: ilammy/msvc-dev-cmd@v1
@@ -60,11 +60,8 @@ jobs:
           $end   = "${{ inputs.end_version }}"
 
           function Parse-SemVer([string]$v) {
-            # NuGet versions are usually SemVer-ish: MAJOR.MINOR.PATCH[.REV][-prerelease][+build]
-            # We compare only numeric core + prerelease (build metadata ignored).
             $v = ($v ?? "").Trim()
-            $v = $v -replace "\+.*$", ""  # drop build metadata
-
+            $v = $v -replace "\+.*$", ""
             $core = $v
             $pre  = $null
             if ($v -match "-") {
@@ -72,50 +69,31 @@ jobs:
               $core = $parts[0]
               $pre  = $parts[1]
             }
-
             $nums = @()
             foreach ($seg in $core.Split('.')) {
-              # allow things like "0-alpha" (rare but possible) by taking the leading digits only
-              if ($seg -match "^(\d+)") {
-                $nums += [int]$Matches[1]
-              } else {
-                $nums += 0
-              }
+              if ($seg -match "^(\d+)") { $nums += [int]$Matches[1] } else { $nums += 0 }
             }
-
             $preIds = @()
-            if ($pre) {
-              $preIds = $pre.Split('.')
-            }
-
+            if ($pre) { $preIds = $pre.Split('.') }
             return [PSCustomObject]@{ nums=$nums; pre=$preIds; hasPre=([bool]$pre) }
           }
 
           function Compare-Pre([string[]]$aPre, [string[]]$bPre) {
-            # SemVer prerelease precedence:
-            # - release (no prerelease) > prerelease
-            # - compare dot-separated identifiers; numeric < non-numeric; numeric compare by int; otherwise lexicographic
             $len = [Math]::Max($aPre.Count, $bPre.Count)
             for ($i=0; $i -lt $len; $i++) {
-              if ($i -ge $aPre.Count) { return -1 } # shorter is lower precedence
+              if ($i -ge $aPre.Count) { return -1 }
               if ($i -ge $bPre.Count) { return 1 }
-
-              $ai = $aPre[$i]
-              $bi = $bPre[$i]
-
+              $ai = $aPre[$i]; $bi = $bPre[$i]
               $aIsNum = $ai -match "^\d+$"
               $bIsNum = $bi -match "^\d+$"
-
               if ($aIsNum -and $bIsNum) {
-                $an = [int]$ai
-                $bn = [int]$bi
+                $an = [int]$ai; $bn = [int]$bi
                 if ($an -lt $bn) { return -1 }
                 if ($an -gt $bn) { return 1 }
                 continue
               }
               if ($aIsNum -and -not $bIsNum) { return -1 }
               if (-not $aIsNum -and $bIsNum) { return 1 }
-
               $cmp = [string]::Compare($ai, $bi, $true)
               if ($cmp -lt 0) { return -1 }
               if ($cmp -gt 0) { return 1 }
@@ -124,10 +102,8 @@ jobs:
           }
 
           function Compare-Ver([string]$a, [string]$b) {
-            # returns: -1 if a<b, 0 if equal, 1 if a>b
             $pa = Parse-SemVer $a
             $pb = Parse-SemVer $b
-
             $len = [Math]::Max($pa.nums.Count, $pb.nums.Count)
             for ($i=0; $i -lt $len; $i++) {
               $va = if ($i -lt $pa.nums.Count) { $pa.nums[$i] } else { 0 }
@@ -135,10 +111,8 @@ jobs:
               if ($va -lt $vb) { return -1 }
               if ($va -gt $vb) { return 1 }
             }
-
-            # numeric core equal -> prerelease rules
             if (-not $pa.hasPre -and -not $pb.hasPre) { return 0 }
-            if (-not $pa.hasPre -and $pb.hasPre) { return 1 }  # release > prerelease
+            if (-not $pa.hasPre -and $pb.hasPre) { return 1 }
             if ($pa.hasPre -and -not $pb.hasPre) { return -1 }
             return (Compare-Pre $pa.pre $pb.pre)
           }
@@ -160,28 +134,370 @@ jobs:
             }
           }
 
-          # sort descending by version for readability
           $sorted = $list | Sort-Object id, @{Expression="version";Descending=$true}
           $sorted | ConvertTo-Json -Depth 3 | Out-File -Encoding UTF8 out\verify_windows_list.json
 
           Write-Host "Verify items count = $($sorted.Count)"
           $sorted | Select-Object -First 20 | Format-Table -AutoSize
 
-      - name: Download & analyze packages (PE headers + imports)
+      - name: Download Win32 metadata (Microsoft.Windows.SDK.NET) and build API mapper tool
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+
+          # 1) 找到 Microsoft.Windows.SDK.NET 最新稳定版（排除 preview）
+          $id = "microsoft.windows.sdk.net"
+          $indexUrl = "https://api.nuget.org/v3-flatcontainer/$id/index.json"
+          Write-Host "Fetch: $indexUrl"
+          $vers = (Invoke-RestMethod -Uri $indexUrl -Method Get).versions
+          $stable = $vers | Where-Object { $_ -notmatch "-" }
+          $ver = $stable[-1]
+          Write-Host "Use Microsoft.Windows.SDK.NET version = $ver"
+
+          # 2) 下载 nupkg 并解压
+          $nupkg = "downloads\$id.$ver.nupkg"
+          $pkgUrl = "https://api.nuget.org/v3-flatcontainer/$id/$ver/$id.$ver.nupkg"
+          Write-Host "Download: $pkgUrl"
+          Invoke-WebRequest -Uri $pkgUrl -OutFile $nupkg
+
+          $sdkDir = "tools\sdknet.$ver"
+          if (Test-Path $sdkDir) { Remove-Item $sdkDir -Recurse -Force }
+          New-Item -ItemType Directory -Force $sdkDir | Out-Null
+          Expand-Archive -Path $nupkg -DestinationPath $sdkDir -Force
+
+          # 3) 找到 Windows.Win32.winmd
+          $winmd = Get-ChildItem -Path $sdkDir -Recurse -Filter "Windows.Win32.winmd" -File | Select-Object -First 1
+          if (-not $winmd) { throw "Windows.Win32.winmd not found in Microsoft.Windows.SDK.NET package" }
+          Write-Host "Found winmd: $($winmd.FullName)"
+
+          # 4) 写一个小 C# 工具：读取 winmd，构建 (dll!entrypoint)->minBuild 映射，然后吃 stdin 的 imports 输出结果
+          $toolDir = "tools\ApiMinWin"
+          if (Test-Path $toolDir) { Remove-Item $toolDir -Recurse -Force }
+          New-Item -ItemType Directory -Force $toolDir | Out-Null
+
+          @"
+<Project Sdk='Microsoft.NET.Sdk'>
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+"@ | Out-File -Encoding UTF8 "$toolDir\ApiMinWin.csproj"
+
+          @"
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
+
+static class Program
+{
+  static int Main(string[] args)
+  {
+    if (args.Length < 1)
+    {
+      Console.Error.WriteLine("Usage: ApiMinWin <path-to-Windows.Win32.winmd>");
+      return 2;
+    }
+
+    var winmdPath = args[0];
+    if (!File.Exists(winmdPath))
+    {
+      Console.Error.WriteLine("winmd not found: " + winmdPath);
+      return 2;
+    }
+
+    // Build map: "kernel32.dll!SetThreadDescription" -> (minBuild, reasonString)
+    var map = BuildMap(winmdPath);
+    Console.Error.WriteLine($"[ApiMinWin] map size = {map.Count}");
+
+    // stdin: lines "dll,func"
+    // stdout: "dll,func,minBuild,reason"
+    Console.WriteLine("dll,func,minBuild,reason");
+    string? line;
+    while ((line = Console.ReadLine()) != null)
+    {
+      line = line.Trim();
+      if (line.Length == 0) continue;
+      var parts = line.Split(',', 2);
+      if (parts.Length < 2) continue;
+      var dll = parts[0].Trim().ToLowerInvariant();
+      var func = parts[1].Trim();
+
+      var key = dll + "!" + func;
+      if (map.TryGetValue(key, out var v))
+      {
+        Console.WriteLine($"{dll},{Escape(func)},{v.minBuild},{Escape(v.reason)}");
+      }
+      else
+      {
+        // Try common normalization: strip A/W suffix sometimes mismatched
+        var alt = TryAltKeys(dll, func);
+        if (alt != null && map.TryGetValue(alt, out v))
+        {
+          Console.WriteLine($"{dll},{Escape(func)},{v.minBuild},{Escape(v.reason)}");
+        }
+        else
+        {
+          Console.WriteLine($"{dll},{Escape(func)},,");
+        }
+      }
+    }
+    return 0;
+  }
+
+  static string Escape(string s)
+  {
+    if (s.Contains(',') || s.Contains('\"'))
+      return "\"" + s.Replace("\"", "\"\"") + "\"";
+    return s;
+  }
+
+  static string? TryAltKeys(string dll, string func)
+  {
+    // Some APIs have A/W variants; if import is e.g. CreateFileW but metadata entrypoint is CreateFileW (usually same).
+    // Keep a tiny helper: if endswith A/W, also try without suffix.
+    if (func.Length > 1)
+    {
+      char last = func[^1];
+      if (last == 'A' || last == 'W')
+      {
+        return dll + "!" + func.Substring(0, func.Length - 1);
+      }
+    }
+    return null;
+  }
+
+  static Dictionary<string,(int minBuild,string reason)> BuildMap(string winmdPath)
+  {
+    using var fs = File.OpenRead(winmdPath);
+    using var pe = new PEReader(fs);
+    var md = pe.GetMetadataReader();
+
+    // Need handles to attribute types we care about
+    var dllImportType = "System.Runtime.InteropServices.DllImportAttribute";
+    var supportedType = "System.Runtime.Versioning.SupportedOSPlatformAttribute";
+
+    var map = new Dictionary<string,(int,string)>(StringComparer.OrdinalIgnoreCase);
+
+    foreach (var typeHandle in md.TypeDefinitions)
+    {
+      var type = md.GetTypeDefinition(typeHandle);
+
+      foreach (var methodHandle in type.GetMethods())
+      {
+        var method = md.GetMethodDefinition(methodHandle);
+
+        string? dllName = null;
+        string? entryPoint = null;
+        int minBuild = 0;
+        string? minReason = null;
+
+        foreach (var caHandle in method.GetCustomAttributes())
+        {
+          var ca = md.GetCustomAttribute(caHandle);
+          var attrName = GetAttributeTypeFullName(md, ca);
+          if (attrName == null) continue;
+
+          if (attrName == dllImportType)
+          {
+            // DllImport(string dllName) + named arg EntryPoint?
+            ReadDllImport(md, ca, out dllName, out entryPoint);
+          }
+          else if (attrName == supportedType)
+          {
+            var plat = ReadSingleStringCtorArg(md, ca);
+            if (plat != null)
+            {
+              // examples: "windows10.0.17763.0", "windows6.1" etc
+              var build = ExtractBuild(plat);
+              if (build > minBuild)
+              {
+                minBuild = build;
+                minReason = plat;
+              }
+            }
+          }
+        }
+
+        if (dllName == null) continue;
+
+        var dllLower = dllName.Trim().ToLowerInvariant();
+        var ep = entryPoint ?? md.GetString(method.Name);
+        if (string.IsNullOrWhiteSpace(ep)) continue;
+
+        // If no supported attribute, minBuild stays 0 -> we still store it but blank meaning "no info"
+        var key = dllLower + "!" + ep;
+        if (!map.TryGetValue(key, out var existing) || minBuild > existing.minBuild)
+        {
+          var reason = minReason ?? "";
+          map[key] = (minBuild, reason);
+        }
+      }
+    }
+
+    // Remove items with build=0? Keep them; caller will treat as unknown.
+    return map;
+  }
+
+  static int ExtractBuild(string s)
+  {
+    // windows10.0.17763.0 => 17763
+    // windows11.0.22000.0 => 22000
+    // windows8.1 => unknown build => 0
+    var parts = s.Split('.', StringSplitOptions.RemoveEmptyEntries);
+    // find a numeric token >= 10000
+    foreach (var p in parts)
+    {
+      if (int.TryParse(p, out int v) && v >= 10000) return v;
+    }
+    return 0;
+  }
+
+  static string? ReadSingleStringCtorArg(MetadataReader md, CustomAttribute ca)
+  {
+    var value = ca.Value;
+    var blob = md.GetBlobReader(value);
+    // Prolog 0x0001
+    if (blob.ReadUInt16() != 1) return null;
+    return blob.ReadSerializedString();
+  }
+
+  static void ReadDllImport(MetadataReader md, CustomAttribute ca, out string? dllName, out string? entryPoint)
+  {
+    dllName = null;
+    entryPoint = null;
+
+    var blob = md.GetBlobReader(ca.Value);
+    if (blob.ReadUInt16() != 1) return;
+
+    // ctor args: string dllName
+    dllName = blob.ReadSerializedString();
+
+    // named args
+    if (blob.Offset >= blob.Length) return;
+    ushort numNamed = blob.ReadUInt16();
+    for (int i = 0; i < numNamed; i++)
+    {
+      byte kind = blob.ReadByte(); // 0x53 field, 0x54 property
+      byte type = blob.ReadByte(); // element type
+      string? name = blob.ReadSerializedString();
+      object? val = ReadFixedArg(md, ref blob, type);
+      if (name != null && name.Equals("EntryPoint", StringComparison.OrdinalIgnoreCase))
+      {
+        entryPoint = val as string;
+      }
+    }
+  }
+
+  static object? ReadFixedArg(MetadataReader md, ref BlobReader blob, byte et)
+  {
+    // minimal support: string only (0x0E)
+    if (et == 0x0E)
+    {
+      return blob.ReadSerializedString();
+    }
+    // fall back: skip unsupported
+    // Some named args might be other primitives; ignore safely.
+    SkipFixedArg(ref blob, et);
+    return null;
+  }
+
+  static void SkipFixedArg(ref BlobReader blob, byte et)
+  {
+    // primitive types sizes; this is best-effort skip
+    switch (et)
+    {
+      case 0x02: blob.ReadBoolean(); break;
+      case 0x03: blob.ReadByte(); break;
+      case 0x04: blob.ReadSByte(); break;
+      case 0x05: blob.ReadInt16(); break;
+      case 0x06: blob.ReadUInt16(); break;
+      case 0x07: blob.ReadInt32(); break;
+      case 0x08: blob.ReadUInt32(); break;
+      case 0x09: blob.ReadInt64(); break;
+      case 0x0A: blob.ReadUInt64(); break;
+      case 0x0B: blob.ReadSingle(); break;
+      case 0x0C: blob.ReadDouble(); break;
+      case 0x0E: blob.ReadSerializedString(); break;
+      default:
+        // unknown -> give up
+        break;
+    }
+  }
+
+  static string? GetAttributeTypeFullName(MetadataReader md, CustomAttribute ca)
+  {
+    EntityHandle ctor = ca.Constructor;
+    StringHandle nameHandle;
+    StringHandle nsHandle;
+
+    if (ctor.Kind == HandleKind.MemberReference)
+    {
+      var mr = md.GetMemberReference((MemberReferenceHandle)ctor);
+      var parent = mr.Parent;
+      if (parent.Kind == HandleKind.TypeReference)
+      {
+        var tr = md.GetTypeReference((TypeReferenceHandle)parent);
+        nameHandle = tr.Name;
+        nsHandle = tr.Namespace;
+      }
+      else if (parent.Kind == HandleKind.TypeDefinition)
+      {
+        var td = md.GetTypeDefinition((TypeDefinitionHandle)parent);
+        nameHandle = td.Name;
+        nsHandle = td.Namespace;
+      }
+      else return null;
+    }
+    else if (ctor.Kind == HandleKind.MethodDefinition)
+    {
+      var mdh = md.GetMethodDefinition((MethodDefinitionHandle)ctor);
+      var td = md.GetTypeDefinition(mdh.GetDeclaringType());
+      nameHandle = td.Name;
+      nsHandle = td.Namespace;
+    }
+    else return null;
+
+    var name = md.GetString(nameHandle);
+    var ns = md.GetString(nsHandle);
+    if (string.IsNullOrEmpty(ns)) return name;
+    return ns + "." + name;
+  }
+}
+"@ | Out-File -Encoding UTF8 "$toolDir\Program.cs"
+
+          Write-Host "Build ApiMinWin tool..."
+          dotnet build "$toolDir\ApiMinWin.csproj" -c Release
+
+          # 5) 记录 winmd 路径给后续步骤使用
+          "$($winmd.FullName)" | Out-File -Encoding UTF8 "out\win32_winmd_path.txt"
+          Write-Host "Saved winmd path to out\win32_winmd_path.txt"
+
+      - name: Download & analyze packages (PE headers + Win32 metadata API min build)
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
           $items = Get-Content out\verify_windows_list.json -Raw | ConvertFrom-Json
 
+          $winmdPath = (Get-Content out\win32_winmd_path.txt -Raw).Trim()
+          if (-not (Test-Path $winmdPath)) { throw "winmd path invalid: $winmdPath" }
+
+          $toolExe = "tools\ApiMinWin\bin\Release\net8.0\ApiMinWin.exe"
+          if (-not (Test-Path $toolExe)) { throw "tool not built: $toolExe" }
+
           $csv = New-Object System.Collections.Generic.List[string]
-          $csv.Add("package,version,runtimeRid,dll,pe_MinOS,pe_Subsystem,pe_SubsystemVer,imports_MinWinGuess")
+          $csv.Add("package,version,runtimeRid,dll,pe_MinOS,pe_Subsystem,pe_SubsystemVer,imports_MinWinGuess,api_MinWinBuild,api_MinWinReason")
 
           function Get-PeHeaderInfo([string]$dllPath) {
             $hdr = (dumpbin /nologo /headers $dllPath) 2>&1
             $minos = ""
             $subsys = ""
             $subver = ""
-
             foreach ($line in $hdr) {
               if ($line -match "^\s*([0-9]+)\.([0-9]+)\s+operating system version") {
                 $minos = "$($Matches[1]).$($Matches[2])"
@@ -193,37 +509,87 @@ jobs:
                 $subsys = $Matches[1].Trim()
               }
             }
+            return @{ MinOS=$minos; Subsystem=$subsys; SubsystemVer=$subver }
+          }
 
-            return @{
-              MinOS = $minos
-              Subsystem = $subsys
-              SubsystemVer = $subver
+          function Get-ImportsPairs([string]$dllPath) {
+            # Parse dumpbin /imports output into "dll,func" lines
+            $out = (dumpbin /nologo /imports $dllPath) 2>&1
+            $pairs = New-Object System.Collections.Generic.List[string]
+            $curDll = $null
+
+            foreach ($line in $out) {
+              # Example: "    KERNEL32.dll"
+              if ($line -match "^\s*([A-Za-z0-9\-\._]+\.dll)\s*$") {
+                $curDll = $Matches[1].ToLower()
+                continue
+              }
+              if ($curDll) {
+                # Typical import line contains function name at end; examples vary:
+                # "             3F0   SetThreadDescription"
+                # "            12A0   GetProcAddress"
+                if ($line -match "^\s*[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+([A-Za-z0-9_\?\@\$\.\#]+)\s*$" -or
+                    $line -match "^\s*[0-9A-Fa-f]+\s+([A-Za-z0-9_\?\@\$\.\#]+)\s*$") {
+                  $fn = $Matches[1]
+                  # 过滤掉无意义的符号
+                  if ($fn -and $fn -ne "NULL") {
+                    $pairs.Add("$curDll,$fn")
+                  }
+                }
+              }
             }
+            return $pairs
           }
 
-          function Get-ImportsText([string]$dllPath) {
-            $imp = (dumpbin /nologo /imports $dllPath) 2>&1
-            return ($imp -join "`n")
+          function Compute-MinBuildFromImports([string]$dllPath) {
+            $pairs = Get-ImportsPairs $dllPath
+            if ($pairs.Count -eq 0) {
+              return @{ build=""; reason="" }
+            }
+
+            $tmp = Join-Path $env:RUNNER_TEMP ("imports_" + [Guid]::NewGuid().ToString("N") + ".txt")
+            $pairs | Out-File -Encoding UTF8 $tmp
+
+            # Run tool, capture CSV output
+            $res = & $toolExe $winmdPath < $tmp
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+
+            # Parse tool output, find max build
+            $maxBuild = 0
+            $maxReason = ""
+            $lines = $res -split "`r?`n" | Where-Object { $_ -and $_.Trim().Length -gt 0 }
+            foreach ($ln in $lines | Select-Object -Skip 1) {
+              # dll,func,minBuild,reason
+              $cols = $ln.Split(',', 4)
+              if ($cols.Length -ge 3) {
+                $b = $cols[2].Trim()
+                if ($b -match "^\d+$") {
+                  $bi = [int]$b
+                  if ($bi -gt $maxBuild) {
+                    $maxBuild = $bi
+                    $maxReason = if ($cols.Length -ge 4) { $cols[3].Trim().Trim('"') } else { "" }
+                    # 同时把函数名也带上
+                    $fn = $cols[1].Trim().Trim('"')
+                    $dll = $cols[0].Trim().Trim('"')
+                    $maxReason = "$dll!$fn -> $maxReason"
+                  }
+                }
+              }
+            }
+
+            if ($maxBuild -gt 0) {
+              return @{ build="$maxBuild"; reason=$maxReason }
+            }
+            return @{ build=""; reason="" }
           }
 
-          function Guess-MinWinBuild([string]$importsText) {
-            # Heuristic sentinels:
-            # 1709 (16299): SetUserGeoName (Kernel32)
-            # 1809 (17763): DestroySyntheticPointerDevice (User32)
-            # 1903 (18362): IsWindowArranged (User32) / Wow64GetThreadContext (Kernel32)
-            # 2004 (19041): CoRevokeDeviceCatalog (Combase)
-            #
-            # If none matched: Unknown(Win10+)
-            $hit2004 = ($importsText -match "(?i)\bCoRevokeDeviceCatalog\b")
-            $hit1903 = ($importsText -match "(?i)\bIsWindowArranged\b") -or ($importsText -match "(?i)\bWow64(Get|Set)ThreadContext\b")
-            $hit1809 = ($importsText -match "(?i)\bDestroySyntheticPointerDevice\b")
-            $hit1709 = ($importsText -match "(?i)\bSetUserGeoName\b")
-
-            if ($hit2004) { return "Win10 2004 (19041)+ (by imports)" }
-            if ($hit1903) { return "Win10 1903 (18362)+ (by imports)" }
-            if ($hit1809) { return "Win10 1809 (17763)+ (by imports)" }
-            if ($hit1709) { return "Win10 1709 (16299)+ (by imports)" }
-            return "Unknown (likely Win10+; no sentinel matched)"
+          function Fallback-Guess([string]$importsText) {
+            # 作为兜底（少数情况 winmd 没覆盖/解析失败）
+            if ($importsText -match "(?i)\bCoRevokeDeviceCatalog\b") { return "Win10 2004 (19041)+ (fallback sentinel)" }
+            if ($importsText -match "(?i)\bIsWindowArranged\b") { return "Win10 1903 (18362)+ (fallback sentinel)" }
+            if ($importsText -match "(?i)\bDestroySyntheticPointerDevice\b") { return "Win10 1809 (17763)+ (fallback sentinel)" }
+            if ($importsText -match "(?i)\bSetUserGeoName\b") { return "Win10 1709 (16299)+ (fallback sentinel)" }
+            return "Unknown (no metadata hit; maybe dynamic load or uncommon APIs)"
           }
 
           foreach ($it in $items) {
@@ -248,7 +614,6 @@ jobs:
             New-Item -ItemType Directory -Force $outdir | Out-Null
             Expand-Archive -Path $nupkg -DestinationPath $outdir -Force
 
-            # find all native dlls in runtimes/win-*/native
             $nativeDirs = Get-ChildItem -Path $outdir -Recurse -Directory |
               Where-Object { $_.FullName -match "runtimes\\win-(x86|x64|arm64)\\native$" }
 
@@ -258,11 +623,27 @@ jobs:
 
               foreach ($d in $dlls) {
                 $pe = Get-PeHeaderInfo $d.FullName
-                $impText = Get-ImportsText $d.FullName
-                $guess = Guess-MinWinBuild $impText
 
-                $csv.Add(("{0},{1},{2},{3},{4},{5},{6},{7}" -f `
-                  $id, $ver, $rid, $d.Name, $pe.MinOS, ($pe.Subsystem -replace ',', ' '), $pe.SubsystemVer, ($guess -replace ',', ' ')))
+                # Win32 metadata 推断 build
+                $meta = Compute-MinBuildFromImports $d.FullName
+
+                # 兜底：原始 imports 哨兵
+                $importsText = (dumpbin /nologo /imports $d.FullName) 2>&1 -join "`n"
+                $guess = if ($meta.build) {
+                  "Win10+ build $($meta.build) (by Win32 metadata)"
+                } else {
+                  Fallback-Guess $importsText
+                }
+
+                Write-Host "  [$rid] $($d.Name)"
+                Write-Host "    pe_MinOS=$($pe.MinOS) pe_SubsystemVer=$($pe.SubsystemVer)"
+                Write-Host "    api_MinWinBuild=$($meta.build)"
+                Write-Host "    api_MinWinReason=$($meta.reason)"
+                Write-Host "    imports_MinWinGuess=$guess"
+
+                $csv.Add(("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9}" -f `
+                  $id, $ver, $rid, $d.Name, $pe.MinOS, ($pe.Subsystem -replace ',', ' '), $pe.SubsystemVer, `
+                  ($guess -replace ',', ' '), $meta.build, ($meta.reason -replace ',', ' ')))
               }
             }
           }
@@ -299,14 +680,6 @@ jobs:
             return $max
           }
 
-          function Rank-Guess([string]$g) {
-            if ($g -match "19041") { return 4 }
-            if ($g -match "18362") { return 3 }
-            if ($g -match "17763") { return 2 }
-            if ($g -match "16299") { return 1 }
-            return 0
-          }
-
           $summary = $rows |
             Group-Object package,version |
             ForEach-Object {
@@ -314,9 +687,11 @@ jobs:
               $peMin = Max-MajorMinor ($grp | ForEach-Object { Parse-MajorMinor $_.pe_MinOS })
               $subMin = Max-MajorMinor ($grp | ForEach-Object { Parse-MajorMinor $_.pe_SubsystemVer })
 
-              $bestGuess = ($grp |
-                Sort-Object @{Expression={ Rank-Guess $_.imports_MinWinGuess }; Descending=$true} |
-                Select-Object -First 1).imports_MinWinGuess
+              $maxApiBuild = ($grp | ForEach-Object {
+                if ($_.api_MinWinBuild -match "^\d+$") { [int]$_.api_MinWinBuild } else { 0 }
+              } | Measure-Object -Maximum).Maximum
+
+              $bestReason = ($grp | Where-Object { $_.api_MinWinBuild -eq "$maxApiBuild" } | Select-Object -First 1).api_MinWinReason
 
               $peStr  = if ($peMin) { "{0}.{1}" -f $peMin.Major, $peMin.Minor } else { "UNKNOWN" }
               $subStr = if ($subMin) { "{0}.{1}" -f $subMin.Major, $subMin.Minor } else { "UNKNOWN" }
@@ -326,7 +701,8 @@ jobs:
                 version = $grp[0].version
                 required_pe_MinOS = $peStr
                 required_pe_SubsystemVer = $subStr
-                imports_based_min_win_guess = $bestGuess
+                api_based_min_win_build = if ($maxApiBuild -gt 0) { $maxApiBuild } else { "UNKNOWN" }
+                api_based_reason = $bestReason
               }
             }
 
@@ -374,12 +750,8 @@ jobs:
           START="${{ inputs.start_version }}"
           END="${{ inputs.end_version }}"
 
-          ver_le() { # a <= b
-            [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]
-          }
-          ver_ge() { # a >= b
-            [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
-          }
+          ver_le() { [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
+          ver_ge() { [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
 
           jq -r '.versions[]' out/versions_macos.json > out/all_versions.txt
 
@@ -401,29 +773,20 @@ jobs:
           PKG_ID="microsoft.ml.onnxruntime"
           echo "package,version,runtimeRid,dylib_or_so,min_macos" > out/macos_min_details.csv
 
-          # Parse min macOS from Mach-O:
-          # Prefer LC_BUILD_VERSION (minos), fallback LC_VERSION_MIN_MACOSX
           get_min_macos() {
             local f="$1"
             local min=""
-
-            # LC_BUILD_VERSION path
             min="$(otool -l "$f" 2>/dev/null | awk '
               $1=="cmd" && $2=="LC_BUILD_VERSION" {in=1}
               in==1 && $1=="minos" {print $2; exit}
             ' || true)"
-
             if [[ -z "$min" ]]; then
-              # LC_VERSION_MIN_MACOSX path
               min="$(otool -l "$f" 2>/dev/null | awk '
                 $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX" {in=1}
                 in==1 && $1=="version" {print $2; exit}
               ' || true)"
             fi
-
-            if [[ -z "$min" ]]; then
-              min="UNKNOWN"
-            fi
+            [[ -z "$min" ]] && min="UNKNOWN"
             echo "$min"
           }
 
@@ -446,7 +809,6 @@ jobs:
             mkdir -p "$outdir"
             unzip -q "$nupkg" -d "$outdir"
 
-            # Collect dylib/so under runtimes/osx-*/native
             dylibs=()
             while IFS= read -r f; do
               [[ -z "$f" ]] && continue
@@ -474,7 +836,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # For each package+version, take the *maximum* min_macos across all native binaries.
           echo "package,version,required_min_macos" > out/macos_min_summary.csv
           tail -n +2 out/macos_min_details.csv \
             | awk -F',' 'NF>=5 {print $1","$2","$5}' \
