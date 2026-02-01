@@ -1,4 +1,4 @@
-name: Build ORT CoreML (Specific Arch + CMake Fix)
+name: Build ORT CoreML (Final Fix)
 
 on:
   workflow_dispatch:
@@ -15,16 +15,13 @@ on:
 jobs:
   build:
     name: Build ${{ matrix.ort_version }} (${{ matrix.arch }})
-    runs-on: macos-14 # 使用 Apple Silicon 运行器
+    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
         include:
-          # v1.16.3 对应 x86_64 (Intel)
           - ort_version: 'v1.16.3'
             arch: 'x86_64'
-            
-          # v1.19.2 对应 arm64 (Apple Silicon)
           - ort_version: 'v1.19.2'
             arch: 'arm64'
 
@@ -47,15 +44,32 @@ jobs:
           brew install cmake ninja
           pip install numpy
 
+      # === 关键修复步骤 ===
+      - name: Patch Source Code (Fix Hash & CMake)
+        shell: bash
+        run: |
+          echo ">>> Applying patches for ${{ matrix.ort_version }}..."
+
+          # 1. 修复 Eigen 下载哈希不匹配问题
+          # GitLab 更改了 ZIP 生成方式，导致旧哈希失效。我们用报错中的“实际哈希”替换源码中的“旧哈希”。
+          # Old Hash: be8be39fdbc6e60e94fa7870b280707069b5b81a
+          # New Hash: 32b145f525a8308d7ab1c09388b2e288312d8eba
+          # 搜索 cmake 目录下所有文件并替换
+          find cmake -name "*.cmake" -print0 | xargs -0 sed -i '' 's/be8be39fdbc6e60e94fa7870b280707069b5b81a/32b145f525a8308d7ab1c09388b2e288312d8eba/g'
+          echo "Eigen hash patched."
+
+          # 2. (可选) 尝试修复 protobuf 或其他潜在的 CMake 版本警告
+          # 如果源码中有要求 < 3.5 的，强行改为 3.10 防止新版 CMake 报错
+          find . -name "CMakeLists.txt" -print0 | xargs -0 sed -i '' 's/cmake_minimum_required(VERSION [23]\.[0-4])/cmake_minimum_required(VERSION 3.10)/g' || true
+          
+          echo "Patches applied successfully."
+
       - name: Build Shared Library
         shell: bash
         run: |
           echo ">>> Building ORT ${{ matrix.ort_version }} for ${{ matrix.arch }}..."
           
-          # === 修复方案 ===
-          # 添加 --cmake_extra_defines CMAKE_POLICY_VERSION_MINIMUM=3.5
-          # 这可以解决旧版依赖库 (如 date) 在新版 CMake 上报错 "Compatibility with CMake < 3.5 has been removed" 的问题
-          
+          # 注意：依然保留 CMAKE_POLICY_VERSION_MINIMUM=3.5 以兼容 FetchContent 下载的第三方库 (如 date)
           python3 tools/ci_build/build.py \
             --build_dir build \
             --config ${{ inputs.build_type }} \
@@ -65,11 +79,11 @@ jobs:
             --skip_tests \
             --skip_submodule_sync \
             --osx_arch ${{ matrix.arch }} \
-            --cmake_extra_defines CMAKE_POLICY_VERSION_MINIMUM=3.5
+            --cmake_extra_defines CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            --cmake_extra_defines CMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
       - name: Check Output
         run: |
-          # 验证生成文件的架构
           FILE_PATH="build/${{ inputs.build_type }}/libonnxruntime.dylib"
           if [ -f "$FILE_PATH" ]; then
             ls -lh $FILE_PATH
@@ -84,16 +98,13 @@ jobs:
           mkdir -p artifacts
           cp build/${{ inputs.build_type }}/libonnxruntime*.dylib artifacts/
           
-          # 尝试复制头文件
           mkdir -p artifacts/include
           if [ -d "include/onnxruntime/core/session" ]; then
              cp -r include/onnxruntime/core/session/*.h artifacts/include/
           fi
           
-          # 生成版本信息
           echo "Version: ${{ matrix.ort_version }}" > artifacts/version.txt
           echo "Arch: ${{ matrix.arch }}" >> artifacts/version.txt
-          echo "Provider: CoreML" >> artifacts/version.txt
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
