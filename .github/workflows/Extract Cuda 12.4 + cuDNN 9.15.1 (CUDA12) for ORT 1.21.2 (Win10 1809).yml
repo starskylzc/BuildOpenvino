@@ -1,142 +1,109 @@
-name: Extract Cuda 12.4 + cuDNN 9.15.1 (CUDA12) for ORT 1.21.2 (Win10 1809)
+name: Extract Minimal CUDA 12.4 + cuDNN 9.15.1 (Inference Only)
 
 on:
   workflow_dispatch:
 
 jobs:
-  extract:
+  extract-minimal:
     runs-on: windows-latest
     steps:
-      - name: Prepare folders
+      - name: Prepare Workspace
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force downloads, extracted, ort_from_nuget, final_output\win-x64 | Out-Null
+          New-Item -ItemType Directory -Force downloads, extracted, final_output\win-x64 | Out-Null
 
-      - name: Setup MSVC (for dumpbin)
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Download Microsoft.ML.OnnxRuntime.Gpu nupkg (1.21.2)
-        shell: pwsh
-        env:
-          NUPKG_URL: https://globalcdn.nuget.org/packages/microsoft.ml.onnxruntime.gpu.windows.1.21.2.nupkg
-        run: |
-          $ProgressPreference = "SilentlyContinue"
-          $out = "downloads\microsoft.ml.onnxruntime.gpu.windows.1.21.2.nupkg"
-          Write-Host ">>> Download nupkg: $env:NUPKG_URL"
-          Invoke-WebRequest -Uri $env:NUPKG_URL -OutFile $out
-          Expand-Archive -Path $out -DestinationPath ort_from_nuget -Force
-
-      - name: Locate ORT native DLLs
-        shell: pwsh
-        run: |
-          $nativeDir = Get-ChildItem -Recurse ort_from_nuget | Where-Object { $_.FullName -match "runtimes\\win-x64\\native$" -and $_.PSIsContainer } | Select-Object -First 1
-          "ORT_NATIVE_DIR=$($nativeDir.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "ORT_NATIVE_DIR=$($nativeDir.FullName)"
-          Write-Host ">>> Native DLLs:"
-          Get-ChildItem $nativeDir.FullName -Filter *.dll | Select-Object Name, Length
-
-      - name: Download NVIDIA redistributables (CUDA 12.4 + cuDNN 9.15.1 for CUDA 12)
+      - name: Download Specific Components
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
+          # 定义只包含 4 个核心组件的下载列表
           $urls = @(
-            # CUDA 12.4 component redistributables (Windows x86_64)
-            "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip",  # cudart
-            "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cublas/windows-x86_64/cuda_cublas-windows-x86_64-12.4.5.8-archive.zip",  # cuBLAS
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-11.2.1.3-archive.zip",  # cuFFT
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.5.147-archive.zip",  # cuRAND
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcusolver/windows-x86_64/libcusolver-windows-x86_64-11.6.1.9-archive.zip",  # cuSOLVER
-            "https://developer.download.nvidia.com/compute/cuda/redist/libcusparse/windows-x86_64/libcusparse-windows-x86_64-12.4.1.24-archive.zip",  # cuSPARSE
-
-            # cuDNN (CUDA 12 build)
-            "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.15.1.9_cuda12-archive.zip",  # cuDNN
+            # 1. cudart (Runtime)
+            "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.127-archive.zip",
             
-            # nvrtc (runtime compilation)
-            "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.127-archive.zip"  # nvrtc
+            # 2. cublas (Matrix Math)
+            "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.5.8-archive.zip",
+            
+            # 3. nvrtc (Runtime Compiler) - 动态编译 CUDA 代码，现代推理必需
+            "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.127-archive.zip",
+
+            # 4. cuDNN 9.15.1 (Deep Learning Primitives)
+            "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.15.1.9_cuda12-archive.zip"
           )
-          foreach($u in $urls) {
-            $out = Join-Path "downloads" (Split-Path $u -Leaf)
-            Write-Host ">>> Downloading $u"
-            $retryCount = 3
-            $attempt = 0
-            while ($attempt -lt $retryCount) {
-                try {
-                    Invoke-WebRequest -Uri $u -OutFile $out -Verbose
-                    Write-Host "Successfully downloaded $u"
-                    break
-                }
-                catch {
-                    Write-Host "Error downloading $u. Attempt $($attempt + 1) of $retryCount."
-                    $attempt++
-                    if ($attempt -eq $retryCount) {
-                        throw "Failed to download $u after $retryCount attempts."
-                    }
-                }
-            }
+
+          foreach ($u in $urls) {
+            $name = Split-Path $u -Leaf
+            Write-Host "Downloading $name ..."
+            Invoke-WebRequest -Uri $u -OutFile "downloads\$name"
           }
 
-      - name: Extract NVIDIA archives
+      - name: Extract Archives
         shell: pwsh
         run: |
-          Get-ChildItem downloads -Filter *.zip | Where-Object { $_.Name -notlike "*.nupkg" } | ForEach-Object {
+          Get-ChildItem downloads\*.zip | ForEach-Object {
             $dest = Join-Path "extracted" $_.BaseName
-            New-Item -ItemType Directory -Force $dest | Out-Null
-            Write-Host ">>> Extracting $($_.Name) -> $dest"
+            Write-Host "Extracting $($_.Name)..."
             Expand-Archive -Path $_.FullName -DestinationPath $dest -Force
           }
 
-      - name: Ensure zlibwapi.dll if needed
+      - name: Assemble Minimal DLLs
         shell: pwsh
         run: |
-          function deps($dll){ (dumpbin /nologo /dependents $dll) -split "`r?`n" | Where-Object { $_ -match "\.dll$" } }
-          $depsSet = @{}
-          foreach($p in @(
-            "$env:ORT_NATIVE_DIR\onnxruntime_providers_cuda.dll",
-            "$env:ORT_NATIVE_DIR\onnxruntime_providers_shared.dll"
-          )) { foreach($d in deps($p)){ $depsSet[$d]=1 } }
-          if($depsSet["zlibwapi.dll"] -and -not (Test-Path extracted\**\zlibwapi.dll)){
-            Invoke-WebRequest -Uri "https://www.winimage.com/zLibDll/zlib123dllx64.zip" -OutFile "downloads\zlib.zip"
-            Expand-Archive -Path "downloads\zlib.zip" -DestinationPath "extracted\zlib" -Force
+          $dst = "final_output\win-x64"
+          
+          # === 定义严格的“白名单”文件列表 ===
+          $whitelist = @(
+            # [cudart] 基础运行时
+            "cudart64_12.dll",
+            
+            # [cublas] 矩阵计算
+            "cublas64_12.dll",
+            "cublasLt64_12.dll",  # 警告：cublas64_12.dll 强依赖它，不可删除！
+            
+            # [nvrtc] 运行时编译
+            "nvrtc64_120_0.dll",
+            "nvrtc-builtins64_124.dll", # 必须配套存在
+            
+            # [cuDNN] 核心与引擎 (v9 模块化)
+            "cudnn64_9.dll",                   # 主入口
+            "cudnn_ops64_9.dll",               # 基础算子
+            "cudnn_cnn64_9.dll",               # CNN 算子
+            "cudnn_graph64_9.dll",             # 图执行
+            "cudnn_engines_precompiled64_9.dll",       # 预编译内核 (必须)
+            "cudnn_heuristic64_9.dll",                 # 算法选择器 (必须)
+            "cudnn_engines_runtime_compiled64_9.dll"   # 运行时编译内核 (建议保留以保证兼容性)
+          )
+
+          Write-Host "Searching and copying selected DLLs..."
+          
+          foreach ($dll in $whitelist) {
+            # 在提取目录中递归搜索文件
+            $found = Get-ChildItem -Path extracted -Recurse -Filter $dll | Select-Object -First 1
+            
+            if ($found) {
+              Copy-Item -Path $found.FullName -Destination $dst -Force
+              Write-Host "  [OK] $($found.Name)"
+            } else {
+              Write-Error "CRITICAL: Could not find $dll"
+              exit 1
+            }
           }
 
-      - name: Analyze CUDA/cuDNN deps with dumpbin
+      - name: List Final Files
         shell: pwsh
         run: |
-          function deps($dll){ (dumpbin /nologo /dependents $dll) -split "`r?`n" | Where-Object { $_ -match "\.dll$" } }
-          $allDeps=@()
-          foreach($p in @("$env:ORT_NATIVE_DIR\onnxruntime_providers_cuda.dll","$env:ORT_NATIVE_DIR\onnxruntime_providers_shared.dll")) {
-            if(Test-Path $p){ $allDeps += deps($p) }
-          }
-          $allDeps | Sort-Object -Unique | Out-File final_output\win-x64\deps.txt
+          Write-Host "`n=== Final Package Content ==="
+          Get-ChildItem "final_output\win-x64" | Sort-Object Name | Format-Table Name, @{N='Size(MB)';E={$_.Length/1MB};f='N2'}
 
-      - name: Collect minimal CUDA/cuDNN DLLs
+      - name: Pack Zip
         shell: pwsh
         run: |
-          $dst="final_output\win-x64"
-          Get-Content final_output\win-x64\deps.txt | ForEach-Object {
-            if($_ -notlike "nvcuda.dll"){ Copy-Item (Get-ChildItem extracted -Recurse -Filter $_ | Select-Object -First 1).FullName $dst }
-          }
-          # always include cuDNN
-          Get-ChildItem extracted -Recurse -Filter "cudnn*.dll" | ForEach-Object {
-            Copy-Item $_.FullName $dst -Force
-          }
-          # include nvrtc
-          Get-ChildItem extracted -Recurse -Filter "nvrtc*.dll" | ForEach-Object {
-            Copy-Item $_.FullName $dst -Force
-          }
-          # include zlib if present
-          Get-ChildItem extracted -Recurse -Filter "zlibwapi.dll" | ForEach-Object {
-            Copy-Item $_.FullName $dst -Force
-          }
+          $zipName = "cuda12.4_cudnn9.15.1_minimal_infer_win-x64.zip"
+          Compress-Archive -Path "final_output\win-x64\*" -DestinationPath $zipName -Force
+          echo "ARTIFACT_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
 
-      - name: Write manifest & Zip
-        shell: pwsh
-        run: |
-          Get-ChildItem final_output\win-x64 | ForEach-Object { "$($_.Name) `t $($_.Length)" } | Out-File final_output\win-x64\manifest.txt
-          Compress-Archive -Path final_output\win-x64\* -DestinationPath final_output\cuda124_cudnn9151_cuda12_infer_win-x64.zip -Force
-
-      - name: Upload artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cuda124_cudnn9151_cuda12_infer_win-x64
-          path: final_output/cuda124_cudnn9151_cuda12_infer_win-x64.zip
+          name: cuda_minimal_infer_libs
+          path: ${{ env.ARTIFACT_NAME }}
