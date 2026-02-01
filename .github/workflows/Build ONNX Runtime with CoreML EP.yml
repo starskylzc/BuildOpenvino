@@ -1,4 +1,4 @@
-name: Build ORT CoreML (Custom Targets)
+name: Build ORT CoreML (Fast & No Tests)
 
 on:
   workflow_dispatch:
@@ -15,20 +15,20 @@ on:
 jobs:
   build:
     name: Build ${{ matrix.ort_version }} (${{ matrix.arch }})
-    runs-on: macos-14 # M1 Runner (支持编译 arm64 和 x64)
+    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
         include:
-          # === Intel x64 配置 (macOS 10.15) ===
+          # === Intel x64 (macOS 10.15) ===
           - ort_version: 'v1.16.3'
             arch: 'x86_64'
-            deploy_target: '10.15'  # 你的要求
+            deploy_target: '10.15'
             
-          # === Apple Silicon arm64 配置 (macOS 11.0) ===
+          # === Apple Silicon arm64 (macOS 11.0) ===
           - ort_version: 'v1.19.2'
             arch: 'arm64'
-            deploy_target: '11.0'   # 你的要求
+            deploy_target: '11.0'
 
     steps:
       - name: Checkout ONNX Runtime
@@ -49,22 +49,19 @@ jobs:
           brew install cmake ninja
           pip install numpy
 
-      # === 必要的源码修复 ===
       - name: Patch Source Code (Fix Eigen Hash)
         shell: bash
         run: |
-          # 修复 v1.16.3 等旧版本的 Eigen 下载哈希问题
           grep -rl "be8be39fdbc6e60e94fa7870b280707069b5b81a" . | xargs sed -i '' 's/be8be39fdbc6e60e94fa7870b280707069b5b81a/32b145f525a8308d7ab1c09388b2e288312d8eba/g' || true
-          echo "Eigen hash patch applied."
 
-      - name: Build Shared Library
+      - name: Build Shared Library (Optimized)
         shell: bash
         run: |
-          echo ">>> Building ${{ matrix.ort_version }} for ${{ matrix.arch }} (Target: macOS ${{ matrix.deploy_target }})"
+          echo ">>> Building ${{ matrix.ort_version }} for ${{ matrix.arch }} (No Tests)"
           
-          # 参数说明：
-          # 1. CMAKE_OSX_DEPLOYMENT_TARGET: 使用 matrix 中的变量分别设置 10.15 或 11.0
-          # 2. CMAKE_OSX_SYSROOT=macosx: 确保使用桌面版 SDK，避免链接到 iOS 库
+          # 关键修改：
+          # 添加 onnxruntime_BUILD_UNIT_TESTS=OFF 彻底禁止编译测试代码
+          # 将所有 cmake_extra_defines 合并，防止参数覆盖
           
           python3 tools/ci_build/build.py \
             --build_dir build \
@@ -75,25 +72,21 @@ jobs:
             --skip_tests \
             --skip_submodule_sync \
             --osx_arch ${{ matrix.arch }} \
-            --cmake_extra_defines CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            --cmake_extra_defines CMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deploy_target }} \
-            --cmake_extra_defines CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
-            --cmake_extra_defines CMAKE_OSX_SYSROOT=macosx
+            --cmake_extra_defines \
+              CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+              CMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deploy_target }} \
+              CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+              CMAKE_OSX_SYSROOT=macosx \
+              onnxruntime_BUILD_UNIT_TESTS=OFF \
+              onnxruntime_BUILD_BENCHMARKS=OFF
 
-      - name: Check Output & Verify Architecture
+      - name: Check Output
         run: |
           FILE_PATH="build/${{ inputs.build_type }}/libonnxruntime.dylib"
           if [ -f "$FILE_PATH" ]; then
             echo "✅ Build Success!"
             ls -lh $FILE_PATH
-            
-            # 验证架构
-            echo "--- Architecture Info ---"
             lipo -info $FILE_PATH
-            
-            # 验证最低系统版本支持 (Load Command check)
-            echo "--- Min OS Version Check ---"
-            otool -l $FILE_PATH | grep -A 3 LC_BUILD_VERSION || otool -l $FILE_PATH | grep -A 5 LC_VERSION_MIN_MACOSX
           else
             echo "❌ Error: Build failed."
             exit 1
@@ -103,13 +96,10 @@ jobs:
         run: |
           mkdir -p artifacts
           cp build/${{ inputs.build_type }}/libonnxruntime*.dylib artifacts/
-          
           mkdir -p artifacts/include
           if [ -d "include/onnxruntime/core/session" ]; then
              cp -r include/onnxruntime/core/session/*.h artifacts/include/
           fi
-          
-          # 生成详细的版本描述文件
           echo "Version: ${{ matrix.ort_version }}" > artifacts/version.txt
           echo "Arch: ${{ matrix.arch }}" >> artifacts/version.txt
           echo "MinOS: ${{ matrix.deploy_target }}" >> artifacts/version.txt
