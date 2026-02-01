@@ -13,53 +13,84 @@ using System.Text.Json;
 /// ---------
 /// Infers the minimum Windows build required by a native PE file by:
 /// 1) parsing the PE import table (incl. delay-load imports), and
-/// 2) mapping imported APIs to SupportedOSPlatform info from Windows.Win32.winmd (Win32Metadata).
+/// 2) mapping imported Win32 APIs to their SupportedOSPlatform("windows...") metadata
+///    from Windows.Win32.winmd (from the Microsoft.Windows.SDK.Win32Metadata NuGet package).
 ///
-/// This tool can work in two modes:
-///   A) Analyze PE directly:
-///        ApiMinWin --winmd <path-to-Windows.Win32.winmd> --pe <path-to-dll> --json
+/// Modes:
+///   A) Analyze a PE file:
+///        ApiMinWin --winmd <Windows.Win32.winmd> --pe <path-to-dll-or-exe> [--json]
+///      Output:
+///        - default: human-readable
+///        - --json : a JSON object containing RequiredMinBuild/Reason etc.
 ///
-///   B) Legacy stdin mapper (kept for compatibility):
-///        echo "kernel32.dll,CreateFileW" | ApiMinWin --winmd <winmd>
+///   B) Lookup mode (back-compat): read "dll,func" lines from stdin and output
+///      "dll,func,minBuild,reason".
+///        ApiMinWin <Windows.Win32.winmd>
+///
+/// Notes:
+/// - If the --winmd argument points to a .txt file, the first non-empty line is treated
+///   as the actual .winmd path (fixes a common workflow wiring error).
 /// </summary>
 internal static class Program
 {
-    private static int Main(string[] args)
+    private const string DllImportAttr = "System.Runtime.InteropServices.DllImportAttribute";
+    private const string SupportedOsPlatformAttr = "System.Runtime.Versioning.SupportedOSPlatformAttribute";
+
+    private sealed record ApiInfo(int MinBuild, string Reason);
+
+    private sealed record AnalyzeResult(
+        string PePath,
+        int RequiredMinBuild,
+        string RequiredMinReason,
+        int ImportCount,
+        int MappedImportCount,
+        int UnmappedImportCount,
+        bool Is64Bit
+    );
+
+    private readonly record struct ImportSymbol(string Module, string Symbol);
+
+    public static int Main(string[] args)
     {
         try
         {
-            if (args.Length == 0 || args.Contains("-h") || args.Contains("--help"))
+            if (args.Length == 0 || args.Any(a => a is "-h" or "--help" or "/?"))
             {
-                PrintHelp();
-                return 0;
+                PrintUsage();
+                return args.Length == 0 ? 2 : 0;
             }
 
-            var winmdArg = GetArgValue(args, "--winmd") ?? GetArgValue(args, "-w");
-            var pePath = GetArgValue(args, "--pe") ?? GetArgValue(args, "-p");
-            var json = args.Contains("--json", StringComparer.OrdinalIgnoreCase);
+            // Simple option parsing.
+            var winmdArg = GetOption(args, "--winmd");
+            var peArg = GetOption(args, "--pe");
+            var json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
 
-            // Back-compat: allow passing winmd path as the first positional arg.
-            winmdArg ??= args[0];
+            // Back-compat: positional winmd
+            if (winmdArg == null)
+            {
+                winmdArg = args[0];
+            }
 
-            var winmdPath = ResolveWinmdPath(winmdArg!);
+            var winmdPath = ResolveWinmdPath(winmdArg);
             if (!File.Exists(winmdPath))
             {
-                Console.Error.WriteLine($"ERROR: winmd not found: {winmdPath}");
+                Console.Error.WriteLine($"winmd not found: {winmdPath}");
                 return 2;
             }
 
-            var map = BuildApiMinBuildMap(winmdPath);
+            var map = BuildMap(winmdPath);
+            Console.Error.WriteLine($"[ApiMinWin] map size = {map.Count}");
 
-            if (!string.IsNullOrWhiteSpace(pePath))
+            // Mode A: analyze a PE.
+            if (!string.IsNullOrWhiteSpace(peArg))
             {
-                if (!File.Exists(pePath))
+                if (!File.Exists(peArg))
                 {
-                    Console.Error.WriteLine($"ERROR: PE file not found: {pePath}");
-                    return 3;
+                    Console.Error.WriteLine($"pe not found: {peArg}");
+                    return 2;
                 }
 
-                var result = AnalyzePe(pePath, map);
-
+                var result = AnalyzePe(peArg, map);
                 if (json)
                 {
                     Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions
@@ -70,19 +101,20 @@ internal static class Program
                 }
                 else
                 {
-                    Console.WriteLine($"pe={result.PePath}");
-                    Console.WriteLine($"is64Bit={result.Is64Bit}");
-                    Console.WriteLine($"importCount={result.ImportCount}");
-                    Console.WriteLine($"mappedImportCount={result.MappedImportCount}");
-                    Console.WriteLine($"requiredMinBuild={result.RequiredMinBuild}");
-                    Console.WriteLine($"requiredMinReason={result.RequiredMinReason}");
+                    Console.WriteLine($"PE: {result.PePath}");
+                    Console.WriteLine($"Bitness: {(result.Is64Bit ? "x64" : "x86")}");
+                    Console.WriteLine($"Imports: {result.ImportCount} (mapped {result.MappedImportCount}, unmapped {result.UnmappedImportCount})");
+                    Console.WriteLine($"RequiredMinBuild: {result.RequiredMinBuild}");
+                    Console.WriteLine($"Reason: {result.RequiredMinReason}");
                 }
 
                 return 0;
             }
 
-            // Legacy stdin mode: read `dll,func` per line and output `dll,func,minBuild,reason`.
+            // Mode B (stdin lookup):
+            // Output header
             Console.WriteLine("dll,func,minBuild,reason");
+
             string? line;
             while ((line = Console.ReadLine()) != null)
             {
@@ -90,225 +122,285 @@ internal static class Program
                 if (line.Length == 0) continue;
 
                 var parts = line.Split(',', 2);
-                if (parts.Length != 2)
-                {
-                    Console.Error.WriteLine($"WARN: bad line (expected dll,func): {line}");
-                    continue;
-                }
+                if (parts.Length < 2) continue;
 
-                var dll = NormalizeModuleName(parts[0]);
+                var dll = parts[0].Trim();
                 var func = parts[1].Trim();
 
-                var (minBuild, reason) = LookupApi(map, dll, func);
-                Console.WriteLine($"{dll},{func},{minBuild},{CsvEscape(reason)}");
+                var (minBuild, reason) = Lookup(map, dll, func);
+                Console.WriteLine($"{NormalizeModuleName(dll)},{EscapeCsv(func)},{minBuild},{EscapeCsv(reason)}");
             }
 
             return 0;
         }
+        catch (BadImageFormatException ex)
+        {
+            Console.Error.WriteLine($"Bad image format: {ex.Message}");
+            return 3;
+        }
         catch (Exception ex)
         {
-            Console.Error.WriteLine("FATAL: " + ex);
+            Console.Error.WriteLine(ex.ToString());
             return 1;
         }
     }
 
-    private static void PrintHelp()
+    private static void PrintUsage()
     {
-        Console.WriteLine(
-@"ApiMinWin - infer minimum Windows build based on imported Win32 APIs.
-
-USAGE:
-  # Analyze a PE (DLL/EXE)
-  ApiMinWin --winmd <Windows.Win32.winmd> --pe <path-to-native-dll> [--json]
-
-  # Legacy stdin mapping (dll,func per line)
-  ApiMinWin --winmd <Windows.Win32.winmd>
-    stdin:  kernel32.dll,CreateFileW
-    stdout: dll,func,minBuild,reason
-
-NOTES:
-  - --winmd can also be a .txt file whose first non-empty line is the winmd path (back-compat).
-  - minBuild is usually a Windows 10/11 build number (e.g. 19041, 22000). 0 means 'unknown/older than win10 metadata granularity'.");
+        Console.Error.WriteLine(
+            "Usage:\n" +
+            "  Analyze a PE (recommended):\n" +
+            "    ApiMinWin --winmd <Windows.Win32.winmd> --pe <path-to-dll-or-exe> [--json]\n\n" +
+            "  Lookup mode (stdin):\n" +
+            "    ApiMinWin <Windows.Win32.winmd>\n" +
+            "    (then pipe lines of: dll,func ; outputs: dll,func,minBuild,reason)\n\n" +
+            "Notes:\n" +
+            "  - If --winmd points to a .txt file, the first non-empty line is treated as the real .winmd path.\n"
+        );
     }
 
-    private static string? GetArgValue(string[] args, string key)
+    private static string? GetOption(string[] args, string name)
     {
         for (int i = 0; i < args.Length; i++)
         {
-            if (string.Equals(args[i], key, StringComparison.OrdinalIgnoreCase))
-            {
-                if (i + 1 < args.Length) return args[i + 1];
-                return "";
-            }
+            if (!args[i].Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
+            if (i + 1 < args.Length) return args[i + 1];
+            return null;
         }
+
         return null;
     }
 
-    private static string ResolveWinmdPath(string input)
+    private static string ResolveWinmdPath(string path)
     {
-        var p = input.Trim().Trim('"');
+        var p = path.Trim();
         if (p.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) && File.Exists(p))
         {
-            foreach (var line in File.ReadAllLines(p))
+            foreach (var line in File.ReadLines(p))
             {
-                var l = line.Trim();
-                if (l.Length == 0) continue;
-                return l.Trim('"');
+                var t = line.Trim();
+                if (t.Length == 0) continue;
+                return t;
             }
-            throw new InvalidOperationException($"winmd path file is empty: {p}");
         }
 
         return p;
     }
 
-    // ---------- PE analysis mode ----------
-
-    private sealed record AnalyzeResult(
-        string PePath,
-        bool Is64Bit,
-        int ImportCount,
-        int MappedImportCount,
-        int RequiredMinBuild,
-        string RequiredMinReason
-    );
-
-    private readonly record struct ImportSymbol(string Module, string Symbol);
-
-    private static AnalyzeResult AnalyzePe(string pePath, Dictionary<string, WinApiInfo> apiMap)
+    private static string EscapeCsv(string s)
     {
-        var bytes = File.ReadAllBytes(pePath);
+        if (string.IsNullOrEmpty(s)) return "";
+        if (s.Contains(',') || s.Contains('"') || s.Contains('\n') || s.Contains('\r'))
+        {
+            return "\"" + s.Replace("\"", "\"\"") + "\"";
+        }
+        return s;
+    }
 
-        using var pe = new PEReader(new MemoryStream(bytes, writable: false));
+    private static (int minBuild, string reason) Lookup(Dictionary<string, ApiInfo> map, string dll, string func)
+    {
+        dll = NormalizeModuleName(dll);
+        var (minBuild, reason) = LookupInternal(map, dll, func);
+        if (minBuild != 0 || !string.IsNullOrEmpty(reason))
+            return (minBuild, reason);
+
+        // Try A/W suffix strip.
+        var altFunc = TryStripAnsiUnicodeSuffix(func);
+        if (altFunc != null)
+        {
+            (minBuild, reason) = LookupInternal(map, dll, altFunc);
+            if (minBuild != 0 || !string.IsNullOrEmpty(reason))
+                return (minBuild, reason);
+        }
+
+        return (0, "");
+    }
+
+    private static (int minBuild, string reason) LookupInternal(Dictionary<string, ApiInfo> map, string dll, string func)
+    {
+        // Try with dll as-is
+        var key = dll + "!" + func;
+        if (map.TryGetValue(key, out var info))
+            return (info.MinBuild, info.Reason);
+
+        // Try without extension
+        if (dll.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+        {
+            var noExt = dll[..^4];
+            key = noExt + "!" + func;
+            if (map.TryGetValue(key, out info))
+                return (info.MinBuild, info.Reason);
+        }
+        else
+        {
+            var withExt = dll + ".dll";
+            key = withExt + "!" + func;
+            if (map.TryGetValue(key, out info))
+                return (info.MinBuild, info.Reason);
+        }
+
+        return (0, "");
+    }
+
+    private static string? TryStripAnsiUnicodeSuffix(string func)
+    {
+        if (func.Length <= 1) return null;
+        var last = func[^1];
+        if (last is 'A' or 'W')
+            return func[..^1];
+        return null;
+    }
+
+    private static string NormalizeModuleName(string dll)
+    {
+        dll = dll.Trim().Trim('"').Trim().ToLowerInvariant();
+        return dll;
+    }
+
+    private static AnalyzeResult AnalyzePe(string pePath, Dictionary<string, ApiInfo> map)
+    {
+        using var fs = File.OpenRead(pePath);
+        using var pe = new PEReader(fs);
         var headers = pe.PEHeaders;
-        var peHeader = headers.PEHeader ?? throw new InvalidOperationException("Missing PE header.");
+        var is64 = headers.PEHeader != null && headers.PEHeader.Magic == PEMagic.PE32Plus;
 
-        bool is64 = peHeader.Magic == PEMagic.PE32Plus;
+        var bytes = ReadAllBytes(fs);
 
-        var imports = new List<ImportSymbol>();
+        var imports = new List<ImportSymbol>(capacity: 2048);
+        imports.AddRange(ReadImportTable(bytes, headers, is64));
+        imports.AddRange(ReadDelayImportTable(bytes, headers, is64));
 
-        // Normal imports
-        if (peHeader.ImportTableDirectory.RelativeVirtualAddress != 0)
+        // Dedup, keep stable ordering.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unique = new List<ImportSymbol>(imports.Count);
+        foreach (var s in imports)
         {
-            imports.AddRange(ReadImportDescriptors(bytes, headers, peHeader.ImportTableDirectory.RelativeVirtualAddress, is64));
+            var k = NormalizeModuleName(s.Module) + "!" + s.Symbol;
+            if (seen.Add(k)) unique.Add(new ImportSymbol(NormalizeModuleName(s.Module), s.Symbol));
         }
-
-        // Delay-load imports
-        if (peHeader.DelayImportTableDirectory.RelativeVirtualAddress != 0)
-        {
-            imports.AddRange(ReadDelayImportDescriptors(bytes, headers, peHeader.DelayImportTableDirectory.RelativeVirtualAddress, is64));
-        }
-
-        int importCount = imports.Count;
-        int mappedCount = 0;
 
         int maxBuild = 0;
         string maxReason = "";
 
-        foreach (var imp in imports)
+        int mapped = 0;
+        foreach (var sym in unique)
         {
-            var dll = NormalizeModuleName(imp.Module);
-            var func = imp.Symbol;
-
-            if (func.StartsWith("#", StringComparison.Ordinal)) // ordinal import
+            // Skip ordinals
+            if (sym.Symbol.StartsWith('#'))
                 continue;
 
-            var (minBuild, reason) = LookupApi(apiMap, dll, func);
-            if (minBuild > 0 || reason.Length > 0) mappedCount++;
+            var (b, reason) = Lookup(map, sym.Module, sym.Symbol);
+            if (b != 0) mapped++;
 
-            if (minBuild > maxBuild)
+            if (b > maxBuild)
             {
-                maxBuild = minBuild;
+                maxBuild = b;
                 maxReason = reason;
             }
         }
 
-        if (maxBuild == 0 && string.IsNullOrWhiteSpace(maxReason))
-            maxReason = "UNKNOWN";
-
         return new AnalyzeResult(
             PePath: pePath,
-            Is64Bit: is64,
-            ImportCount: importCount,
-            MappedImportCount: mappedCount,
             RequiredMinBuild: maxBuild,
-            RequiredMinReason: maxReason
+            RequiredMinReason: maxReason,
+            ImportCount: unique.Count,
+            MappedImportCount: mapped,
+            UnmappedImportCount: Math.Max(0, unique.Count - mapped),
+            Is64Bit: is64
         );
     }
 
-    // IMAGE_IMPORT_DESCRIPTOR is 20 bytes
-    private static IEnumerable<ImportSymbol> ReadImportDescriptors(byte[] bytes, PEHeaders headers, int importDirRva, bool is64)
+    private static byte[] ReadAllBytes(FileStream fs)
     {
-        var results = new List<ImportSymbol>();
-        int descOffset = RvaToOffset(headers, importDirRva);
+        // PEReader advanced the stream; reset.
+        fs.Position = 0;
+        using var ms = new MemoryStream((int)Math.Min(int.MaxValue, fs.Length));
+        fs.CopyTo(ms);
+        return ms.ToArray();
+    }
 
-        while (true)
+    private static IEnumerable<ImportSymbol> ReadImportTable(byte[] bytes, PEHeaders headers, bool is64)
+    {
+        var peh = headers.PEHeader;
+        if (peh == null) yield break;
+
+        var dir = peh.ImportTableDirectory;
+        if (dir.RelativeVirtualAddress == 0 || dir.Size == 0) yield break;
+
+        int offset = RvaToOffset(headers, dir.RelativeVirtualAddress);
+        const int descSize = 20; // IMAGE_IMPORT_DESCRIPTOR
+
+        while (offset + descSize <= bytes.Length)
         {
-            // 5 * 4 bytes
-            uint originalFirstThunk = ReadU32(bytes, descOffset + 0);
-            uint timeDateStamp      = ReadU32(bytes, descOffset + 4);
-            uint forwarderChain     = ReadU32(bytes, descOffset + 8);
-            uint nameRva            = ReadU32(bytes, descOffset + 12);
-            uint firstThunk         = ReadU32(bytes, descOffset + 16);
+            uint originalFirstThunk = ReadU32(bytes, offset + 0);
+            uint timeDateStamp = ReadU32(bytes, offset + 4);
+            uint forwarderChain = ReadU32(bytes, offset + 8);
+            uint nameRva = ReadU32(bytes, offset + 12);
+            uint firstThunk = ReadU32(bytes, offset + 16);
 
             if (originalFirstThunk == 0 && timeDateStamp == 0 && forwarderChain == 0 && nameRva == 0 && firstThunk == 0)
-                break;
+                yield break;
 
             string dllName = ReadAsciiZ(bytes, RvaToOffset(headers, (int)nameRva));
 
             uint thunkRva = originalFirstThunk != 0 ? originalFirstThunk : firstThunk;
-            int thunkOffset = RvaToOffset(headers, (int)thunkRva);
+            foreach (var sym in ReadThunkArray(bytes, headers, is64, dllName, thunkRva))
+                yield return sym;
 
-            foreach (var sym in ReadThunkArray(bytes, headers, thunkOffset, is64, dllName))
-                results.Add(sym);
-
-            descOffset += 20;
+            offset += descSize;
         }
-
-        return results;
     }
 
-    // IMAGE_DELAYLOAD_DESCRIPTOR is 32 bytes
-    private static IEnumerable<ImportSymbol> ReadDelayImportDescriptors(byte[] bytes, PEHeaders headers, int delayDirRva, bool is64)
+    private static IEnumerable<ImportSymbol> ReadDelayImportTable(byte[] bytes, PEHeaders headers, bool is64)
     {
-        var results = new List<ImportSymbol>();
-        int descOffset = RvaToOffset(headers, delayDirRva);
+        var peh = headers.PEHeader;
+        if (peh == null) yield break;
 
-        while (true)
+        var dir = peh.DelayImportTableDirectory;
+        if (dir.RelativeVirtualAddress == 0 || dir.Size == 0) yield break;
+
+        // IMAGE_DELAYLOAD_DESCRIPTOR is 32 bytes.
+        int offset = RvaToOffset(headers, dir.RelativeVirtualAddress);
+        const int descSize = 32;
+
+        while (offset + descSize <= bytes.Length)
         {
-            uint attributes = ReadU32(bytes, descOffset + 0);
-            uint nameRva    = ReadU32(bytes, descOffset + 4);
-            uint hmod       = ReadU32(bytes, descOffset + 8);
-            uint iatRva     = ReadU32(bytes, descOffset + 12);
-            uint intRva     = ReadU32(bytes, descOffset + 16);
-            uint boundRva   = ReadU32(bytes, descOffset + 20);
-            uint unloadRva  = ReadU32(bytes, descOffset + 24);
-            uint ts         = ReadU32(bytes, descOffset + 28);
+            uint attributes = ReadU32(bytes, offset + 0);
+            uint nameRva = ReadU32(bytes, offset + 4);
+            uint moduleHandleRva = ReadU32(bytes, offset + 8);
+            uint delayIatRva = ReadU32(bytes, offset + 12);
+            uint delayIntRva = ReadU32(bytes, offset + 16);
+            uint boundIatRva = ReadU32(bytes, offset + 20);
+            uint unloadIatRva = ReadU32(bytes, offset + 24);
+            uint timeDateStamp = ReadU32(bytes, offset + 28);
 
-            if (attributes == 0 && nameRva == 0 && hmod == 0 && iatRva == 0 && intRva == 0 && boundRva == 0 && unloadRva == 0 && ts == 0)
-                break;
+            if (attributes == 0 && nameRva == 0 && moduleHandleRva == 0 && delayIatRva == 0 && delayIntRva == 0 && boundIatRva == 0 && unloadIatRva == 0 && timeDateStamp == 0)
+                yield break;
 
             string dllName = ReadAsciiZ(bytes, RvaToOffset(headers, (int)nameRva));
 
-            // INT (Import Name Table) is at intRva; format is similar to normal thunk array.
-            int thunkOffset = RvaToOffset(headers, (int)intRva);
-            foreach (var sym in ReadThunkArray(bytes, headers, thunkOffset, is64, dllName))
-                results.Add(sym);
+            // In delay-load, INT is DelayImportNameTable (import names), similar thunk array.
+            if (delayIntRva != 0)
+            {
+                foreach (var sym in ReadThunkArray(bytes, headers, is64, dllName, delayIntRva))
+                    yield return sym;
+            }
 
-            descOffset += 32;
+            offset += descSize;
         }
-
-        return results;
     }
 
-    private static IEnumerable<ImportSymbol> ReadThunkArray(byte[] bytes, PEHeaders headers, int thunkOffset, bool is64, string dllName)
+    private static IEnumerable<ImportSymbol> ReadThunkArray(byte[] bytes, PEHeaders headers, bool is64, string dllName, uint thunkRva)
     {
-        var results = new List<ImportSymbol>();
-        int cursor = thunkOffset;
+        if (thunkRva == 0) yield break;
 
-        while (true)
+        int offset = RvaToOffset(headers, (int)thunkRva);
+        int step = is64 ? 8 : 4;
+
+        while (offset + step <= bytes.Length)
         {
-            ulong thunk = is64 ? ReadU64(bytes, cursor) : ReadU32(bytes, cursor);
-            if (thunk == 0) break;
+            ulong thunk = is64 ? ReadU64(bytes, offset) : ReadU32(bytes, offset);
+            if (thunk == 0) yield break;
 
             bool isOrdinal = is64
                 ? (thunk & 0x8000_0000_0000_0000UL) != 0
@@ -316,111 +408,132 @@ NOTES:
 
             if (isOrdinal)
             {
-                ushort ordinal = (ushort)(thunk & 0xFFFF);
-                results.Add(new ImportSymbol(dllName, "#" + ordinal));
+                ushort ord = (ushort)(thunk & 0xFFFF);
+                yield return new ImportSymbol(dllName, "#" + ord);
             }
             else
             {
-                int nameRva = (int)(thunk & (is64 ? 0x7FFF_FFFF_FFFF_FFFFUL : 0x7FFF_FFFFUL));
-                int nameOff = RvaToOffset(headers, nameRva);
-
-                // IMAGE_IMPORT_BY_NAME: WORD Hint; CHAR Name[]
-                int strOff = nameOff + 2;
-                string func = ReadAsciiZ(bytes, strOff);
-
-                results.Add(new ImportSymbol(dllName, func));
+                uint ibnRva = is64 ? (uint)(thunk & 0x7FFF_FFFF_FFFF_FFFFUL) : (uint)(thunk & 0x7FFF_FFFFUL);
+                int ibnOff = RvaToOffset(headers, (int)ibnRva);
+                if (ibnOff + 2 < bytes.Length)
+                {
+                    // IMAGE_IMPORT_BY_NAME: ushort Hint; char Name[]
+                    string func = ReadAsciiZ(bytes, ibnOff + 2);
+                    if (!string.IsNullOrEmpty(func))
+                        yield return new ImportSymbol(dllName, func);
+                }
             }
 
-            cursor += is64 ? 8 : 4;
+            offset += step;
         }
-
-        return results;
     }
 
     private static int RvaToOffset(PEHeaders headers, int rva)
     {
-        // If it lives in the PE headers, RVA == file offset.
-        if (rva < headers.PEHeader!.SizeOfHeaders)
-            return rva;
-
-        foreach (var s in headers.SectionHeaders)
+        // For RVAs that fall into the headers, PointerToRawData is 0.
+        foreach (var sec in headers.SectionHeaders)
         {
-            int start = s.VirtualAddress;
-            int end = start + Math.Max(s.VirtualSize, s.SizeOfRawData);
+            int start = sec.VirtualAddress;
+            int size = Math.Max(sec.VirtualSize, sec.SizeOfRawData);
+            int end = start + size;
             if (rva >= start && rva < end)
-                return (rva - start) + s.PointerToRawData;
+            {
+                return (rva - start) + sec.PointerToRawData;
+            }
         }
 
-        // Fallback (best-effort).
         return rva;
     }
 
-    private static uint ReadU32(byte[] b, int off) =>
-        BinaryPrimitives.ReadUInt32LittleEndian(new ReadOnlySpan<byte>(b, off, 4));
+    private static uint ReadU32(byte[] bytes, int offset)
+    {
+        return BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset, 4));
+    }
 
-    private static ulong ReadU64(byte[] b, int off) =>
-        BinaryPrimitives.ReadUInt64LittleEndian(new ReadOnlySpan<byte>(b, off, 8));
+    private static ulong ReadU64(byte[] bytes, int offset)
+    {
+        return BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(offset, 8));
+    }
 
     private static string ReadAsciiZ(byte[] bytes, int offset)
     {
-        int i = offset;
-        while (i < bytes.Length && bytes[i] != 0) i++;
-        if (i <= offset) return "";
-        return Encoding.ASCII.GetString(bytes, offset, i - offset);
+        if (offset < 0 || offset >= bytes.Length) return string.Empty;
+        int end = offset;
+        while (end < bytes.Length && bytes[end] != 0) end++;
+        if (end <= offset) return string.Empty;
+        return Encoding.ASCII.GetString(bytes, offset, end - offset);
     }
 
-    // ---------- Win32 metadata mapping ----------
-
-    private sealed record WinApiInfo(int MinBuild, string Reason);
-
-    private static Dictionary<string, WinApiInfo> BuildApiMinBuildMap(string winmdPath)
+    private static Dictionary<string, ApiInfo> BuildMap(string winmdPath)
     {
-        var map = new Dictionary<string, WinApiInfo>(StringComparer.OrdinalIgnoreCase);
-
         using var fs = File.OpenRead(winmdPath);
-        using var peReader = new PEReader(fs);
+        using var pe = new PEReader(fs);
+        var md = pe.GetMetadataReader();
 
-        var md = peReader.GetMetadataReader();
+        var map = new Dictionary<string, ApiInfo>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var tHandle in md.TypeDefinitions)
+        foreach (var typeHandle in md.TypeDefinitions)
         {
-            var t = md.GetTypeDefinition(tHandle);
+            var type = md.GetTypeDefinition(typeHandle);
 
-            foreach (var mHandle in t.GetMethods())
+            foreach (var methodHandle in type.GetMethods())
             {
-                var m = md.GetMethodDefinition(mHandle);
+                var method = md.GetMethodDefinition(methodHandle);
 
-                // Read DllImport + EntryPoint
-                if (!TryReadDllImport(md, mHandle, out var dll, out var entryPoint))
-                    continue;
+                string? dllName = null;
+                string? entryPoint = null;
+                int minBuild = 0;
+                string minReason = "";
 
-                if (string.IsNullOrWhiteSpace(dll))
-                    continue;
-
-                if (string.IsNullOrWhiteSpace(entryPoint))
-                    entryPoint = md.GetString(m.Name);
-
-                dll = NormalizeModuleName(dll);
-                entryPoint = entryPoint.Trim();
-
-                // Determine supported build from attributes
-                var (minBuild, reason) = ExtractMinBuildFromAttributes(md, mHandle);
-                var info = new WinApiInfo(minBuild, reason);
-
-                // Add a few variants so imports can match regardless of ".dll" suffix.
-                foreach (var moduleVariant in ModuleNameVariants(dll))
+                foreach (var caHandle in method.GetCustomAttributes())
                 {
-                    foreach (var key in KeyVariants(moduleVariant, entryPoint))
+                    var ca = md.GetCustomAttribute(caHandle);
+                    var attrName = GetAttributeTypeFullName(md, ca);
+                    if (attrName == null) continue;
+
+                    if (attrName == DllImportAttr)
                     {
-                        // Keep the "most restrictive" (highest min build) if duplicates appear.
-                        if (map.TryGetValue(key, out var existing))
+                        ReadDllImport(md, ca, out dllName, out entryPoint);
+                    }
+                    else if (attrName == SupportedOsPlatformAttr)
+                    {
+                        var plat = ReadSingleStringCtorArg(md, ca);
+                        if (!string.IsNullOrWhiteSpace(plat))
                         {
-                            if (info.MinBuild > existing.MinBuild)
-                                map[key] = info;
+                            var build = ExtractBuild(plat!);
+                            if (build > minBuild)
+                            {
+                                minBuild = build;
+                                minReason = plat!;
+                            }
                         }
-                        else
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(dllName)) continue;
+
+                var ep = entryPoint ?? md.GetString(method.Name);
+                if (string.IsNullOrWhiteSpace(ep)) continue;
+
+                var dllNorm = NormalizeModuleName(dllName!);
+
+                // Add both with and without .dll extension to reduce mismatches.
+                foreach (var module in ModuleNameVariants(dllNorm))
+                {
+                    var key = module + "!" + ep;
+                    if (!map.TryGetValue(key, out var existing) || minBuild > existing.MinBuild)
+                    {
+                        map[key] = new ApiInfo(minBuild, minReason);
+                    }
+
+                    // Also insert A/W stripped variants for convenience.
+                    var alt = TryStripAnsiUnicodeSuffix(ep);
+                    if (alt != null)
+                    {
+                        var keyAlt = module + "!" + alt;
+                        if (!map.TryGetValue(keyAlt, out existing) || minBuild > existing.MinBuild)
                         {
-                            map[key] = info;
+                            map[keyAlt] = new ApiInfo(minBuild, minReason);
                         }
                     }
                 }
@@ -430,236 +543,137 @@ NOTES:
         return map;
     }
 
-    private static IEnumerable<string> ModuleNameVariants(string dll)
+    private static IEnumerable<string> ModuleNameVariants(string module)
     {
-        var d = NormalizeModuleName(dll);
-        yield return d;
+        module = NormalizeModuleName(module);
+        yield return module;
 
-        if (d.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+        if (module.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
         {
-            yield return d[..^4];
+            yield return module[..^4];
         }
         else
         {
-            yield return d + ".dll";
+            yield return module + ".dll";
         }
     }
 
-    private static IEnumerable<string> KeyVariants(string dll, string func)
+    private static int ExtractBuild(string s)
     {
-        // Primary key
-        yield return $"{dll}!{func}";
-
-        // Win32 APIs often have A/W suffix; allow matching without it.
-        if (func.EndsWith("A", StringComparison.Ordinal) || func.EndsWith("W", StringComparison.Ordinal))
+        // Typical strings look like: windows10.0.19041
+        // We treat the first numeric segment >= 10000 as the build.
+        var parts = s.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var p in parts)
         {
-            var baseName = func[..^1];
-            yield return $"{dll}!{baseName}";
+            if (int.TryParse(p, out var v) && v >= 10000) return v;
         }
+        return 0;
     }
 
-    private static (int MinBuild, string Reason) LookupApi(Dictionary<string, WinApiInfo> map, string dll, string func)
+    private static string? ReadSingleStringCtorArg(MetadataReader md, CustomAttribute ca)
     {
-        dll = NormalizeModuleName(dll);
-        func = func.Trim();
+        var blob = md.GetBlobReader(ca.Value);
+        if (blob.ReadUInt16() != 1) return null; // prolog
+        return blob.ReadSerializedString();
+    }
 
-        foreach (var moduleVariant in ModuleNameVariants(dll))
+    private static void ReadDllImport(MetadataReader md, CustomAttribute ca, out string? dllName, out string? entryPoint)
+    {
+        dllName = null;
+        entryPoint = null;
+
+        var blob = md.GetBlobReader(ca.Value);
+        if (blob.ReadUInt16() != 1) return; // prolog
+
+        dllName = blob.ReadSerializedString();
+
+        if (blob.Offset >= blob.Length) return;
+
+        // Named arguments. Per ECMA-335: ushort NumNamed.
+        ushort numNamed = blob.ReadUInt16();
+        for (int i = 0; i < numNamed; i++)
         {
-            foreach (var key in KeyVariants(moduleVariant, func))
+            byte kind = blob.ReadByte(); // 0x53 field, 0x54 property; we ignore.
+            byte type = blob.ReadByte();
+            string? name = blob.ReadSerializedString();
+            object? val = ReadFixedArg(ref blob, type);
+
+            if (name != null && name.Equals("EntryPoint", StringComparison.OrdinalIgnoreCase))
             {
-                if (map.TryGetValue(key, out var info))
-                    return (info.MinBuild, info.Reason);
+                entryPoint = val as string;
             }
         }
-
-        // Not found.
-        return (0, "");
     }
 
-    private static string NormalizeModuleName(string dll)
+    private static object? ReadFixedArg(ref BlobReader blob, byte et)
     {
-        dll = (dll ?? "").Trim().Trim('"');
-        return dll.ToLowerInvariant();
-    }
-
-    private static bool TryReadDllImport(MetadataReader md, MethodDefinitionHandle mHandle, out string dllName, out string entryPoint)
-    {
-        dllName = "";
-        entryPoint = "";
-
-        // DllImport info is stored as an ImplMap + PInvoke attributes.
-        var method = md.GetMethodDefinition(mHandle);
-        if ((method.Attributes & System.Reflection.MethodAttributes.PinvokeImpl) == 0)
-            return false;
-
-        // Resolve ImplMap to read module name + import name.
-        if (method.GetImport() is not { } import)
-            return false;
-
-        var moduleRef = md.GetModuleReference(import.Module);
-        dllName = md.GetString(moduleRef.Name);
-
-        // Import name: can be set or default.
-        if (!import.Name.IsNil)
-            entryPoint = md.GetString(import.Name);
-
-        return true;
-    }
-
-    private static (int MinBuild, string Reason) ExtractMinBuildFromAttributes(MetadataReader md, MethodDefinitionHandle methodHandle)
-    {
-        int bestBuild = 0;
-        string bestReason = "";
-
-        var method = md.GetMethodDefinition(methodHandle);
-
-        foreach (var caHandle in method.GetCustomAttributes())
+        // We only care about string fixed args.
+        if (et == 0x0E)
         {
-            var ca = md.GetCustomAttribute(caHandle);
-            var typeName = GetAttributeTypeFullName(md, ca.Constructor);
-            if (typeName is null) continue;
-
-            // Support both:
-            //   System.Runtime.Versioning.SupportedOSPlatformAttribute
-            //   System.Runtime.Versioning.SupportedOSPlatformGuardAttribute (ignore)
-            if (!typeName.EndsWith("SupportedOSPlatformAttribute", StringComparison.Ordinal))
-                continue;
-
-            string? arg = TryGetFirstStringCtorArg(md, ca);
-            if (string.IsNullOrWhiteSpace(arg)) continue;
-
-            // typical values: "windows10.0.19041" or "windows10.0.10240.0"
-            int build = ExtractBuildNumber(arg!);
-            if (build > bestBuild)
-            {
-                bestBuild = build;
-                bestReason = arg!;
-            }
+            return blob.ReadSerializedString();
         }
 
-        return (bestBuild, bestReason);
+        SkipFixedArg(ref blob, et);
+        return null;
     }
 
-    private static int ExtractBuildNumber(string platformString)
+    private static void SkipFixedArg(ref BlobReader blob, byte et)
     {
-        // We mainly care about Windows 10/11 build numbers, because Win32Metadata is precise there.
-        // Example: windows10.0.19041.0 -> 19041
-        // If no build is present (e.g., windows6.1), return 0 (unknown/older).
-        if (string.IsNullOrWhiteSpace(platformString)) return 0;
-
-        // Find last numeric segment >= 10000 (Windows 10+ builds are 5 digits).
-        int best = 0;
-        var segs = platformString.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        foreach (var s in segs)
+        switch (et)
         {
-            if (int.TryParse(s, out int n) && n >= 10000)
-                best = Math.Max(best, n);
+            case 0x02: blob.ReadBoolean(); break;
+            case 0x03: blob.ReadByte(); break;
+            case 0x04: blob.ReadSByte(); break;
+            case 0x05: blob.ReadInt16(); break;
+            case 0x06: blob.ReadUInt16(); break;
+            case 0x07: blob.ReadInt32(); break;
+            case 0x08: blob.ReadUInt32(); break;
+            case 0x09: blob.ReadInt64(); break;
+            case 0x0A: blob.ReadUInt64(); break;
+            case 0x0B: blob.ReadSingle(); break;
+            case 0x0C: blob.ReadDouble(); break;
+            case 0x0E: blob.ReadSerializedString(); break;
+            default:
+                // For uncommon encodings (e.g., Type), we bail out silently.
+                break;
         }
-        return best;
     }
 
-    private static string? TryGetFirstStringCtorArg(MetadataReader md, CustomAttribute ca)
+    private static string? GetAttributeTypeFullName(MetadataReader md, CustomAttribute ca)
     {
-        // CustomAttribute value is a blob:
-        //  Prolog (0x0001) + fixed args + named args
-        // For SupportedOSPlatformAttribute, fixed args = 1 string.
-        var blob = md.GetBlobBytes(ca.Value);
-        if (blob.Length < 4) return null;
+        EntityHandle ctor = ca.Constructor;
+        StringHandle nameHandle;
+        StringHandle nsHandle;
 
-        int offset = 0;
-        ushort prolog = BinaryPrimitives.ReadUInt16LittleEndian(blob.AsSpan(offset, 2));
-        offset += 2;
-        if (prolog != 0x0001) return null;
-
-        // Read serialized string:
-        //  - if first byte == 0xFF => null
-        //  - else compressed length + UTF8 bytes
-        if (offset >= blob.Length) return null;
-        byte first = blob[offset];
-        if (first == 0xFF) return null;
-
-        if (!TryReadCompressedUInt(blob, ref offset, out int len)) return null;
-        if (len < 0 || offset + len > blob.Length) return null;
-
-        var str = Encoding.UTF8.GetString(blob, offset, len);
-        return str;
-    }
-
-    private static bool TryReadCompressedUInt(byte[] blob, ref int offset, out int value)
-    {
-        value = 0;
-        if (offset >= blob.Length) return false;
-
-        byte b1 = blob[offset++];
-
-        // ECMA-335 compressed integer
-        if ((b1 & 0x80) == 0)
-        {
-            value = b1;
-            return true;
-        }
-        if ((b1 & 0xC0) == 0x80)
-        {
-            if (offset >= blob.Length) return false;
-            byte b2 = blob[offset++];
-            value = ((b1 & 0x3F) << 8) | b2;
-            return true;
-        }
-        if ((b1 & 0xE0) == 0xC0)
-        {
-            if (offset + 2 >= blob.Length) return false;
-            byte b2 = blob[offset++];
-            byte b3 = blob[offset++];
-            byte b4 = blob[offset++];
-            value = ((b1 & 0x1F) << 24) | (b2 << 16) | (b3 << 8) | b4;
-            return true;
-        }
-
-        return false;
-    }
-
-    private static string? GetAttributeTypeFullName(MetadataReader md, EntityHandle ctor)
-    {
-        // ctor can be MethodDefinition or MemberReference
         if (ctor.Kind == HandleKind.MemberReference)
         {
             var mr = md.GetMemberReference((MemberReferenceHandle)ctor);
-            return GetTypeFullName(md, mr.Parent);
+            var parent = mr.Parent;
+            if (parent.Kind == HandleKind.TypeReference)
+            {
+                var tr = md.GetTypeReference((TypeReferenceHandle)parent);
+                nameHandle = tr.Name;
+                nsHandle = tr.Namespace;
+            }
+            else if (parent.Kind == HandleKind.TypeDefinition)
+            {
+                var td = md.GetTypeDefinition((TypeDefinitionHandle)parent);
+                nameHandle = td.Name;
+                nsHandle = td.Namespace;
+            }
+            else return null;
         }
-        if (ctor.Kind == HandleKind.MethodDefinition)
+        else if (ctor.Kind == HandleKind.MethodDefinition)
         {
             var mdh = md.GetMethodDefinition((MethodDefinitionHandle)ctor);
-            return GetTypeFullName(md, mdh.GetDeclaringType());
+            var td = md.GetTypeDefinition(mdh.GetDeclaringType());
+            nameHandle = td.Name;
+            nsHandle = td.Namespace;
         }
-        return null;
-    }
+        else return null;
 
-    private static string? GetTypeFullName(MetadataReader md, EntityHandle typeHandle)
-    {
-        if (typeHandle.Kind == HandleKind.TypeReference)
-        {
-            var tr = md.GetTypeReference((TypeReferenceHandle)typeHandle);
-            var ns = tr.Namespace.IsNil ? "" : md.GetString(tr.Namespace);
-            var name = md.GetString(tr.Name);
-            return string.IsNullOrEmpty(ns) ? name : ns + "." + name;
-        }
-        if (typeHandle.Kind == HandleKind.TypeDefinition)
-        {
-            var td = md.GetTypeDefinition((TypeDefinitionHandle)typeHandle);
-            var ns = td.Namespace.IsNil ? "" : md.GetString(td.Namespace);
-            var name = md.GetString(td.Name);
-            return string.IsNullOrEmpty(ns) ? name : ns + "." + name;
-        }
-        return null;
-    }
-
-    private static string CsvEscape(string s)
-    {
-        s ??= "";
-        if (s.Contains(',') || s.Contains('"') || s.Contains('\n') || s.Contains('\r'))
-        {
-            return "\"" + s.Replace("\"", "\"\"") + "\"";
-        }
-        return s;
+        var name = md.GetString(nameHandle);
+        var ns = md.GetString(nsHandle);
+        return string.IsNullOrEmpty(ns) ? name : (ns + "." + name);
     }
 }
