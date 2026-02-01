@@ -149,8 +149,11 @@ jobs:
           # 自动引用当前仓库的路径，下载 ApiMinWin.cs 文件
           curl -o tools/ApiMinWin.cs "${{ github.server_url }}/${{ github.repository }}/raw/${{ github.ref }}/.github/scripts/ApiMinWin.cs"
 
+          # 创建 ApiMinWin 目录
+          mkdir -p tools/ApiMinWin
+
           # 编译工具
-          dotnet new console -n ApiMinWin --output tools
+          dotnet new console -n ApiMinWin --output tools/ApiMinWin
           mv tools/ApiMinWin.cs tools/ApiMinWin/Program.cs
           dotnet build tools/ApiMinWin/ApiMinWin.csproj -c Release
 
