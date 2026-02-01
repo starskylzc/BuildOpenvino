@@ -1,4 +1,4 @@
-name: Build ORT CoreML (Final Fix)
+name: Build ORT CoreML (Final Fix v2)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ on:
 jobs:
   build:
     name: Build ${{ matrix.ort_version }} (${{ matrix.arch }})
-    runs-on: macos-14
+    runs-on: macos-14 # 使用 Apple Silicon (M1) 运行器
     strategy:
       fail-fast: false
       matrix:
@@ -44,32 +44,44 @@ jobs:
           brew install cmake ninja
           pip install numpy
 
-      # === 关键修复步骤 ===
-      - name: Patch Source Code (Fix Hash & CMake)
+      # === 核心修复步骤 ===
+      - name: Patch Source Code (Fix Eigen Hash & CMake Policy)
         shell: bash
         run: |
           echo ">>> Applying patches for ${{ matrix.ort_version }}..."
 
-          # 1. 修复 Eigen 下载哈希不匹配问题
-          # GitLab 更改了 ZIP 生成方式，导致旧哈希失效。我们用报错中的“实际哈希”替换源码中的“旧哈希”。
-          # Old Hash: be8be39fdbc6e60e94fa7870b280707069b5b81a
-          # New Hash: 32b145f525a8308d7ab1c09388b2e288312d8eba
-          # 搜索 cmake 目录下所有文件并替换
-          find cmake -name "*.cmake" -print0 | xargs -0 sed -i '' 's/be8be39fdbc6e60e94fa7870b280707069b5b81a/32b145f525a8308d7ab1c09388b2e288312d8eba/g'
-          echo "Eigen hash patched."
-
-          # 2. (可选) 尝试修复 protobuf 或其他潜在的 CMake 版本警告
-          # 如果源码中有要求 < 3.5 的，强行改为 3.10 防止新版 CMake 报错
-          find . -name "CMakeLists.txt" -print0 | xargs -0 sed -i '' 's/cmake_minimum_required(VERSION [23]\.[0-4])/cmake_minimum_required(VERSION 3.10)/g' || true
+          # 1. 修复 Eigen 哈希不匹配 (GitLab ZIP 变更导致)
+          # 这是一个暴力但有效的修复：在当前目录下递归搜索旧哈希，替换为新哈希。
+          # OLD_HASH: be8be39fdbc6e60e94fa7870b280707069b5b81a
+          # NEW_HASH: 32b145f525a8308d7ab1c09388b2e288312d8eba
           
-          echo "Patches applied successfully."
+          # grep -rl 递归搜索包含旧哈希的文件名
+          # xargs sed -i '' 在 macOS 上原地修改文件
+          grep -rl "be8be39fdbc6e60e94fa7870b280707069b5b81a" . | xargs sed -i '' 's/be8be39fdbc6e60e94fa7870b280707069b5b81a/32b145f525a8308d7ab1c09388b2e288312d8eba/g'
+          
+          echo ">>> Eigen hash patched."
+
+          # 2. 验证替换是否成功 (调试用)
+          echo ">>> Verifying patch..."
+          if grep -q "32b145f525a8308d7ab1c09388b2e288312d8eba" cmake/external/eigen.cmake 2>/dev/null; then
+             echo "SUCCESS: Found new hash in eigen.cmake"
+          else
+             # 如果找不到，尝试全局搜一下，确保万无一失
+             if grep -rq "32b145f525a8308d7ab1c09388b2e288312d8eba" .; then
+                 echo "SUCCESS: Found new hash in project."
+             else
+                 echo "WARNING: New hash not found! Compilation might fail."
+             fi
+          fi
 
       - name: Build Shared Library
         shell: bash
         run: |
           echo ">>> Building ORT ${{ matrix.ort_version }} for ${{ matrix.arch }}..."
           
-          # 注意：依然保留 CMAKE_POLICY_VERSION_MINIMUM=3.5 以兼容 FetchContent 下载的第三方库 (如 date)
+          # 注意：必须保留 CMAKE_POLICY_VERSION_MINIMUM=3.5 
+          # 因为 FetchContent 下载的旧版库 (如 date) 依然会报 CMake 版本错误
+          
           python3 tools/ci_build/build.py \
             --build_dir build \
             --config ${{ inputs.build_type }} \
@@ -99,6 +111,7 @@ jobs:
           cp build/${{ inputs.build_type }}/libonnxruntime*.dylib artifacts/
           
           mkdir -p artifacts/include
+          # 兼容不同版本的头文件路径
           if [ -d "include/onnxruntime/core/session" ]; then
              cp -r include/onnxruntime/core/session/*.h artifacts/include/
           fi
