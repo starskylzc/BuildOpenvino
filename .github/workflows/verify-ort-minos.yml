@@ -14,27 +14,61 @@ on:
 
 jobs:
   windows_verify:
-    name: Windows - GPU/DirectML packages (min OS via imports+winmd)
+    name: Windows - native min OS inference (ORT GPU/DirectML)
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Prepare
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Prepare directories
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force downloads, extracted, out, tools | Out-Null
 
-      - name: Setup MSVC (dumpbin)
-        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build ApiMinWin tool
+        shell: pwsh
+        run: |
+          # Expect these files in repo: .github/scripts/ApiMinWin.csproj + ApiMinWin.cs
+          dotnet publish .github/scripts/ApiMinWin.csproj -c Release -o tools/ApiMinWin
+          if (-not (Test-Path 'tools/ApiMinWin/ApiMinWin.dll')) { throw "ApiMinWin.dll not found after publish" }
+          Write-Host "ApiMinWin built at: tools/ApiMinWin/ApiMinWin.dll"
+
+      - name: Download Windows.Win32.winmd (Win32Metadata)
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          $id = "Microsoft.Windows.SDK.Win32Metadata"
+          $lower = $id.ToLowerInvariant()
+          $indexUrl = "https://api.nuget.org/v3-flatcontainer/$lower/index.json"
+          $versions = (Invoke-RestMethod -Uri $indexUrl -Method Get).versions
+          if (-not $versions -or $versions.Count -lt 1) { throw "Could not fetch versions for $id" }
+          $ver = $versions[-1]
+          $nupkgUrl = "https://api.nuget.org/v3-flatcontainer/$lower/$ver/$lower.$ver.nupkg"
+          $nupkgPath = "downloads\$lower.$ver.nupkg"
+          Write-Host "Download Win32Metadata: $nupkgUrl"
+          Invoke-WebRequest -Uri $nupkgUrl -OutFile $nupkgPath
+          $outDir = "extracted\win32metadata.$ver"
+          if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
+          Expand-Archive -Path $nupkgPath -DestinationPath $outDir -Force
+          $winmd = Get-ChildItem $outDir -Recurse -File -Filter "Windows.Win32.winmd" | Select-Object -First 1
+          if (-not $winmd) { throw "Windows.Win32.winmd not found inside $nupkgPath" }
+          $winmdPath = $winmd.FullName
+          "WINMD_PATH=$winmdPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "WINMD_PATH = $winmdPath"
 
       - name: Fetch versions list (NuGet flatcontainer)
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
 
-          function Get-Versions($id) {
-            $lower = $id.ToLower()
+          function Get-Versions([string]$id) {
+            $lower = $id.ToLowerInvariant()
             $url = "https://api.nuget.org/v3-flatcontainer/$lower/index.json"
             Write-Host "Fetch versions: $url"
             $json = Invoke-RestMethod -Uri $url -Method Get
@@ -130,6 +164,7 @@ jobs:
           $list = New-Object System.Collections.Generic.List[object]
           foreach ($p in $pkgIds) {
             foreach ($v in $all.$p) {
+              # NOTE: start is usually the newer/higher version, end is older/lower.
               if ((Compare-Ver $v $start) -le 0 -and (Compare-Ver $v $end) -ge 0) {
                 $list.Add([PSCustomObject]@{ id=$p; version=$v })
               }
@@ -142,184 +177,31 @@ jobs:
           Write-Host "Verify items count = $($sorted.Count)"
           $sorted | Select-Object -First 20 | Format-Table -AutoSize
 
-      - name: Download Win32 metadata (Microsoft.Windows.SDK.Win32Metadata) - get Windows.Win32.winmd
+      - name: Download & analyze native DLLs (Windows min build)
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
           $ErrorActionPreference = "Stop"
 
-          # ✅ 正确的 winmd 来源：Microsoft.Windows.SDK.Win32Metadata
-          $id = "microsoft.windows.sdk.win32metadata"
-          $indexUrl = "https://api.nuget.org/v3-flatcontainer/$id/index.json"
-          Write-Host "Fetch: $indexUrl"
-
-          # 拉取并校验返回结构
-          $raw = Invoke-RestMethod -Uri $indexUrl -Method Get
-          if (-not $raw -or -not $raw.versions) {
-            Write-Host "Unexpected response:"
-            $raw | ConvertTo-Json -Depth 6 | Write-Host
-            throw "Cannot find 'versions' from $indexUrl"
-          }
-
-          $vers = @($raw.versions)
-          if ($vers.Count -eq 0) { throw "No versions found for $id" }
-
-          # 优先稳定版；没有稳定版就用最新（很多时候只有 preview）
-          $stable = @($vers | Where-Object { $_ -notmatch "-" })
-          if ($stable.Count -gt 0) { $ver = $stable[-1] } else { $ver = $vers[-1] }
-
-          Write-Host "Use $id version = $ver"
-
-          $nupkg = "downloads\$id.$ver.nupkg"
-          $pkgUrl = "https://api.nuget.org/v3-flatcontainer/$id/$ver/$id.$ver.nupkg"
-          Write-Host "Download: $pkgUrl"
-          Invoke-WebRequest -Uri $pkgUrl -OutFile $nupkg
-
-          $sdkDir = "tools\win32meta.$ver"
-          if (Test-Path $sdkDir) { Remove-Item $sdkDir -Recurse -Force }
-          New-Item -ItemType Directory -Force $sdkDir | Out-Null
-          Expand-Archive -Path $nupkg -DestinationPath $sdkDir -Force
-
-          $winmd = Get-ChildItem -Path $sdkDir -Recurse -Filter "Windows.Win32.winmd" -File | Select-Object -First 1
-          if (-not $winmd) { throw "Windows.Win32.winmd not found in $id $ver" }
-
-          $winmd.FullName | Out-File -Encoding UTF8 "out\win32_winmd_path.txt"
-          Write-Host "Windows.Win32.winmd: $($winmd.FullName)"
-          Write-Host "Saved: out\win32_winmd_path.txt"
-
-      - name: Build ApiMinWin tool (from repo .github/scripts)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $srcCs  = ".github\scripts\ApiMinWin.cs"
-          $srcPrj = ".github\scripts\ApiMinWin.csproj"
-          if (-not (Test-Path $srcCs))  { throw "Missing $srcCs" }
-          if (-not (Test-Path $srcPrj)) { throw "Missing $srcPrj" }
-
-          $toolDir = "tools\ApiMinWin"
-          if (Test-Path $toolDir) { Remove-Item $toolDir -Recurse -Force }
-          New-Item -ItemType Directory -Force $toolDir | Out-Null
-
-          Copy-Item $srcPrj -Destination (Join-Path $toolDir "ApiMinWin.csproj") -Force
-          Copy-Item $srcCs  -Destination (Join-Path $toolDir "Program.cs") -Force
-
-          Write-Host "Build ApiMinWin..."
-          dotnet build "$toolDir\ApiMinWin.csproj" -c Release
-
-          $exe = Join-Path $toolDir "bin\Release\net8.0\ApiMinWin.exe"
-          if (-not (Test-Path $exe)) { throw "ApiMinWin.exe not found at $exe" }
-          Write-Host "ApiMinWin.exe: $exe"
-
-      - name: Download & analyze packages (PE headers + imports->winmd min build)
-        shell: pwsh
-        run: |
-          $ProgressPreference = "SilentlyContinue"
-          $ErrorActionPreference = "Stop"
+          $tool = (Resolve-Path "tools/ApiMinWin/ApiMinWin.dll").Path
+          $winmd = $env:WINMD_PATH
+          if (-not $winmd -or -not (Test-Path $winmd)) { throw "WINMD_PATH missing or not found: $winmd" }
 
           $items = Get-Content out\verify_windows_list.json -Raw | ConvertFrom-Json
-          $winmdPath = (Get-Content out\win32_winmd_path.txt -Raw).Trim()
-          if (-not (Test-Path $winmdPath)) { throw "winmd not found: $winmdPath" }
 
-          $apiExe = "tools\ApiMinWin\bin\Release\net8.0\ApiMinWin.exe"
-          if (-not (Test-Path $apiExe)) { throw "ApiMinWin.exe not found: $apiExe" }
-
-          $csv = New-Object System.Collections.Generic.List[string]
-          $csv.Add("package,version,runtimeRid,dll,pe_MinOS,pe_Subsystem,pe_SubsystemVer,api_MinWinBuild,api_MinWinReason")
-
-          function Get-PeHeaderInfo([string]$dllPath) {
-            $hdr = (dumpbin /nologo /headers $dllPath) 2>&1
-            $minos = ""
-            $subsys = ""
-            $subver = ""
-            foreach ($line in $hdr) {
-              if ($line -match "^\s*([0-9]+)\.([0-9]+)\s+operating system version") {
-                $minos = "$($Matches[1]).$($Matches[2])"
-              }
-              if ($line -match "^\s*([0-9]+)\.([0-9]+)\s+subsystem version") {
-                $subver = "$($Matches[1]).$($Matches[2])"
-              }
-              if ($line -match "^\s*Subsystem\s+(.+)$") {
-                $subsys = $Matches[1].Trim()
-              }
-            }
-            return @{
-              MinOS = $minos
-              Subsystem = $subsys
-              SubsystemVer = $subver
-            }
-          }
-
-          function Get-ImportPairs([string]$dllPath) {
-            $lines = (dumpbin /nologo /imports $dllPath) 2>&1
-            $pairs = New-Object System.Collections.Generic.List[string]
-            $curDll = $null
-
-            foreach ($raw in $lines) {
-              $line = ($raw ?? "").TrimEnd()
-
-              if ($line -match "^\s*([A-Za-z0-9_\-\.]+\.dll)$") {
-                $curDll = $Matches[1].ToLowerInvariant()
-                continue
-              }
-
-              if (-not $curDll) { continue }
-
-              if ($line -match "^\s*[0-9A-Fa-f]+\s+([A-Za-z0-9_@\?\$]+)$") {
-                $fn = $Matches[1]
-                if ($fn -match "^(?:__imp_|_imp__|@)" ) { continue }
-                $pairs.Add("$curDll,$fn")
-                continue
-              }
-
-              if ($line -match "^\s*\d+\s+[0-9A-Fa-f]+\s+([A-Za-z0-9_@\?\$]+)$") {
-                $fn = $Matches[1]
-                if ($fn -match "^(?:__imp_|_imp__|@)" ) { continue }
-                $pairs.Add("$curDll,$fn")
-                continue
-              }
-            }
-
-            return $pairs
-          }
-
-          function Get-MinBuildFromImports([string[]]$pairs) {
-            if (-not $pairs -or $pairs.Count -eq 0) {
-              return @{ Build = 0; Reason = "" }
-            }
-
-            $outLines = $pairs | & $apiExe $winmdPath 2>$null
-            if (-not $outLines -or $outLines.Count -lt 2) {
-              return @{ Build = 0; Reason = "" }
-            }
-
-            $rows = $outLines | ConvertFrom-Csv
-            $max = 0
-            $reason = ""
-
-            foreach ($r in $rows) {
-              $b = 0
-              if ($r.minBuild -match "^\d+$") { $b = [int]$r.minBuild }
-              if ($b -gt $max) {
-                $max = $b
-                $reason = $r.reason
-              }
-            }
-            return @{ Build = $max; Reason = $reason }
-          }
+          $rows = New-Object System.Collections.Generic.List[object]
 
           foreach ($it in $items) {
-            $id = $it.id
-            $ver = $it.version
-            $lower = $id.ToLower()
+            $pkg = [string]$it.id
+            $ver = [string]$it.version
+            if ([string]::IsNullOrWhiteSpace($pkg) -or [string]::IsNullOrWhiteSpace($ver)) { continue }
 
-            Write-Host "==== $id $ver ===="
-
+            $lower = $pkg.ToLowerInvariant()
             $nupkg = "downloads\$lower.$ver.nupkg"
-            $url   = "https://api.nuget.org/v3-flatcontainer/$lower/$ver/$lower.$ver.nupkg"
+            $url = "https://api.nuget.org/v3-flatcontainer/$lower/$ver/$lower.$ver.nupkg"
 
             if (-not (Test-Path $nupkg)) {
-              Write-Host "Download: $url"
+              Write-Host "Download: $pkg $ver"
               Invoke-WebRequest -Uri $url -OutFile $nupkg
             } else {
               Write-Host "Skip download (cached): $nupkg"
@@ -330,95 +212,88 @@ jobs:
             New-Item -ItemType Directory -Force $outdir | Out-Null
             Expand-Archive -Path $nupkg -DestinationPath $outdir -Force
 
-            $nativeDirs = Get-ChildItem -Path $outdir -Recurse -Directory |
-              Where-Object { $_.FullName -match "runtimes\\win-(x86|x64|arm64)\\native$" }
+            $dlls = Get-ChildItem $outdir -Recurse -File -Filter "*.dll" |
+              Where-Object { $_.FullName -match "\\runtimes\\win-[^\\]+\\native\\" }
 
-            foreach ($nd in $nativeDirs) {
-              $rid = ($nd.FullName -replace '.*runtimes\\', '' -replace '\\native$', '')
-              $dlls = Get-ChildItem -Path $nd.FullName -Filter *.dll -File
+            if (-not $dlls -or $dlls.Count -eq 0) {
+              Write-Host "No runtimes/win-*/native/*.dll found for $pkg $ver (skip)"
+              continue
+            }
 
-              foreach ($d in $dlls) {
-                $pe = Get-PeHeaderInfo $d.FullName
-                $pairs = Get-ImportPairs $d.FullName
-                $minApi = Get-MinBuildFromImports $pairs
+            foreach ($dll in $dlls) {
+              $m = [regex]::Match($dll.FullName, "runtimes\\(win-[^\\]+)\\native", "IgnoreCase")
+              $rid = if ($m.Success) { $m.Groups[1].Value } else { "UNKNOWN" }
 
-                $apiBuild = if ($minApi.Build -gt 0) { "$($minApi.Build)" } else { "UNKNOWN" }
-                $apiReason = ($minApi.Reason ?? "") -replace ",", " "
+              $json = & dotnet $tool --winmd $winmd --pe $dll.FullName --json
+              $res = $json | ConvertFrom-Json
 
-                $csv.Add(("{0},{1},{2},{3},{4},{5},{6},{7},{8}" -f `
-                  ($id -replace ","," "), `
-                  ($ver -replace ","," "), `
-                  ($rid -replace ","," "), `
-                  ($d.Name -replace ","," "), `
-                  ($pe.MinOS -replace ","," "), `
-                  (($pe.Subsystem -replace ","," ") ?? ""), `
-                  ($pe.SubsystemVer -replace ","," "), `
-                  $apiBuild, `
-                  $apiReason
-                ))
-              }
+              $rows.Add([pscustomobject]@{
+                package = $pkg
+                version = $ver
+                runtimeRid = $rid
+                pe = $dll.Name
+                requiredMinBuild = [int]$res.requiredMinBuild
+                requiredMinReason = [string]$res.requiredMinReason
+                importCount = [int]$res.importCount
+                mappedImportCount = [int]$res.mappedImportCount
+              })
             }
           }
 
-          $csv | Out-File -Encoding UTF8 out\windows_min_details.csv
+          $rows | Export-Csv -NoTypeInformation -Encoding UTF8 out\windows_min_details.csv
           Write-Host "Wrote: out\windows_min_details.csv"
 
-      - name: Summarize Windows min OS per package+version
-        shell: pwsh
-        run: |
-          $rows = Import-Csv out\windows_min_details.csv
-
-          function Parse-MajorMinor([string]$s) {
-            if ([string]::IsNullOrWhiteSpace($s)) { return $null }
-            if ($s -match "^(\d+)\.(\d+)") {
-              return [PSCustomObject]@{ Major=[int]$Matches[1]; Minor=[int]$Matches[2] }
+          function Build-ToWindowsName([int]$build) {
+            if ($build -le 0) { return "UNKNOWN" }
+            $map = [ordered]@{
+              7601  = "Windows 7 SP1 (7601)"
+              9200  = "Windows 8 (9200)"
+              9600  = "Windows 8.1 (9600)"
+              10240 = "Windows 10 1507 (10240)"
+              10586 = "Windows 10 1511 (10586)"
+              14393 = "Windows 10 1607 (14393)"
+              15063 = "Windows 10 1703 (15063)"
+              16299 = "Windows 10 1709 (16299)"
+              17134 = "Windows 10 1803 (17134)"
+              17763 = "Windows 10 1809 (17763)"
+              18362 = "Windows 10 1903 (18362)"
+              18363 = "Windows 10 1909 (18363)"
+              19041 = "Windows 10 2004 (19041)"
+              19042 = "Windows 10 20H2 (19042)"
+              19043 = "Windows 10 21H1 (19043)"
+              19044 = "Windows 10 21H2 (19044)"
+              19045 = "Windows 10 22H2 (19045)"
+              20348 = "Windows Server 2022 (20348)"
+              22000 = "Windows 11 21H2 (22000)"
+              22621 = "Windows 11 22H2 (22621)"
+              22631 = "Windows 11 23H2 (22631)"
+              26100 = "Windows 11 24H2 (26100)"
             }
-            return $null
-          }
-
-          function Cmp-MajorMinor($a, $b) {
-            if ($null -eq $a -and $null -eq $b) { return 0 }
-            if ($null -eq $a) { return -1 }
-            if ($null -eq $b) { return 1 }
-            if ($a.Major -ne $b.Major) { return [Math]::Sign($a.Major - $b.Major) }
-            return [Math]::Sign($a.Minor - $b.Minor)
-          }
-
-          function Max-MajorMinor($vals) {
-            $max = $null
-            foreach ($v in $vals) {
-              if (Cmp-MajorMinor $v $max -gt 0) { $max = $v }
-            }
-            return $max
+            $keys = $map.Keys | Sort-Object
+            $best = ($keys | Where-Object { $_ -le $build } | Select-Object -Last 1)
+            return $best ? $map[$best] : ("Windows build $build")
           }
 
           $summary = $rows |
-            Group-Object package,version |
+            Group-Object -Property @{ Expression = { "$($_.package)||$($_.version)" } } |
             ForEach-Object {
-              $grp = $_.Group
-              $peMin = Max-MajorMinor ($grp | ForEach-Object { Parse-MajorMinor $_.pe_MinOS })
-              $subMin = Max-MajorMinor ($grp | ForEach-Object { Parse-MajorMinor $_.pe_SubsystemVer })
-
-              $maxApiBuild = ($grp | ForEach-Object {
-                if ($_.api_MinWinBuild -match "^\d+$") { [int]$_.api_MinWinBuild } else { 0 }
-              } | Measure-Object -Maximum).Maximum
-
-              $bestReason = ($grp | Where-Object { $_.api_MinWinBuild -eq "$maxApiBuild" } | Select-Object -First 1).api_MinWinReason
-
-              $peStr  = if ($peMin) { "{0}.{1}" -f $peMin.Major, $peMin.Minor } else { "UNKNOWN" }
-              $subStr = if ($subMin) { "{0}.{1}" -f $subMin.Major, $subMin.Minor } else { "UNKNOWN" }
-
+              $g = $_.Group
+              $pkg = $g[0].package
+              $ver = $g[0].version
+              $max = ($g | Measure-Object requiredMinBuild -Maximum).Maximum
+              $maxReason = ($g | Where-Object { $_.requiredMinBuild -eq $max } | Select-Object -First 1).requiredMinReason
               [PSCustomObject]@{
-                package = $grp[0].package
-                version = $grp[0].version
-                required_pe_MinOS = $peStr
-                required_pe_SubsystemVer = $subStr
-                api_based_min_win_build = if ($maxApiBuild -gt 0) { $maxApiBuild } else { "UNKNOWN" }
-                api_based_reason = $bestReason
+                package = $pkg
+                version = $ver
+                requiredMinBuild = [int]$max
+                requiredMinWindows = Build-ToWindowsName([int]$max)
+                reason = [string]$maxReason
               }
             }
 
-          $summary | Sort-Object package, version | Export-Csv -NoTypeInformation -Encoding UTF8 out\windows_min_summary.csv
+          $summary | Sort-Object package, @{Expression='version'; Descending=$true} |
+            Export-Csv -NoTypeInformation -Encoding UTF8 out\windows_min_summary.csv
+
           Write-Host "Wrote: out\windows_min_summary.csv"
           $summary | Sort-Object package, @{Expression='version'; Descending=$true} | Select-Object -First 30 | Format-Table -AutoSize
 
@@ -439,28 +314,21 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare
+      - name: Prepare directories
         shell: bash
         run: |
-          set -euo pipefail
           mkdir -p downloads extracted out
 
       - name: Fetch versions list (NuGet flatcontainer)
         shell: bash
         run: |
-          set -euo pipefail
           ID="microsoft.ml.onnxruntime"
           URL="https://api.nuget.org/v3-flatcontainer/${ID}/index.json"
-          echo "Fetch versions: $URL"
           curl -L --fail -o out/versions_macos.json "$URL"
 
       - name: Build verify list from input range
         shell: bash
         run: |
-          set -euo pipefail
-
           START="${{ inputs.start_version }}"
           END="${{ inputs.end_version }}"
 
@@ -482,8 +350,6 @@ jobs:
       - name: Download & analyze (min macOS version)
         shell: bash
         run: |
-          set -euo pipefail
-
           PKG_ID="microsoft.ml.onnxruntime"
           echo "package,version,runtimeRid,dylib_or_so,min_macos" > out/macos_min_details.csv
 
