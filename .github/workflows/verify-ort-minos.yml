@@ -8,7 +8,7 @@ on:
         required: true
         default: "1.23.2"
       end_version:
-        description: "End version (inclusive), e.g. 1.16.0"
+        description: "End version (inclusive), e.g. 1.16.3"
         required: true
         default: "1.16.3"
 
@@ -142,31 +142,46 @@ jobs:
           Write-Host "Verify items count = $($sorted.Count)"
           $sorted | Select-Object -First 20 | Format-Table -AutoSize
 
-      - name: Download Win32 metadata (Microsoft.Windows.SDK.NET) - get Windows.Win32.winmd
+      - name: Download Win32 metadata (Microsoft.Windows.SDK.Win32Metadata) - get Windows.Win32.winmd
         shell: pwsh
         run: |
           $ProgressPreference = "SilentlyContinue"
+          $ErrorActionPreference = "Stop"
 
-          $id = "microsoft.windows.sdk.net"
+          # ✅ 正确的 winmd 来源：Microsoft.Windows.SDK.Win32Metadata
+          $id = "microsoft.windows.sdk.win32metadata"
           $indexUrl = "https://api.nuget.org/v3-flatcontainer/$id/index.json"
           Write-Host "Fetch: $indexUrl"
-          $vers = (Invoke-RestMethod -Uri $indexUrl -Method Get).versions
-          $stable = $vers | Where-Object { $_ -notmatch "-" }
-          $ver = $stable[-1]
-          Write-Host "Use Microsoft.Windows.SDK.NET version = $ver"
+
+          # 拉取并校验返回结构
+          $raw = Invoke-RestMethod -Uri $indexUrl -Method Get
+          if (-not $raw -or -not $raw.versions) {
+            Write-Host "Unexpected response:"
+            $raw | ConvertTo-Json -Depth 6 | Write-Host
+            throw "Cannot find 'versions' from $indexUrl"
+          }
+
+          $vers = @($raw.versions)
+          if ($vers.Count -eq 0) { throw "No versions found for $id" }
+
+          # 优先稳定版；没有稳定版就用最新（很多时候只有 preview）
+          $stable = @($vers | Where-Object { $_ -notmatch "-" })
+          if ($stable.Count -gt 0) { $ver = $stable[-1] } else { $ver = $vers[-1] }
+
+          Write-Host "Use $id version = $ver"
 
           $nupkg = "downloads\$id.$ver.nupkg"
           $pkgUrl = "https://api.nuget.org/v3-flatcontainer/$id/$ver/$id.$ver.nupkg"
           Write-Host "Download: $pkgUrl"
           Invoke-WebRequest -Uri $pkgUrl -OutFile $nupkg
 
-          $sdkDir = "tools\sdknet.$ver"
+          $sdkDir = "tools\win32meta.$ver"
           if (Test-Path $sdkDir) { Remove-Item $sdkDir -Recurse -Force }
           New-Item -ItemType Directory -Force $sdkDir | Out-Null
           Expand-Archive -Path $nupkg -DestinationPath $sdkDir -Force
 
           $winmd = Get-ChildItem -Path $sdkDir -Recurse -Filter "Windows.Win32.winmd" -File | Select-Object -First 1
-          if (-not $winmd) { throw "Windows.Win32.winmd not found in Microsoft.Windows.SDK.NET package" }
+          if (-not $winmd) { throw "Windows.Win32.winmd not found in $id $ver" }
 
           $winmd.FullName | Out-File -Encoding UTF8 "out\win32_winmd_path.txt"
           Write-Host "Windows.Win32.winmd: $($winmd.FullName)"
@@ -236,7 +251,6 @@ jobs:
           }
 
           function Get-ImportPairs([string]$dllPath) {
-            # Parse dumpbin /imports into lines "dll,func"
             $lines = (dumpbin /nologo /imports $dllPath) 2>&1
             $pairs = New-Object System.Collections.Generic.List[string]
             $curDll = $null
@@ -244,7 +258,6 @@ jobs:
             foreach ($raw in $lines) {
               $line = ($raw ?? "").TrimEnd()
 
-              # DLL header lines: e.g. "KERNEL32.dll"
               if ($line -match "^\s*([A-Za-z0-9_\-\.]+\.dll)$") {
                 $curDll = $Matches[1].ToLowerInvariant()
                 continue
@@ -252,17 +265,13 @@ jobs:
 
               if (-not $curDll) { continue }
 
-              # Common import name lines: "7F8  GetLastError" (hint hex + name)
               if ($line -match "^\s*[0-9A-Fa-f]+\s+([A-Za-z0-9_@\?\$]+)$") {
                 $fn = $Matches[1]
-                # skip noisy pseudo symbols
                 if ($fn -match "^(?:__imp_|_imp__|@)" ) { continue }
                 $pairs.Add("$curDll,$fn")
                 continue
               }
 
-              # Some dumpbin versions print: "ordinal hint name"
-              # e.g. "    12    7F8  GetLastError"
               if ($line -match "^\s*\d+\s+[0-9A-Fa-f]+\s+([A-Za-z0-9_@\?\$]+)$") {
                 $fn = $Matches[1]
                 if ($fn -match "^(?:__imp_|_imp__|@)" ) { continue }
@@ -279,7 +288,6 @@ jobs:
               return @{ Build = 0; Reason = "" }
             }
 
-            # Feed into ApiMinWin: outputs csv "dll,func,minBuild,reason"
             $outLines = $pairs | & $apiExe $winmdPath 2>$null
             if (-not $outLines -or $outLines.Count -lt 2) {
               return @{ Build = 0; Reason = "" }
