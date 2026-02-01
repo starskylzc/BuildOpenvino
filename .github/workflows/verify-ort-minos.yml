@@ -1,397 +1,347 @@
-name: Verify ORT NuGet Min OS (native-only, no-python)
+name: Verify ORT NuGet Native Min OS (Windows + macOS) - No Python
 
 on:
   workflow_dispatch:
     inputs:
-      min_version:
-        description: "Min version (inclusive)"
+      start_version:
+        description: "Start version (inclusive), e.g. 1.23.2"
+        required: true
+        default: "1.23.2"
+      end_version:
+        description: "End version (inclusive), e.g. 1.16.3"
         required: true
         default: "1.16.3"
-      max_version:
-        description: "Max version (inclusive)"
-        required: true
-        default: "1.21.1"
 
 jobs:
-  macos_verify:
-    name: macOS min version (otool)
-    runs-on: macos-latest
-    steps:
-      - name: Prepare
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p downloads extracted results
-          echo "Runner: $(sw_vers | tr '\n' ' ')"
-
-      - name: Verify macOS dylibs (no python)
-        shell: bash
-        env:
-          MIN_VERSION: ${{ github.event.inputs.min_version }}
-          MAX_VERSION: ${{ github.event.inputs.max_version }}
-        run: |
-          set -euxo pipefail
-
-          PACKAGES=(
-            "Microsoft.ML.OnnxRuntime"
-          )
-
-          # ---- helpers ----
-          ver_to_num () {
-            # "1.21.1" -> 001021001 (lexical comparable)
-            local v="$1"
-            IFS='.' read -r a b c <<<"$v"
-            printf "%03d%03d%03d" "$a" "$b" "$c"
-          }
-
-          in_range () {
-            local v="$1"
-            local min="$2"
-            local max="$3"
-            local vn mn mx
-            vn="$(ver_to_num "$v")"
-            mn="$(ver_to_num "$min")"
-            mx="$(ver_to_num "$max")"
-            [[ "$vn" -ge "$mn" && "$vn" -le "$mx" ]]
-          }
-
-          list_versions () {
-            # IMPORTANT:
-            # - stdout: ONLY versions
-            # - stderr: progress logs
-            local pkg_lc="$1"
-            local idx_url="https://api.nuget.org/v3-flatcontainer/${pkg_lc}/index.json"
-
-            echo ">>> Fetch versions: $idx_url" >&2
-            curl -L --fail -o "downloads/${pkg_lc}.index.json" "$idx_url"
-
-            grep -Eo '"[0-9]+\.[0-9]+\.[0-9]+"' "downloads/${pkg_lc}.index.json" \
-              | tr -d '"' \
-              | while read -r v; do
-                  if in_range "$v" "$MIN_VERSION" "$MAX_VERSION"; then
-                    echo "$(ver_to_num "$v") $v"
-                  fi
-                done \
-              | sort -r \
-              | awk '{print $2}'
-          }
-
-          get_min_macos () {
-            # returns "min|TAG"
-            local dylib="$1"
-            local min=""
-
-            # LC_BUILD_VERSION -> minos
-            min="$(otool -l "$dylib" | awk '
-              $1=="cmd" && $2=="LC_BUILD_VERSION"{in=1}
-              in==1 && $1=="minos"{print $2; exit}
-            ')"
-            if [[ -n "$min" ]]; then
-              echo "${min}|LC_BUILD_VERSION"
-              return 0
-            fi
-
-            # LC_VERSION_MIN_MACOSX -> version
-            min="$(otool -l "$dylib" | awk '
-              $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX"{in=1}
-              in==1 && $1=="version"{print $2; exit}
-            ')"
-            if [[ -n "$min" ]]; then
-              echo "${min}|LC_VERSION_MIN_MACOSX"
-              return 0
-            fi
-
-            echo "UNKNOWN|NONE"
-          }
-
-          macos_to_num () {
-            # "13.3" -> 013003000 ; "10.15.7" -> 010015007
-            local s="$1"
-            if [[ "$s" == "UNKNOWN" || "$s" == "N/A" || -z "$s" ]]; then
-              echo ""
-              return 0
-            fi
-            IFS='.' read -r a b c <<<"$s"
-            c="${c:-0}"
-            printf "%03d%03d%03d" "$a" "$b" "$c"
-          }
-
-          # ---- outputs ----
-          echo "package,version,runtime,library,min_macos,tag" > results/macos_min_details.csv
-          echo "package,version,worst_min_macos,libs_count,runtimes_count,notes" > results/macos_min_summary.csv
-
-          for pkg in "${PACKAGES[@]}"; do
-            pkg_lc="$(echo "$pkg" | tr '[:upper:]' '[:lower:]')"
-            echo "=============================="
-            echo "PACKAGE: $pkg"
-            echo "=============================="
-
-            # 关键：不要把 stderr 混进 versions
-            versions="$(list_versions "$pkg_lc" 2>/dev/null || true)"
-            if [[ -z "${versions}" ]]; then
-              echo "WARN: No versions found in range for $pkg"
-              continue
-            fi
-
-            while read -r ver; do
-              [[ -z "$ver" ]] && continue
-              echo "---- $pkg $ver ----"
-
-              nupkg="downloads/${pkg_lc}.${ver}.nupkg"
-              url="https://api.nuget.org/v3-flatcontainer/${pkg_lc}/${ver}/${pkg_lc}.${ver}.nupkg"
-
-              echo "Download: $url"
-              curl -L --fail -o "$nupkg" "$url"
-
-              outdir="extracted/${pkg_lc}.${ver}"
-              rm -rf "$outdir"
-              mkdir -p "$outdir"
-              unzip -q "$nupkg" -d "$outdir"
-
-              mapfile -t dylibs < <(find "$outdir" -type f \( -path "*/runtimes/osx-*/native/*.dylib" -o -path "*/runtimes/osx-*/native/*.so" \) 2>/dev/null || true)
-
-              if [[ "${#dylibs[@]}" -eq 0 ]]; then
-                echo "NO_OSX_NATIVE"
-                echo "${pkg},${ver},N/A,0,0,NO_OSX_NATIVE" >> results/macos_min_summary.csv
-                continue
-              fi
-
-              worst_num=""
-              worst_txt="UNKNOWN"
-              libs_count=0
-              runtimes_set=""
-
-              for d in "${dylibs[@]}"; do
-                libs_count=$((libs_count+1))
-                rt="$(echo "$d" | sed -n 's|.*runtimes/\(osx-[^/]*\)/native/.*|\1|p')"
-                lib="$(basename "$d")"
-                min_tag="$(get_min_macos "$d")"
-                min="${min_tag%%|*}"
-                tag="${min_tag##*|}"
-
-                echo "  dylib: $rt/$lib -> min_macos=$min ($tag)"
-                echo "${pkg},${ver},${rt},${lib},${min},${tag}" >> results/macos_min_details.csv
-
-                if [[ "$runtimes_set" != *"|$rt|"* ]]; then
-                  runtimes_set="${runtimes_set}|$rt|"
-                fi
-
-                num="$(macos_to_num "$min")"
-                if [[ -n "$num" ]]; then
-                  if [[ -z "$worst_num" || "$num" -gt "$worst_num" ]]; then
-                    worst_num="$num"
-                    IFS='.' read -r a b c <<<"$min"
-                    c="${c:-0}"
-                    worst_txt="${a}.${b}.${c}"
-                  fi
-                fi
-              done
-
-              runtimes_count="$(echo "$runtimes_set" | tr '|' '\n' | grep -E '^osx-' | wc -l | tr -d ' ')"
-              notes=""
-              if [[ -n "$worst_num" && "$worst_num" -ge "$(macos_to_num "13.3.0")" ]]; then
-                notes=">=13.3"
-              fi
-
-              echo "SUMMARY: worst_min_macos=$worst_txt libs=$libs_count runtimes=$runtimes_count notes=$notes"
-              echo "${pkg},${ver},${worst_txt},${libs_count},${runtimes_count},${notes}" >> results/macos_min_summary.csv
-
-            done <<< "$versions"
-          done
-
-          echo "=== DONE macOS ==="
-          head -n 50 results/macos_min_summary.csv || true
-
-      - name: Upload artifact (macOS)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ort_min_os_macos
-          path: |
-            results/macos_min_summary.csv
-            results/macos_min_details.csv
-
-
   windows_verify:
-    name: Windows min OS from PE headers (dumpbin)
+    name: Windows - GPU/DirectML packages (min OS inference)
     runs-on: windows-latest
+
     steps:
       - name: Prepare
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force downloads, extracted, results | Out-Null
+          New-Item -ItemType Directory -Force downloads, extracted, out | Out-Null
 
       - name: Setup MSVC (dumpbin)
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Verify Windows DLLs (no python)
+      - name: Fetch versions list (NuGet flatcontainer)
         shell: pwsh
-        env:
-          MIN_VERSION: ${{ github.event.inputs.min_version }}
-          MAX_VERSION: ${{ github.event.inputs.max_version }}
         run: |
-          $ErrorActionPreference = "Stop"
           $ProgressPreference = "SilentlyContinue"
 
-          $packages = @(
+          function Get-Versions($id) {
+            $lower = $id.ToLower()
+            $url = "https://api.nuget.org/v3-flatcontainer/$lower/index.json"
+            Write-Host "Fetch versions: $url"
+            $json = Invoke-RestMethod -Uri $url -Method Get
+            return ,$json.versions
+          }
+
+          $pkgIds = @(
             "Microsoft.ML.OnnxRuntime.Gpu",
             "Microsoft.ML.OnnxRuntime.Gpu.Windows",
             "Microsoft.ML.OnnxRuntime.DirectML"
           )
 
-          function Parse-SemVer3([string]$s) {
-            if ($s -match "^\d+\.\d+\.\d+$") { return $s }
-            return $null
+          $all = @{}
+          foreach ($p in $pkgIds) {
+            $all[$p] = Get-Versions $p
+            Write-Host "$p versions count = $($all[$p].Count)"
           }
 
-          function VerToNum([string]$v) {
-            $p = $v.Split('.')
-            return ([int]$p[0]*1000000 + [int]$p[1]*1000 + [int]$p[2])
-          }
+          $all | ConvertTo-Json -Depth 5 | Out-File -Encoding UTF8 out\versions_windows.json
 
-          function InRange([string]$v, [string]$min, [string]$max) {
-            $vn = VerToNum $v
-            $mn = VerToNum $min
-            $mx = VerToNum $max
-            return ($vn -ge $mn) -and ($vn -le $mx)
-          }
+      - name: Build verify list from input range
+        shell: pwsh
+        run: |
+          $start = "${{ inputs.start_version }}"
+          $end   = "${{ inputs.end_version }}"
 
-          function GetVersionsInRange([string]$pkg, [string]$min, [string]$max) {
-            $id = $pkg.ToLower()
-            $url = "https://api.nuget.org/v3-flatcontainer/$id/index.json"
-            Write-Host ">>> Fetch versions: $url"
-            $idx = Invoke-RestMethod -Uri $url
-            $vers = @()
-            foreach ($s in $idx.versions) {
-              $v = Parse-SemVer3 $s
-              if ($null -eq $v) { continue }
-              if (InRange $v $min $max) { $vers += $v }
+          function Compare-Ver([string]$a, [string]$b) {
+            # returns: -1 if a<b, 0 if equal, 1 if a>b
+            $pa = $a.Split('.') | ForEach-Object { [int]$_ }
+            $pb = $b.Split('.') | ForEach-Object { [int]$_ }
+            $len = [Math]::Max($pa.Count, $pb.Count)
+            for ($i=0; $i -lt $len; $i++) {
+              $va = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }
+              $vb = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
+              if ($va -lt $vb) { return -1 }
+              if ($va -gt $vb) { return 1 }
             }
-            $vers | Sort-Object { VerToNum $_ } -Descending
+            return 0
           }
 
-          function DownloadNupkg([string]$pkg, [string]$ver) {
-            $id = $pkg.ToLower()
-            $url = "https://api.nuget.org/v3-flatcontainer/$id/$ver/$id.$ver.nupkg"
-            $out = "downloads\$id.$ver.nupkg"
-            if (-not (Test-Path $out)) {
+          $all = Get-Content out\versions_windows.json -Raw | ConvertFrom-Json
+
+          $pkgIds = @(
+            "Microsoft.ML.OnnxRuntime.Gpu",
+            "Microsoft.ML.OnnxRuntime.Gpu.Windows",
+            "Microsoft.ML.OnnxRuntime.DirectML"
+          )
+
+          $list = New-Object System.Collections.Generic.List[object]
+          foreach ($p in $pkgIds) {
+            foreach ($v in $all.$p) {
+              if ((Compare-Ver $v $start) -le 0 -and (Compare-Ver $v $end) -ge 0) {
+                $list.Add([PSCustomObject]@{ id=$p; version=$v })
+              }
+            }
+          }
+
+          # sort descending by version for readability
+          $sorted = $list | Sort-Object id, @{Expression="version";Descending=$true}
+          $sorted | ConvertTo-Json -Depth 3 | Out-File -Encoding UTF8 out\verify_windows_list.json
+
+          Write-Host "Verify items count = $($sorted.Count)"
+          $sorted | Select-Object -First 20 | Format-Table -AutoSize
+
+      - name: Download & analyze packages (PE headers + imports)
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          $items = Get-Content out\verify_windows_list.json -Raw | ConvertFrom-Json
+
+          $csv = New-Object System.Collections.Generic.List[string]
+          $csv.Add("package,version,runtimeRid,dll,pe_MinOS,pe_Subsystem,pe_SubsystemVer,imports_MinWinGuess")
+
+          function Get-PeHeaderInfo([string]$dllPath) {
+            $hdr = (dumpbin /nologo /headers $dllPath) 2>&1
+            $minos = ""
+            $subsys = ""
+            $subver = ""
+
+            foreach ($line in $hdr) {
+              if ($line -match "^\s*([0-9]+)\.([0-9]+)\s+operating system version") {
+                $minos = "$($Matches[1]).$($Matches[2])"
+              }
+              if ($line -match "^\s*([0-9]+)\.([0-9]+)\s+subsystem version") {
+                $subver = "$($Matches[1]).$($Matches[2])"
+              }
+              if ($line -match "^\s*Subsystem\s+(.+)$") {
+                $subsys = $Matches[1].Trim()
+              }
+            }
+
+            return @{
+              MinOS = $minos
+              Subsystem = $subsys
+              SubsystemVer = $subver
+            }
+          }
+
+          function Get-ImportsText([string]$dllPath) {
+            $imp = (dumpbin /nologo /imports $dllPath) 2>&1
+            return ($imp -join "`n")
+          }
+
+          function Guess-MinWinBuild([string]$importsText) {
+            # Heuristic sentinels:
+            # 1709 (16299): SetUserGeoName (Kernel32)
+            # 1809 (17763): DestroySyntheticPointerDevice (User32)
+            # 1903 (18362): IsWindowArranged (User32) / Wow64GetThreadContext (Kernel32)
+            # 2004 (19041): CoRevokeDeviceCatalog (Combase)
+            #
+            # If none matched: Unknown(Win10+)
+            $hit2004 = ($importsText -match "(?i)\bCoRevokeDeviceCatalog\b")
+            $hit1903 = ($importsText -match "(?i)\bIsWindowArranged\b") -or ($importsText -match "(?i)\bWow64(Get|Set)ThreadContext\b")
+            $hit1809 = ($importsText -match "(?i)\bDestroySyntheticPointerDevice\b")
+            $hit1709 = ($importsText -match "(?i)\bSetUserGeoName\b")
+
+            if ($hit2004) { return "Win10 2004 (19041)+ (by imports)" }
+            if ($hit1903) { return "Win10 1903 (18362)+ (by imports)" }
+            if ($hit1809) { return "Win10 1809 (17763)+ (by imports)" }
+            if ($hit1709) { return "Win10 1709 (16299)+ (by imports)" }
+            return "Unknown (likely Win10+; no sentinel matched)"
+          }
+
+          foreach ($it in $items) {
+            $id = $it.id
+            $ver = $it.version
+            $lower = $id.ToLower()
+
+            Write-Host "==== $id $ver ===="
+
+            $nupkg = "downloads\$lower.$ver.nupkg"
+            $url   = "https://api.nuget.org/v3-flatcontainer/$lower/$ver/$lower.$ver.nupkg"
+
+            if (-not (Test-Path $nupkg)) {
               Write-Host "Download: $url"
-              Invoke-WebRequest -Uri $url -OutFile $out
+              Invoke-WebRequest -Uri $url -OutFile $nupkg
+            } else {
+              Write-Host "Skip download (cached): $nupkg"
             }
-            return $out
-          }
 
-          function ExtractNupkg([string]$nupkg, [string]$dest) {
-            if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-            New-Item -ItemType Directory -Force $dest | Out-Null
-            Expand-Archive -Path $nupkg -DestinationPath $dest -Force
-          }
+            $outdir = "extracted\$lower.$ver"
+            if (Test-Path $outdir) { Remove-Item $outdir -Recurse -Force }
+            New-Item -ItemType Directory -Force $outdir | Out-Null
+            Expand-Archive -Path $nupkg -DestinationPath $outdir -Force
 
-          function DumpbinHeaders([string]$dllPath) {
-            $txt = (dumpbin /nologo /headers $dllPath) 2>&1
-            $osLine = ($txt | Select-String -Pattern "operating system version" | Select-Object -First 1).ToString().Trim()
-            $ssLine = ($txt | Select-String -Pattern "subsystem version" | Select-Object -First 1).ToString().Trim()
-            return @{ osLine=$osLine; ssLine=$ssLine }
-          }
+            # find all native dlls in runtimes/win-*/native
+            $nativeDirs = Get-ChildItem -Path $outdir -Recurse -Directory |
+              Where-Object { $_.FullName -match "runtimes\\win-(x86|x64|arm64)\\native$" }
 
-          function ExtractPair([string]$line, [string]$kind) {
-            if (-not $line) { return $null }
-            if ($kind -eq "os" -and $line -match "(\d+)\.(\d+)\s+operating system version") { return "$($matches[1]).$($matches[2])" }
-            if ($kind -eq "ss" -and $line -match "(\d+)\.(\d+)\s+subsystem version") { return "$($matches[1]).$($matches[2])" }
-            return $null
-          }
+            foreach ($nd in $nativeDirs) {
+              $rid = ($nd.FullName -replace '.*runtimes\\', '' -replace '\\native$', '')
+              $dlls = Get-ChildItem -Path $nd.FullName -Filter *.dll -File
 
-          function PairToNum([string]$p) {
-            if (-not $p) { return -1 }
-            $a = $p.Split('.')
-            return ([int]$a[0]*1000 + [int]$a[1])
-          }
+              foreach ($d in $dlls) {
+                $pe = Get-PeHeaderInfo $d.FullName
+                $impText = Get-ImportsText $d.FullName
+                $guess = Guess-MinWinBuild $impText
 
-          function MaxPair([string[]]$pairs) {
-            $best = $null
-            $bestN = -1
-            foreach ($p in $pairs) {
-              if (-not $p) { continue }
-              $n = PairToNum $p
-              if ($n -gt $bestN) { $bestN = $n; $best = $p }
-            }
-            return $best
-          }
-
-          $MIN = $env:MIN_VERSION
-          $MAX = $env:MAX_VERSION
-
-          "package,version,runtime,dll,os_version_line,subsystem_version_line,os_pair,subsystem_pair" |
-            Out-File -Encoding UTF8 "results\windows_pe_details.csv"
-          "package,version,runtimes_count,dlls_count,worst_os_pair,worst_subsystem_pair,notes" |
-            Out-File -Encoding UTF8 "results\windows_pe_summary.csv"
-
-          foreach ($pkg in $packages) {
-            Write-Host "=============================="
-            Write-Host "PACKAGE: $pkg"
-            Write-Host "=============================="
-
-            $versions = GetVersionsInRange $pkg $MIN $MAX
-            Write-Host "Versions in range [$MIN,$MAX] => $($versions.Count)"
-            if ($versions.Count -eq 0) { continue }
-
-            foreach ($ver in $versions) {
-              Write-Host "---- $pkg $ver ----"
-
-              $nupkg = DownloadNupkg $pkg $ver
-              $dest = "extracted\$($pkg.ToLower()).$ver"
-              ExtractNupkg $nupkg $dest
-
-              $nativeDirs = Get-ChildItem -Path $dest -Recurse -Directory |
-                Where-Object { $_.FullName -match "runtimes\\win-[^\\]+\\native$" }
-
-              if (-not $nativeDirs) {
-                Add-Content "results\windows_pe_summary.csv" "$pkg,$ver,0,0,,,""NO_WIN_NATIVE"""
-                continue
+                $csv.Add(("{0},{1},{2},{3},{4},{5},{6},{7}" -f `
+                  $id, $ver, $rid, $d.Name, $pe.MinOS, ($pe.Subsystem -replace ',', ' '), $pe.SubsystemVer, ($guess -replace ',', ' ')))
               }
-
-              $rtSet = New-Object System.Collections.Generic.HashSet[string]
-              $osPairs = @()
-              $ssPairs = @()
-              $dllCount = 0
-
-              foreach ($nd in $nativeDirs) {
-                $runtime = ($nd.FullName -replace ".*runtimes\\(win-[^\\]+)\\native$",'$1')
-                [void]$rtSet.Add($runtime)
-
-                $dlls = Get-ChildItem -Path $nd.FullName -Filter *.dll -File
-                foreach ($dll in $dlls) {
-                  $dllCount++
-                  $h = DumpbinHeaders $dll.FullName
-                  $osPair = ExtractPair $h.osLine "os"
-                  $ssPair = ExtractPair $h.ssLine "ss"
-                  if ($osPair) { $osPairs += $osPair }
-                  if ($ssPair) { $ssPairs += $ssPair }
-
-                  Write-Host ("  dll: {0}\{1}  os='{2}'  ss='{3}'" -f $runtime, $dll.Name, $h.osLine, $h.ssLine)
-
-                  $osLine = ($h.osLine -replace ",",";")
-                  $ssLine = ($h.ssLine -replace ",",";")
-                  Add-Content "results\windows_pe_details.csv" "$pkg,$ver,$runtime,$($dll.Name),$osLine,$ssLine,$osPair,$ssPair"
-                }
-              }
-
-              $worstOs = MaxPair $osPairs
-              $worstSs = MaxPair $ssPairs
-              $note = ""
-              if ($worstSs -eq "10.0") { $note = "Subsystem=10.0 (Win10+)" }
-
-              Add-Content "results\windows_pe_summary.csv" "$pkg,$ver,$($rtSet.Count),$dllCount,$worstOs,$worstSs,""$note"""
-              Write-Host "SUMMARY: runtimes=$($rtSet.Count) dlls=$dllCount worst_os=$worstOs worst_ss=$worstSs $note"
             }
           }
 
-          Write-Host "=== DONE Windows ==="
-          Get-Content results\windows_pe_summary.csv -TotalCount 60
+          $csv | Out-File -Encoding UTF8 out\windows_min_details.csv
+          Write-Host "Wrote: out\windows_min_details.csv"
 
-      - name: Upload artifact (Windows)
+      - name: Upload Windows CSV
         uses: actions/upload-artifact@v4
         with:
-          name: ort_min_os_windows
-          path: |
-            results/windows_pe_summary.csv
-            results/windows_pe_details.csv
+          name: windows_min_details
+          path: out/windows_min_details.csv
+
+  macos_verify:
+    name: macOS - Microsoft.ML.OnnxRuntime (min macOS from Mach-O)
+    runs-on: macos-latest
+
+    steps:
+      - name: Prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p downloads extracted out
+
+      - name: Fetch versions list (NuGet flatcontainer)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ID="microsoft.ml.onnxruntime"
+          URL="https://api.nuget.org/v3-flatcontainer/${ID}/index.json"
+          echo "Fetch versions: $URL"
+          curl -L --fail -o out/versions_macos.json "$URL"
+
+      - name: Build verify list from input range
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          START="${{ inputs.start_version }}"
+          END="${{ inputs.end_version }}"
+
+          ver_le() { # a <= b
+            [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]
+          }
+          ver_ge() { # a >= b
+            [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+          }
+
+          jq -r '.versions[]' out/versions_macos.json > out/all_versions.txt
+
+          : > out/verify_macos_list.txt
+          while IFS= read -r v; do
+            if ver_le "$v" "$START" && ver_ge "$v" "$END"; then
+              echo "$v" >> out/verify_macos_list.txt
+            fi
+          done < out/all_versions.txt
+
+          echo "Verify versions count: $(wc -l < out/verify_macos_list.txt)"
+          head -n 20 out/verify_macos_list.txt || true
+
+      - name: Download & analyze (min macOS version)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PKG_ID="microsoft.ml.onnxruntime"
+          echo "package,version,runtimeRid,dylib_or_so,min_macos" > out/macos_min_details.csv
+
+          # Parse min macOS from Mach-O:
+          # Prefer LC_BUILD_VERSION (minos), fallback LC_VERSION_MIN_MACOSX
+          get_min_macos() {
+            local f="$1"
+            local min=""
+
+            # LC_BUILD_VERSION path
+            # otool -l prints:
+            #   cmd LC_BUILD_VERSION
+            #   ...
+            #   minos 10.15
+            #   sdk 13.3
+            min="$(otool -l "$f" 2>/dev/null | awk '
+              $1=="cmd" && $2=="LC_BUILD_VERSION" {in=1}
+              in==1 && $1=="minos" {print $2; exit}
+            ' || true)"
+
+            if [[ -z "$min" ]]; then
+              # LC_VERSION_MIN_MACOSX path:
+              #   cmd LC_VERSION_MIN_MACOSX
+              #   ...
+              #   version 10.14
+              min="$(otool -l "$f" 2>/dev/null | awk '
+                $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX" {in=1}
+                in==1 && $1=="version" {print $2; exit}
+              ' || true)"
+            fi
+
+            if [[ -z "$min" ]]; then
+              min="UNKNOWN"
+            fi
+            echo "$min"
+          }
+
+          while IFS= read -r ver; do
+            [[ -z "$ver" ]] && continue
+            echo "==== Microsoft.ML.OnnxRuntime $ver ===="
+
+            nupkg="downloads/${PKG_ID}.${ver}.nupkg"
+            url="https://api.nuget.org/v3-flatcontainer/${PKG_ID}/${ver}/${PKG_ID}.${ver}.nupkg"
+
+            if [[ ! -f "$nupkg" ]]; then
+              echo "Download: $url"
+              curl -L --fail -o "$nupkg" "$url"
+            else
+              echo "Skip download (cached): $nupkg"
+            fi
+
+            outdir="extracted/${PKG_ID}.${ver}"
+            rm -rf "$outdir"
+            mkdir -p "$outdir"
+            unzip -q "$nupkg" -d "$outdir"
+
+            # Collect dylib/so under runtimes/osx-*/native
+            # NOTE: macos runner default bash doesn't have `mapfile`, so use while-read.
+            dylibs=()
+            while IFS= read -r f; do
+              [[ -z "$f" ]] && continue
+              dylibs+=("$f")
+            done < <(find "$outdir" -type f \( -path "*/runtimes/osx-*/native/*.dylib" -o -path "*/runtimes/osx-*/native/*.so" \) 2>/dev/null || true)
+
+            if [[ ${#dylibs[@]} -eq 0 ]]; then
+              echo "No osx native dylib/so found for $ver (skip)"
+              continue
+            fi
+
+            for f in "${dylibs[@]}"; do
+              # rid: extract "osx-x86_64" or "osx-arm64" from path
+              rid="$(echo "$f" | sed -n 's#.*runtimes/\(osx-[^/]*\)/native/.*#\1#p')"
+              base="$(basename "$f")"
+              minos="$(get_min_macos "$f")"
+              echo "${PKG_ID},${ver},${rid},${base},${minos}" >> out/macos_min_details.csv
+            done
+
+          done < out/verify_macos_list.txt
+
+          echo "Wrote: out/macos_min_details.csv"
+          head -n 20 out/macos_min_details.csv || true
+
+      - name: Upload macOS CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos_min_details
+          path: out/macos_min_details.csv
