@@ -214,7 +214,7 @@ jobs:
             "    }",
             "",
             "    var map = BuildMap(winmdPath);",
-            "    Console.Error.WriteLine($\"[ApiMinWin] map size = {map.Count}\");",
+            "    Console.Error.WriteLine('[ApiMinWin] map size = $($map.Count)');", # 这里修改为插值形式
             "",
             "    Console.WriteLine('dll,func,minBuild,reason');",
             "    string? line;",
@@ -434,6 +434,7 @@ jobs:
 
           "$($winmd.FullName)" | Out-File -Encoding UTF8 "out\win32_winmd_path.txt"
           Write-Host "Saved winmd path to out\win32_winmd_path.txt"
+
 
 
 
