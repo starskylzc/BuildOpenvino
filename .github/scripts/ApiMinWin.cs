@@ -1,34 +1,34 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 
-class Program
+internal static class Program
 {
-    static void Main(string[] args)
+    // stdin:  dll,func
+    // stdout: dll,func,minBuild,reason
+    public static int Main(string[] args)
     {
         if (args.Length < 1)
         {
             Console.Error.WriteLine("Usage: ApiMinWin <path-to-Windows.Win32.winmd>");
-            Environment.Exit(2);
+            return 2;
         }
 
         var winmdPath = args[0];
         if (!File.Exists(winmdPath))
         {
-            Console.Error.WriteLine($"winmd not found: {winmdPath}");
-            Environment.Exit(2);
+            Console.Error.WriteLine("winmd not found: " + winmdPath);
+            return 2;
         }
 
         var map = BuildMap(winmdPath);
         Console.Error.WriteLine($"[ApiMinWin] map size = {map.Count}");
 
-        // Output header
         Console.WriteLine("dll,func,minBuild,reason");
 
-        string line;
+        string? line;
         while ((line = Console.ReadLine()) != null)
         {
             line = line.Trim();
@@ -47,62 +47,59 @@ class Program
             }
             else
             {
-                var alt = TryAltKeys(dll, func);
+                // Try A/W suffix fallback (CreateFileW -> CreateFile)
+                var alt = TryAltKey(dll, func);
                 if (alt != null && map.TryGetValue(alt, out v))
-                {
                     Console.WriteLine($"{dll},{Escape(func)},{v.minBuild},{Escape(v.reason)}");
-                }
                 else
-                {
                     Console.WriteLine($"{dll},{Escape(func)},,");
-                }
             }
         }
+
+        return 0;
     }
 
-    static string Escape(string s)
+    private static string Escape(string s)
     {
-        if (s.Contains(',') || s.Contains('"'))
+        if (s.IndexOf(',') >= 0 || s.IndexOf('"') >= 0)
             return "\"" + s.Replace("\"", "\"\"") + "\"";
         return s;
     }
 
-    static string? TryAltKeys(string dll, string func)
+    private static string? TryAltKey(string dll, string func)
     {
         if (func.Length > 1)
         {
-            char last = func[^1];
+            var last = func[^1];
             if (last == 'A' || last == 'W')
-            {
                 return dll + "!" + func.Substring(0, func.Length - 1);
-            }
         }
         return null;
     }
 
-    static Dictionary<string, (int minBuild, string reason)> BuildMap(string winmdPath)
+    private static Dictionary<string, (int minBuild, string reason)> BuildMap(string winmdPath)
     {
         using var fs = File.OpenRead(winmdPath);
         using var pe = new PEReader(fs);
         var md = pe.GetMetadataReader();
 
-        var dllImportType = "System.Runtime.InteropServices.DllImportAttribute";
-        var supportedType = "System.Runtime.Versioning.SupportedOSPlatformAttribute";
+        const string dllImportType = "System.Runtime.InteropServices.DllImportAttribute";
+        const string supportedType = "System.Runtime.Versioning.SupportedOSPlatformAttribute";
 
         var map = new Dictionary<string, (int, string)>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var typeHandle in md.TypeDefinitions)
         {
             var type = md.GetTypeDefinition(typeHandle);
-
             foreach (var methodHandle in type.GetMethods())
             {
                 var method = md.GetMethodDefinition(methodHandle);
 
                 string? dllName = null;
                 string? entryPoint = null;
+
                 int minBuild = 0;
-                string? minReason = null;
+                string reason = "";
 
                 foreach (var caHandle in method.GetCustomAttributes())
                 {
@@ -110,20 +107,20 @@ class Program
                     var attrName = GetAttributeTypeFullName(md, ca);
                     if (attrName == null) continue;
 
-                    if (attrName == dllImportType)
+                    if (attrName.Equals(dllImportType, StringComparison.Ordinal))
                     {
                         ReadDllImport(md, ca, out dllName, out entryPoint);
                     }
-                    else if (attrName == supportedType)
+                    else if (attrName.Equals(supportedType, StringComparison.Ordinal))
                     {
                         var plat = ReadSingleStringCtorArg(md, ca);
-                        if (plat != null)
+                        if (!string.IsNullOrWhiteSpace(plat))
                         {
                             var build = ExtractBuild(plat);
                             if (build > minBuild)
                             {
                                 minBuild = build;
-                                minReason = plat;
+                                reason = plat!;
                             }
                         }
                     }
@@ -137,71 +134,85 @@ class Program
 
                 var key = dllLower + "!" + ep;
                 if (!map.TryGetValue(key, out var existing) || minBuild > existing.minBuild)
-                {
-                    var reason = minReason ?? "";
                     map[key] = (minBuild, reason);
-                }
             }
         }
 
         return map;
     }
 
-    static int ExtractBuild(string s)
+    // Parse "windows10.0.19041" etc -> 19041
+    private static int ExtractBuild(string s)
     {
+        // Most Windows SDK strings look like "windows10.0.19041" or "Windows10.0.18362"
         var parts = s.Split('.', StringSplitOptions.RemoveEmptyEntries);
         foreach (var p in parts)
         {
-            if (int.TryParse(p, out int v) && v >= 10000) return v;
+            if (int.TryParse(p, out var v) && v >= 10000)
+                return v;
         }
         return 0;
     }
 
-    static string? ReadSingleStringCtorArg(MetadataReader md, CustomAttribute ca)
+    private static string? ReadSingleStringCtorArg(MetadataReader md, CustomAttribute ca)
     {
-        var value = ca.Value;
-        var blob = md.GetBlobReader(value);
+        var blob = md.GetBlobReader(ca.Value);
+
+        // Prolog 0x0001
         if (blob.ReadUInt16() != 1) return null;
+
         return blob.ReadSerializedString();
     }
 
-    static void ReadDllImport(MetadataReader md, CustomAttribute ca, out string? dllName, out string? entryPoint)
+    private static void ReadDllImport(
+        MetadataReader md,
+        CustomAttribute ca,
+        out string? dllName,
+        out string? entryPoint)
     {
         dllName = null;
         entryPoint = null;
 
         var blob = md.GetBlobReader(ca.Value);
+
+        // Prolog 0x0001
         if (blob.ReadUInt16() != 1) return;
 
+        // ctor arg: dll name
         dllName = blob.ReadSerializedString();
 
+        // named arguments count
         if (blob.Offset >= blob.Length) return;
-
         ushort numNamed = blob.ReadUInt16();
+
         for (int i = 0; i < numNamed; i++)
         {
-            byte kind = blob.ReadByte(); 
-            byte type = blob.ReadByte(); 
+            // FIELD(0x53)/PROPERTY(0x54)
+            blob.ReadByte();
+
+            // element type
+            byte et = blob.ReadByte();
+
+            // name
             string? name = blob.ReadSerializedString();
-            object? val = ReadFixedArg(md, ref blob, type);
+
+            object? val = ReadFixedArg(ref blob, et);
             if (name != null && name.Equals("EntryPoint", StringComparison.OrdinalIgnoreCase))
-            {
                 entryPoint = val as string;
-            }
         }
     }
 
-    static object? ReadFixedArg(MetadataReader md, ref BlobReader blob, byte et)
+    private static object? ReadFixedArg(ref BlobReader blob, byte et)
     {
-        if (et == 0x0E)
-        {
-            return blob.ReadSerializedString();
-        }
+        // 0x0E = string
+        if (et == 0x0E) return blob.ReadSerializedString();
+
+        // For our purpose, we only care strings; skip everything else
         SkipFixedArg(ref blob, et);
         return null;
     }
 
-    static void SkipFixedArg(ref BlobReader blob, byte et)
+    private static void SkipFixedArg(ref BlobReader blob, byte et)
     {
         switch (et)
         {
@@ -216,14 +227,17 @@ class Program
             case 0x0A: blob.ReadUInt64(); break;
             case 0x0B: blob.ReadSingle(); break;
             case 0x0C: blob.ReadDouble(); break;
-            case 0x0E: blob.ReadSerializedString(); break;
-            default: break;
+            case 0x0E: blob.ReadSerializedString(); break; // string
+            default:
+                // Unknown/unsupported: best-effort no-op
+                break;
         }
     }
 
-    static string? GetAttributeTypeFullName(MetadataReader md, CustomAttribute ca)
+    private static string? GetAttributeTypeFullName(MetadataReader md, CustomAttribute ca)
     {
         EntityHandle ctor = ca.Constructor;
+
         StringHandle nameHandle;
         StringHandle nsHandle;
 
@@ -231,6 +245,7 @@ class Program
         {
             var mr = md.GetMemberReference((MemberReferenceHandle)ctor);
             var parent = mr.Parent;
+
             if (parent.Kind == HandleKind.TypeReference)
             {
                 var tr = md.GetTypeReference((TypeReferenceHandle)parent);
@@ -243,7 +258,10 @@ class Program
                 nameHandle = td.Name;
                 nsHandle = td.Namespace;
             }
-            else return null;
+            else
+            {
+                return null;
+            }
         }
         else if (ctor.Kind == HandleKind.MethodDefinition)
         {
@@ -252,10 +270,14 @@ class Program
             nameHandle = td.Name;
             nsHandle = td.Namespace;
         }
-        else return null;
+        else
+        {
+            return null;
+        }
 
         var name = md.GetString(nameHandle);
         var ns = md.GetString(nsHandle);
+
         if (string.IsNullOrEmpty(ns)) return name;
         return ns + "." + name;
     }
