@@ -47,7 +47,6 @@ internal static class Program
             }
             else
             {
-                // Try A/W suffix fallback (CreateFileW -> CreateFile)
                 var alt = TryAltKey(dll, func);
                 if (alt != null && map.TryGetValue(alt, out v))
                     Console.WriteLine($"{dll},{Escape(func)},{v.minBuild},{Escape(v.reason)}");
@@ -116,7 +115,7 @@ internal static class Program
                         var plat = ReadSingleStringCtorArg(md, ca);
                         if (!string.IsNullOrWhiteSpace(plat))
                         {
-                            var build = ExtractBuild(plat);
+                            var build = ExtractBuild(plat!);
                             if (build > minBuild)
                             {
                                 minBuild = build;
@@ -144,7 +143,6 @@ internal static class Program
     // Parse "windows10.0.19041" etc -> 19041
     private static int ExtractBuild(string s)
     {
-        // Most Windows SDK strings look like "windows10.0.19041" or "Windows10.0.18362"
         var parts = s.Split('.', StringSplitOptions.RemoveEmptyEntries);
         foreach (var p in parts)
         {
@@ -157,10 +155,7 @@ internal static class Program
     private static string? ReadSingleStringCtorArg(MetadataReader md, CustomAttribute ca)
     {
         var blob = md.GetBlobReader(ca.Value);
-
-        // Prolog 0x0001
-        if (blob.ReadUInt16() != 1) return null;
-
+        if (blob.ReadUInt16() != 1) return null; // prolog
         return blob.ReadSerializedString();
     }
 
@@ -174,28 +169,18 @@ internal static class Program
         entryPoint = null;
 
         var blob = md.GetBlobReader(ca.Value);
+        if (blob.ReadUInt16() != 1) return; // prolog
 
-        // Prolog 0x0001
-        if (blob.ReadUInt16() != 1) return;
-
-        // ctor arg: dll name
         dllName = blob.ReadSerializedString();
 
-        // named arguments count
         if (blob.Offset >= blob.Length) return;
         ushort numNamed = blob.ReadUInt16();
 
         for (int i = 0; i < numNamed; i++)
         {
-            // FIELD(0x53)/PROPERTY(0x54)
-            blob.ReadByte();
-
-            // element type
-            byte et = blob.ReadByte();
-
-            // name
+            blob.ReadByte();        // field/property kind
+            byte et = blob.ReadByte(); // element type
             string? name = blob.ReadSerializedString();
-
             object? val = ReadFixedArg(ref blob, et);
             if (name != null && name.Equals("EntryPoint", StringComparison.OrdinalIgnoreCase))
                 entryPoint = val as string;
@@ -204,10 +189,7 @@ internal static class Program
 
     private static object? ReadFixedArg(ref BlobReader blob, byte et)
     {
-        // 0x0E = string
-        if (et == 0x0E) return blob.ReadSerializedString();
-
-        // For our purpose, we only care strings; skip everything else
+        if (et == 0x0E) return blob.ReadSerializedString(); // string
         SkipFixedArg(ref blob, et);
         return null;
     }
@@ -227,10 +209,8 @@ internal static class Program
             case 0x0A: blob.ReadUInt64(); break;
             case 0x0B: blob.ReadSingle(); break;
             case 0x0C: blob.ReadDouble(); break;
-            case 0x0E: blob.ReadSerializedString(); break; // string
-            default:
-                // Unknown/unsupported: best-effort no-op
-                break;
+            case 0x0E: blob.ReadSerializedString(); break;
+            default: break;
         }
     }
 
@@ -258,10 +238,7 @@ internal static class Program
                 nameHandle = td.Name;
                 nsHandle = td.Namespace;
             }
-            else
-            {
-                return null;
-            }
+            else return null;
         }
         else if (ctor.Kind == HandleKind.MethodDefinition)
         {
@@ -270,15 +247,10 @@ internal static class Program
             nameHandle = td.Name;
             nsHandle = td.Namespace;
         }
-        else
-        {
-            return null;
-        }
+        else return null;
 
         var name = md.GetString(nameHandle);
         var ns = md.GetString(nsHandle);
-
-        if (string.IsNullOrEmpty(ns)) return name;
-        return ns + "." + name;
+        return string.IsNullOrEmpty(ns) ? name : ns + "." + name;
     }
 }
