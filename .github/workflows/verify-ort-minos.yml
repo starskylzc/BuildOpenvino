@@ -1,4 +1,4 @@
-name: Verify ORT NuGet Min OS (native-only)
+name: Verify ORT NuGet Min OS (native-only, no-python)
 
 on:
   workflow_dispatch:
@@ -6,234 +6,205 @@ on:
       min_version:
         description: "Min version (inclusive)"
         required: true
-        default: "1.16.0"
+        default: "1.16.3"
       max_version:
         description: "Max version (inclusive)"
         required: true
-        default: "1.23.2"
+        default: "1.21.1"
 
 jobs:
   macos_verify:
-    name: macOS min version from dylib headers (otool)
+    name: macOS min version (otool)
     runs-on: macos-latest
     steps:
-      - name: Prepare folders
+      - name: Prepare
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p downloads extracted results
-          echo "Runner macOS: $(sw_vers | tr '\n' ' ')"
+          echo "Runner: $(sw_vers | tr '\n' ' ')"
 
-      - name: Write verifier script (macOS)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cat > verify_macos.py <<'PY'
-          import csv
-          import json
-          import os
-          import re
-          import shutil
-          import subprocess
-          import sys
-          import urllib.request
-          import zipfile
-          from pathlib import Path
-
-          PACKAGES = [
-              "Microsoft.ML.OnnxRuntime",
-              "Microsoft.ML.OnnxRuntime.Gpu",
-              "Microsoft.ML.OnnxRuntime.DirectML",
-          ]
-
-          MIN = os.environ.get("MIN_VERSION", "1.16.3")
-          MAX = os.environ.get("MAX_VERSION", "1.21.1")
-
-          downloads = Path("downloads")
-          extracted = Path("extracted")
-          results = Path("results")
-          downloads.mkdir(parents=True, exist_ok=True)
-          extracted.mkdir(parents=True, exist_ok=True)
-          results.mkdir(parents=True, exist_ok=True)
-
-          def parse_semver_3(s: str):
-              # Accept only stable "x.y.z"
-              if not re.match(r"^\d+\.\d+\.\d+$", s):
-                  return None
-              a,b,c = s.split(".")
-              return (int(a), int(b), int(c))
-
-          def semver_cmp(a, b):
-              return (a > b) - (a < b)
-
-          def in_range(v, vmin, vmax):
-              return semver_cmp(v, vmin) >= 0 and semver_cmp(v, vmax) <= 0
-
-          V_MIN = parse_semver_3(MIN)
-          V_MAX = parse_semver_3(MAX)
-          if V_MIN is None or V_MAX is None:
-              raise SystemExit(f"MIN/MAX must be x.y.z stable versions. Got MIN={MIN}, MAX={MAX}")
-
-          def fetch_json(url: str):
-              with urllib.request.urlopen(url) as r:
-                  return json.loads(r.read().decode("utf-8"))
-
-          def download_file(url: str, out: Path):
-              if out.exists() and out.stat().st_size > 0:
-                  return
-              with urllib.request.urlopen(url) as r:
-                  out.write_bytes(r.read())
-
-          def nuget_index_url(pkg: str) -> str:
-              return f"https://api.nuget.org/v3-flatcontainer/{pkg.lower()}/index.json"
-
-          def nuget_nupkg_url(pkg: str, ver: str) -> str:
-              p = pkg.lower()
-              return f"https://api.nuget.org/v3-flatcontainer/{p}/{ver}/{p}.{ver}.nupkg"
-
-          def list_existing_versions_in_range(pkg: str):
-              idx = fetch_json(nuget_index_url(pkg))
-              out = []
-              for s in idx.get("versions", []):
-                  v = parse_semver_3(s)
-                  if v is None:
-                      continue
-                  if in_range(v, V_MIN, V_MAX):
-                      out.append(s)
-              out.sort(key=lambda x: parse_semver_3(x), reverse=True)
-              return out
-
-          def otool_min_macos(dylib: Path):
-              try:
-                  out = subprocess.check_output(["otool", "-l", str(dylib)], text=True, errors="replace")
-              except Exception:
-                  return ("UNKNOWN", "OToolFailed")
-
-              # Prefer LC_BUILD_VERSION -> minos
-              in_block = False
-              for line in out.splitlines():
-                  line = line.strip()
-                  if line.startswith("cmd ") and "LC_BUILD_VERSION" in line:
-                      in_block = True
-                      continue
-                  if in_block and line.startswith("minos "):
-                      return (line.split()[1].strip(), "LC_BUILD_VERSION")
-                  if in_block and line.startswith("cmd "):
-                      in_block = False
-
-              # Fallback LC_VERSION_MIN_MACOSX -> version
-              in_block = False
-              for line in out.splitlines():
-                  line = line.strip()
-                  if line.startswith("cmd ") and "LC_VERSION_MIN_MACOSX" in line:
-                      in_block = True
-                      continue
-                  if in_block and line.startswith("version "):
-                      return (line.split()[1].strip(), "LC_VERSION_MIN_MACOSX")
-                  if in_block and line.startswith("cmd "):
-                      in_block = False
-
-              return ("UNKNOWN", "NO_MIN_TAG")
-
-          def parse_macos_tuple(s: str):
-              if not s or s in ("UNKNOWN", "N/A"):
-                  return None
-              parts = s.split(".")
-              try:
-                  nums = [int(x) for x in parts[:3]]
-                  while len(nums) < 3:
-                      nums.append(0)
-                  return tuple(nums)
-              except:
-                  return None
-
-          def fmt_tuple(t):
-              if t is None:
-                  return "UNKNOWN"
-              return f"{t[0]}.{t[1]}.{t[2]}"
-
-          detail_csv = results / "macos_min_details.csv"
-          summ_csv   = results / "macos_min_summary.csv"
-
-          with detail_csv.open("w", newline="", encoding="utf-8") as f:
-              w = csv.writer(f)
-              w.writerow(["package","version","runtime","library","min_macos","tag"])
-
-          with summ_csv.open("w", newline="", encoding="utf-8") as f:
-              w = csv.writer(f)
-              w.writerow(["package","version","worst_min_macos","libs_count","runtimes_count","notes"])
-
-          for pkg in PACKAGES:
-              vers = list_existing_versions_in_range(pkg)
-              print(f"== {pkg}: versions in [{MIN},{MAX}] => {len(vers)}")
-              if not vers:
-                  continue
-
-              for ver in vers:
-                  nupkg = downloads / f"{pkg.lower()}.{ver}.nupkg"
-                  try:
-                      download_file(nuget_nupkg_url(pkg, ver), nupkg)
-                  except Exception as e:
-                      with summ_csv.open("a", newline="", encoding="utf-8") as f:
-                          csv.writer(f).writerow([pkg, ver, "UNKNOWN", 0, 0, "DOWNLOAD_FAIL"])
-                      print(f"DOWNLOAD_FAIL {pkg} {ver}: {e}")
-                      continue
-
-                  outdir = extracted / f"{pkg.lower()}.{ver}"
-                  shutil.rmtree(outdir, ignore_errors=True)
-                  outdir.mkdir(parents=True, exist_ok=True)
-
-                  try:
-                      with zipfile.ZipFile(nupkg, "r") as z:
-                          z.extractall(outdir)
-                  except Exception as e:
-                      with summ_csv.open("a", newline="", encoding="utf-8") as f:
-                          csv.writer(f).writerow([pkg, ver, "UNKNOWN", 0, 0, "EXTRACT_FAIL"])
-                      print(f"EXTRACT_FAIL {pkg} {ver}: {e}")
-                      continue
-
-                  dylibs = list(outdir.glob("**/runtimes/osx-*/native/*.dylib"))
-                  dylibs += list(outdir.glob("**/runtimes/osx-*/native/*.so"))
-
-                  if not dylibs:
-                      with summ_csv.open("a", newline="", encoding="utf-8") as f:
-                          csv.writer(f).writerow([pkg, ver, "N/A", 0, 0, "NO_OSX_NATIVE"])
-                      continue
-
-                  runtimes = set()
-                  mins = []
-
-                  for d in dylibs:
-                      m, tag = otool_min_macos(d)
-                      m_rt = re.search(r"runtimes/(osx-[^/]+)/native", str(d).replace("\\","/"))
-                      rt = m_rt.group(1) if m_rt else "UNKNOWN"
-                      runtimes.add(rt)
-
-                      with detail_csv.open("a", newline="", encoding="utf-8") as f:
-                          csv.writer(f).writerow([pkg, ver, rt, d.name, m, tag])
-
-                      t = parse_macos_tuple(m)
-                      if t:
-                          mins.append(t)
-
-                  worst = max(mins) if mins else None
-                  note = ">=13.3" if (worst and worst >= (13,3,0)) else ""
-                  with summ_csv.open("a", newline="", encoding="utf-8") as f:
-                      csv.writer(f).writerow([pkg, ver, fmt_tuple(worst), len(dylibs), len(runtimes), note])
-
-          print("DONE macOS.")
-          PY
-
-      - name: Run verifier (macOS)
+      - name: Verify macOS dylibs (no python)
         shell: bash
         env:
           MIN_VERSION: ${{ github.event.inputs.min_version }}
           MAX_VERSION: ${{ github.event.inputs.max_version }}
         run: |
           set -euxo pipefail
-          python3 verify_macos.py
-          echo "==== macos_min_summary.csv (head) ===="
-          head -n 80 results/macos_min_summary.csv || true
+
+          PACKAGES=(
+            "Microsoft.ML.OnnxRuntime"
+            "Microsoft.ML.OnnxRuntime.Gpu"
+            "Microsoft.ML.OnnxRuntime.DirectML"
+            "Microsoft.ML.OnnxRuntime.Gpu.Windows"
+          )
+
+          # ---- helpers ----
+          ver_to_num () {
+            # "1.21.1" -> 001021001 (lexical comparable)
+            local v="$1"
+            IFS='.' read -r a b c <<<"$v"
+            printf "%03d%03d%03d" "$a" "$b" "$c"
+          }
+
+          in_range () {
+            local v="$1"
+            local min="$2"
+            local max="$3"
+            local vn mn mx
+            vn="$(ver_to_num "$v")"
+            mn="$(ver_to_num "$min")"
+            mx="$(ver_to_num "$max")"
+            [[ "$vn" -ge "$mn" && "$vn" -le "$mx" ]]
+          }
+
+          list_versions () {
+            # prints sorted desc stable versions within range
+            local pkg_lc="$1"
+            local idx_url="https://api.nuget.org/v3-flatcontainer/${pkg_lc}/index.json"
+
+            echo ">>> Fetch versions: $idx_url"
+            curl -L --fail -o "downloads/${pkg_lc}.index.json" "$idx_url"
+
+            # extract "x.y.z" (ignore prerelease)
+            # then filter in range and sort desc numeric
+            grep -Eo '"[0-9]+\.[0-9]+\.[0-9]+"' "downloads/${pkg_lc}.index.json" \
+              | tr -d '"' \
+              | while read -r v; do
+                  if in_range "$v" "$MIN_VERSION" "$MAX_VERSION"; then
+                    echo "$(ver_to_num "$v") $v"
+                  fi
+                done \
+              | sort -r \
+              | awk '{print $2}'
+          }
+
+          get_min_macos () {
+            # returns "min|TAG"
+            local dylib="$1"
+            local min=""
+            # LC_BUILD_VERSION -> minos
+            min="$(otool -l "$dylib" | awk '
+              $1=="cmd" && $2=="LC_BUILD_VERSION"{in=1}
+              in==1 && $1=="minos"{print $2; exit}
+            ')"
+            if [[ -n "$min" ]]; then
+              echo "${min}|LC_BUILD_VERSION"
+              return 0
+            fi
+
+            # LC_VERSION_MIN_MACOSX -> version
+            min="$(otool -l "$dylib" | awk '
+              $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX"{in=1}
+              in==1 && $1=="version"{print $2; exit}
+            ')"
+            if [[ -n "$min" ]]; then
+              echo "${min}|LC_VERSION_MIN_MACOSX"
+              return 0
+            fi
+
+            echo "UNKNOWN|NONE"
+          }
+
+          macos_to_num () {
+            # "13.3" -> 013003000 ; "10.15.7" -> 010015007
+            local s="$1"
+            if [[ "$s" == "UNKNOWN" || "$s" == "N/A" || -z "$s" ]]; then
+              echo ""
+              return 0
+            fi
+            IFS='.' read -r a b c <<<"$s"
+            c="${c:-0}"
+            printf "%03d%03d%03d" "$a" "$b" "$c"
+          }
+
+          # ---- outputs ----
+          echo "package,version,runtime,library,min_macos,tag" > results/macos_min_details.csv
+          echo "package,version,worst_min_macos,libs_count,runtimes_count,notes" > results/macos_min_summary.csv
+
+          for pkg in "${PACKAGES[@]}"; do
+            pkg_lc="$(echo "$pkg" | tr '[:upper:]' '[:lower:]')"
+            echo "=============================="
+            echo "PACKAGE: $pkg"
+            echo "=============================="
+
+            versions="$(list_versions "$pkg_lc" || true)"
+            if [[ -z "${versions}" ]]; then
+              echo "WARN: No versions found in range for $pkg"
+              continue
+            fi
+
+            while read -r ver; do
+              [[ -z "$ver" ]] && continue
+              echo "---- $pkg $ver ----"
+
+              nupkg="downloads/${pkg_lc}.${ver}.nupkg"
+              url="https://api.nuget.org/v3-flatcontainer/${pkg_lc}/${ver}/${pkg_lc}.${ver}.nupkg"
+
+              echo "Download: $url"
+              curl -L --fail -o "$nupkg" "$url"
+
+              outdir="extracted/${pkg_lc}.${ver}"
+              rm -rf "$outdir"
+              mkdir -p "$outdir"
+              unzip -q "$nupkg" -d "$outdir"
+
+              # find dylibs
+              mapfile -t dylibs < <(find "$outdir" -type f \( -path "*/runtimes/osx-*/native/*.dylib" -o -path "*/runtimes/osx-*/native/*.so" \) 2>/dev/null || true)
+
+              if [[ "${#dylibs[@]}" -eq 0 ]]; then
+                echo "NO_OSX_NATIVE"
+                echo "${pkg},${ver},N/A,0,0,NO_OSX_NATIVE" >> results/macos_min_summary.csv
+                continue
+              fi
+
+              worst_num=""
+              worst_txt="UNKNOWN"
+              libs_count=0
+              runtimes_set=""
+
+              for d in "${dylibs[@]}"; do
+                libs_count=$((libs_count+1))
+                rt="$(echo "$d" | sed -n 's|.*runtimes/\(osx-[^/]*\)/native/.*|\1|p')"
+                lib="$(basename "$d")"
+                min_tag="$(get_min_macos "$d")"
+                min="${min_tag%%|*}"
+                tag="${min_tag##*|}"
+
+                echo "  dylib: $rt/$lib -> min_macos=$min ($tag)"
+                echo "${pkg},${ver},${rt},${lib},${min},${tag}" >> results/macos_min_details.csv
+
+                # track runtimes
+                if [[ "$runtimes_set" != *"|$rt|"* ]]; then
+                  runtimes_set="${runtimes_set}|$rt|"
+                fi
+
+                num="$(macos_to_num "$min")"
+                if [[ -n "$num" ]]; then
+                  if [[ -z "$worst_num" || "$num" -gt "$worst_num" ]]; then
+                    worst_num="$num"
+                    # normalize to a.b.c
+                    IFS='.' read -r a b c <<<"$min"
+                    c="${c:-0}"
+                    worst_txt="${a}.${b}.${c}"
+                  fi
+                fi
+              done
+
+              runtimes_count="$(echo "$runtimes_set" | tr '|' '\n' | grep -E '^osx-' | wc -l | tr -d ' ')"
+              notes=""
+              if [[ -n "$worst_num" && "$worst_num" -ge "$(macos_to_num "13.3.0")" ]]; then
+                notes=">=13.3"
+              fi
+
+              echo "SUMMARY: worst_min_macos=$worst_txt libs=$libs_count runtimes=$runtimes_count notes=$notes"
+              echo "${pkg},${ver},${worst_txt},${libs_count},${runtimes_count},${notes}" >> results/macos_min_summary.csv
+
+            done <<< "$versions"
+          done
+
+          echo "=== DONE macOS ==="
+          head -n 50 results/macos_min_summary.csv || true
 
       - name: Upload artifact (macOS)
         uses: actions/upload-artifact@v4
@@ -244,10 +215,10 @@ jobs:
             results/macos_min_details.csv
 
   windows_verify:
-    name: Windows OS/SubSystem version from PE headers (dumpbin)
+    name: Windows min OS from PE headers (dumpbin)
     runs-on: windows-latest
     steps:
-      - name: Prepare folders
+      - name: Prepare
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force downloads, extracted, results | Out-Null
@@ -255,14 +226,14 @@ jobs:
       - name: Setup MSVC (dumpbin)
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Verify (Windows)
+      - name: Verify Windows DLLs (no python)
         shell: pwsh
+        env:
+          MIN_VERSION: ${{ github.event.inputs.min_version }}
+          MAX_VERSION: ${{ github.event.inputs.max_version }}
         run: |
           $ErrorActionPreference = "Stop"
           $ProgressPreference = "SilentlyContinue"
-
-          $MIN = "${{ github.event.inputs.min_version }}"
-          $MAX = "${{ github.event.inputs.max_version }}"
 
           $packages = @(
             "Microsoft.ML.OnnxRuntime",
@@ -275,109 +246,116 @@ jobs:
             return $null
           }
 
-          function Compare-Ver([string]$a, [string]$b) {
-            $pa = $a.Split('.') | ForEach-Object { [int]$_ }
-            $pb = $b.Split('.') | ForEach-Object { [int]$_ }
-            for ($i=0; $i -lt 3; $i++) {
-              if ($pa[$i] -lt $pb[$i]) { return -1 }
-              if ($pa[$i] -gt $pb[$i]) { return 1 }
-            }
-            return 0
+          function VerToNum([string]$v) {
+            $p = $v.Split('.')
+            return ([int]$p[0]*1000000 + [int]$p[1]*1000 + [int]$p[2])
           }
 
-          function In-Range([string]$v, [string]$min, [string]$max) {
-            return ((Compare-Ver $v $min) -ge 0) -and ((Compare-Ver $v $max) -le 0)
+          function InRange([string]$v, [string]$min, [string]$max) {
+            $vn = VerToNum $v
+            $mn = VerToNum $min
+            $mx = VerToNum $max
+            return ($vn -ge $mn) -and ($vn -le $mx)
           }
 
-          function Get-IndexJson([string]$pkg) {
+          function GetVersionsInRange([string]$pkg, [string]$min, [string]$max) {
             $id = $pkg.ToLower()
             $url = "https://api.nuget.org/v3-flatcontainer/$id/index.json"
-            (Invoke-RestMethod -Uri $url).versions
+            Write-Host ">>> Fetch versions: $url"
+            $idx = Invoke-RestMethod -Uri $url
+            $vers = @()
+            foreach ($s in $idx.versions) {
+              $v = Parse-SemVer3 $s
+              if ($null -eq $v) { continue }
+              if (InRange $v $min $max) { $vers += $v }
+            }
+            $vers | Sort-Object { VerToNum $_ } -Descending
           }
 
-          function Download-Nupkg([string]$pkg, [string]$ver) {
+          function DownloadNupkg([string]$pkg, [string]$ver) {
             $id = $pkg.ToLower()
             $url = "https://api.nuget.org/v3-flatcontainer/$id/$ver/$id.$ver.nupkg"
             $out = "downloads\$id.$ver.nupkg"
             if (-not (Test-Path $out)) {
+              Write-Host "Download: $url"
               Invoke-WebRequest -Uri $url -OutFile $out
             }
             return $out
           }
 
-          function Extract-Nupkg([string]$nupkg, [string]$dest) {
+          function ExtractNupkg([string]$nupkg, [string]$dest) {
             if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
             New-Item -ItemType Directory -Force $dest | Out-Null
             Expand-Archive -Path $nupkg -DestinationPath $dest -Force
           }
 
-          function Dumpbin-Versions([string]$dllPath) {
+          function DumpbinHeaders([string]$dllPath) {
             $txt = (dumpbin /nologo /headers $dllPath) 2>&1
             $osLine = ($txt | Select-String -Pattern "operating system version" | Select-Object -First 1).ToString().Trim()
             $ssLine = ($txt | Select-String -Pattern "subsystem version" | Select-Object -First 1).ToString().Trim()
             return @{ osLine=$osLine; ssLine=$ssLine }
           }
 
-          function Extract-Pair([string]$line, [string]$kind) {
+          function ExtractPair([string]$line, [string]$kind) {
             if (-not $line) { return $null }
-            if ($kind -eq "os" -and $line -match "(\d+)\.(\d+)\s+operating system version") { return "{0}.{1}" -f $matches[1], $matches[2] }
-            if ($kind -eq "ss" -and $line -match "(\d+)\.(\d+)\s+subsystem version") { return "{0}.{1}" -f $matches[1], $matches[2] }
+            if ($kind -eq "os" -and $line -match "(\d+)\.(\d+)\s+operating system version") { return "$($matches[1]).$($matches[2])" }
+            if ($kind -eq "ss" -and $line -match "(\d+)\.(\d+)\s+subsystem version") { return "$($matches[1]).$($matches[2])" }
             return $null
           }
 
-          function Max-Pair([string[]]$pairs) {
+          function PairToNum([string]$p) {
+            if (-not $p) { return -1 }
+            $a = $p.Split('.')
+            return ([int]$a[0]*1000 + [int]$a[1])
+          }
+
+          function MaxPair([string[]]$pairs) {
             $best = $null
+            $bestN = -1
             foreach ($p in $pairs) {
               if (-not $p) { continue }
-              $a = $p.Split('.') | ForEach-Object { [int]$_ }
-              if (-not $best) { $best = $p; continue }
-              $b = $best.Split('.') | ForEach-Object { [int]$_ }
-              if ($a[0] -gt $b[0] -or ($a[0] -eq $b[0] -and $a[1] -gt $b[1])) { $best = $p }
+              $n = PairToNum $p
+              if ($n -gt $bestN) { $bestN = $n; $best = $p }
             }
             return $best
           }
 
-          $detail = "results\windows_pe_details.csv"
-          $summ   = "results\windows_pe_summary.csv"
-          "package,version,runtime,dll,os_version_line,subsystem_version_line,os_pair,subsystem_pair" | Out-File -Encoding UTF8 $detail
-          "package,version,runtimes_count,dlls_count,worst_os_pair,worst_subsystem_pair,notes" | Out-File -Encoding UTF8 $summ
+          $MIN = $env:MIN_VERSION
+          $MAX = $env:MAX_VERSION
+
+          "package,version,runtime,dll,os_version_line,subsystem_version_line,os_pair,subsystem_pair" |
+            Out-File -Encoding UTF8 "results\windows_pe_details.csv"
+          "package,version,runtimes_count,dlls_count,worst_os_pair,worst_subsystem_pair,notes" |
+            Out-File -Encoding UTF8 "results\windows_pe_summary.csv"
 
           foreach ($pkg in $packages) {
-            Write-Host "== $pkg =="
+            Write-Host "=============================="
+            Write-Host "PACKAGE: $pkg"
+            Write-Host "=============================="
 
-            $all = Get-IndexJson $pkg
-            $vers = @()
-            foreach ($s in $all) {
-              $v = Parse-SemVer3 $s
-              if ($null -eq $v) { continue }
-              if (In-Range $v $MIN $MAX) { $vers += $v }
-            }
+            $versions = GetVersionsInRange $pkg $MIN $MAX
+            Write-Host "Versions in range [$MIN,$MAX] => $($versions.Count)"
+            if ($versions.Count -eq 0) { continue }
 
-            $vers = $vers | Sort-Object {
-              $p = $_.Split('.') | ForEach-Object { [int]$_ }
-              ($p[0]*1000000 + $p[1]*1000 + $p[2])
-            } -Descending
+            foreach ($ver in $versions) {
+              Write-Host "---- $pkg $ver ----"
 
-            Write-Host "Versions in range [$MIN,$MAX] => $($vers.Count)"
-            if ($vers.Count -eq 0) { continue }
-
-            foreach ($ver in $vers) {
-              $nupkg = Download-Nupkg $pkg $ver
+              $nupkg = DownloadNupkg $pkg $ver
               $dest = "extracted\$($pkg.ToLower()).$ver"
-              Extract-Nupkg $nupkg $dest
+              ExtractNupkg $nupkg $dest
 
               $nativeDirs = Get-ChildItem -Path $dest -Recurse -Directory |
                 Where-Object { $_.FullName -match "runtimes\\win-[^\\]+\\native$" }
 
               if (-not $nativeDirs) {
-                Add-Content $summ "$pkg,$ver,0,0,,,""NO_WIN_NATIVE"""
+                Add-Content "results\windows_pe_summary.csv" "$pkg,$ver,0,0,,,""NO_WIN_NATIVE"""
                 continue
               }
 
+              $rtSet = New-Object System.Collections.Generic.HashSet[string]
               $osPairs = @()
               $ssPairs = @()
               $dllCount = 0
-              $rtSet = New-Object System.Collections.Generic.HashSet[string]
 
               foreach ($nd in $nativeDirs) {
                 $runtime = ($nd.FullName -replace ".*runtimes\\(win-[^\\]+)\\native$",'$1')
@@ -386,34 +364,32 @@ jobs:
                 $dlls = Get-ChildItem -Path $nd.FullName -Filter *.dll -File
                 foreach ($dll in $dlls) {
                   $dllCount++
-
-                  $vinfo = Dumpbin-Versions $dll.FullName
-                  $osPair = Extract-Pair $vinfo.osLine "os"
-                  $ssPair = Extract-Pair $vinfo.ssLine "ss"
+                  $h = DumpbinHeaders $dll.FullName
+                  $osPair = ExtractPair $h.osLine "os"
+                  $ssPair = ExtractPair $h.ssLine "ss"
                   if ($osPair) { $osPairs += $osPair }
                   if ($ssPair) { $ssPairs += $ssPair }
 
-                  $osLine = ($vinfo.osLine -replace ",",";")
-                  $ssLine = ($vinfo.ssLine -replace ",",";")
+                  Write-Host ("  dll: {0}\{1}  os='{2}'  ss='{3}'" -f $runtime, $dll.Name, $h.osLine, $h.ssLine)
 
-                  Add-Content $detail "$pkg,$ver,$runtime,$($dll.Name),$osLine,$ssLine,$osPair,$ssPair"
+                  $osLine = ($h.osLine -replace ",",";")
+                  $ssLine = ($h.ssLine -replace ",",";")
+                  Add-Content "results\windows_pe_details.csv" "$pkg,$ver,$runtime,$($dll.Name),$osLine,$ssLine,$osPair,$ssPair"
                 }
               }
 
-              $worstOs = Max-Pair $osPairs
-              $worstSs = Max-Pair $ssPairs
+              $worstOs = MaxPair $osPairs
+              $worstSs = MaxPair $ssPairs
               $note = ""
               if ($worstSs -eq "10.0") { $note = "Subsystem=10.0 (Win10+)" }
 
-              Add-Content $summ "$pkg,$ver,$($rtSet.Count),$dllCount,$worstOs,$worstSs,""$note"""
+              Add-Content "results\windows_pe_summary.csv" "$pkg,$ver,$($rtSet.Count),$dllCount,$worstOs,$worstSs,""$note"""
+              Write-Host "SUMMARY: runtimes=$($rtSet.Count) dlls=$dllCount worst_os=$worstOs worst_ss=$worstSs $note"
             }
           }
 
-      - name: Preview results (Windows)
-        shell: pwsh
-        run: |
-          Write-Host "==== windows_pe_summary.csv (head) ===="
-          Get-Content results\windows_pe_summary.csv -TotalCount 100
+          Write-Host "=== DONE Windows ==="
+          Get-Content results\windows_pe_summary.csv -TotalCount 60
 
       - name: Upload artifact (Windows)
         uses: actions/upload-artifact@v4
