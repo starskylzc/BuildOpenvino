@@ -202,21 +202,21 @@ jobs:
             "  {",
             "    if (args.Length < 1)",
             "    {",
-            "      Console.Error.WriteLine(\"Usage: ApiMinWin <path-to-Windows.Win32.winmd>\");",
+            "      Console.Error.WriteLine('Usage: ApiMinWin <path-to-Windows.Win32.winmd>');",  # 用单引号包裹
             "      return 2;",
             "    }",
             "",
             "    var winmdPath = args[0];",
             "    if (!File.Exists(winmdPath))",
             "    {",
-            "      Console.Error.WriteLine(\"winmd not found: \" + winmdPath);",
+            "      Console.Error.WriteLine('winmd not found: ' + winmdPath);", # 同样修改
             "      return 2;",
             "    }",
             "",
             "    var map = BuildMap(winmdPath);",
             "    Console.Error.WriteLine($\"[ApiMinWin] map size = {map.Count}\");",
             "",
-            "    Console.WriteLine(\"dll,func,minBuild,reason\");",
+            "    Console.WriteLine('dll,func,minBuild,reason');",
             "    string? line;",
             "    while ((line = Console.ReadLine()) != null)",
             "    {",
@@ -247,7 +247,7 @@ jobs:
             "  static string Escape(string s)",
             "  {",
             "    if (s.Contains(',') || s.Contains('\"'))",
-            "      return \"\\\"\" + s.Replace(\"\\\"\", \"\\\"\\\"\") + \"\\\"\";",
+            "      return '\"' + s.Replace('\"', '\"\"') + '\"';",  # 单引号替换双引号
             "    return s;",
             "  }",
             "",
@@ -268,8 +268,8 @@ jobs:
             "    using var pe = new PEReader(fs);",
             "    var md = pe.GetMetadataReader();",
             "",
-            "    var dllImportType = \"System.Runtime.InteropServices.DllImportAttribute\";",
-            "    var supportedType = \"System.Runtime.Versioning.SupportedOSPlatformAttribute\";",
+            "    var dllImportType = 'System.Runtime.InteropServices.DllImportAttribute';",  # 双引号改成单引号
+            "    var supportedType = 'System.Runtime.Versioning.SupportedOSPlatformAttribute';",  # 同上
             "",
             "    var map = new Dictionary<string,(int,string)>(StringComparer.OrdinalIgnoreCase);",
             "",
@@ -318,7 +318,7 @@ jobs:
             "        var key = dllLower + \"!\" + ep;",
             "        if (!map.TryGetValue(key, out var existing) || minBuild > existing.minBuild)",
             "        {",
-            "          var reason = minReason ?? \"\";",
+            "          var reason = minReason ?? '';",
             "          map[key] = (minBuild, reason);",
             "        }",
             "      }",
@@ -356,7 +356,7 @@ jobs:
             "      byte type = blob.ReadByte();",
             "      string? name = blob.ReadSerializedString();",
             "      object? val = ReadFixedArg(md, ref blob, type);",
-            "      if (name != null && name.Equals(\"EntryPoint\", StringComparison.OrdinalIgnoreCase))",
+            "      if (name != null && name.Equals('EntryPoint', StringComparison.OrdinalIgnoreCase))",
             "        entryPoint = val as string;",
             "    }",
             "  }",
@@ -424,7 +424,7 @@ jobs:
             "    var name = md.GetString(nameHandle);",
             "    var ns = md.GetString(nsHandle);",
             "    if (string.IsNullOrEmpty(ns)) return name;",
-            "    return ns + \".\" + name;",
+            "    return ns + '.' + name;",
             "  }",
             "}"
           ) | Out-File -Encoding UTF8 "$toolDir\Program.cs"
@@ -434,6 +434,7 @@ jobs:
 
           "$($winmd.FullName)" | Out-File -Encoding UTF8 "out\win32_winmd_path.txt"
           Write-Host "Saved winmd path to out\win32_winmd_path.txt"
+
 
 
       - name: Summarize Windows min OS per package+version
