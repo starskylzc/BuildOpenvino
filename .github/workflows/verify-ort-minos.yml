@@ -227,7 +227,7 @@ jobs:
             "      var dll = parts[0].Trim().ToLowerInvariant();",
             "      var func = parts[1].Trim();",
             "",
-            "      var key = dll + \"!\" + func;",
+            "      var key = $($dll + '!' + $func);",  # 这里使用了 $($dll + '!' + $func)
             "      if (map.TryGetValue(key, out var v))",
             "      {",
             "        Console.WriteLine($\"{dll},{Escape(func)},{v.minBuild},{Escape(v.reason)}\");",
@@ -434,6 +434,7 @@ jobs:
 
           "$($winmd.FullName)" | Out-File -Encoding UTF8 "out\win32_winmd_path.txt"
           Write-Host "Saved winmd path to out\win32_winmd_path.txt"
+
 
 
 
