@@ -1,5 +1,29 @@
 name: Extract OpenVINO (Final Minimal Release)-2023.3
 
+# ============================================================
+# 各平台使用的 OpenVINO 版本说明：
+#
+#   Windows / macOS : 2023.3.0  (官方 LTS，含 GPU 插件)
+#
+#   Linux x86_64    : 2023.3.0  ubuntu18 包（glibc 基准 2.27）
+#   Linux aarch64   : 2023.3.0  ubuntu18 包（glibc 基准 2.27，包内自带 TBB）
+#
+# 选择 2023.3 ubuntu18 包的原因（兼容性优先）：
+#
+#   国产操作系统 glibc 版本实测：
+#     银河麒麟 V10 SP1  : glibc 2.31（基于 Debian 11）
+#     统信 UOS V20      : glibc 2.28（基于 Debian 10）  ← 最低基准
+#     Ubuntu 20.04      : glibc 2.31
+#
+#   ubuntu20 包（glibc 2.31）：统信 UOS V20 (2.28) 无法运行 ❌
+#   ubuntu18 包（glibc 2.27）：所有上述系统均可运行 ✅
+#
+#   2023.3 ubuntu18 x86_64 包含 GPU 插件（libopenvino_intel_gpu_plugin.so）✅
+#   2023.3 ubuntu18 aarch64 无 GPU 插件（ARM 平台所有版本均无 Intel GPU 插件）
+#   aarch64 包内自带 TBB（3rdparty/tbb/lib/libtbb.so.12.2）
+#   x86_64 包无内置 TBB，需从系统 libtbb2 获取（libtbb.so.2）
+# ============================================================
+
 on:
   workflow_dispatch:
     inputs:
@@ -19,19 +43,28 @@ on:
         default: true
       # ── Linux x86_64 ───────────────────────────────────────
       build_linux_x86_64_cpu:
-        description: "Linux x86_64 CPU (glibc 2.31, 兼容麒麟/统信 x64)"
+        description: "Linux x86_64 CPU (glibc 2.27, 兼容麒麟/统信/Ubuntu 20.04)"
         type: boolean
         default: true
       build_linux_x86_64_gpu:
-        description: "Linux x86_64 GPU (glibc 2.31, 兼容麒麟/统信 x64)"
+        description: "Linux x86_64 GPU (glibc 2.27, 兼容麒麟/统信/Ubuntu 20.04)"
         type: boolean
         default: true
       # ── Linux aarch64 ──────────────────────────────────────
       build_linux_aarch64_cpu:
-        description: "Linux aarch64 CPU (glibc 2.31, 兼容麒麟/统信 ARM)"
+        description: "Linux aarch64 CPU (glibc 2.27, 兼容麒麟/统信 ARM)"
         type: boolean
         default: true
-      # 注：aarch64 平台不支持 Intel GPU，无 GPU 变体
+      # 注：aarch64 官方预编译包所有版本均不含 Intel GPU 插件（ARM 平台限制）
+
+env:
+  # 全平台统一使用 2023.3.0
+  OV_VERSION: "2023.3.0"
+  OV_WIN_URL: "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/windows/w_openvino_toolkit_windows_2023.3.0.13775.ceeafaf64f3_x86_64.zip"
+  OV_MAC_URL: "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/macos/m_openvino_toolkit_macos_10_15_2023.3.0.13775.ceeafaf64f3_x86_64.tgz"
+  # Linux 使用 ubuntu18 包（glibc 2.27），兼容统信 UOS V20 (2.28) 及以上所有系统
+  OV_LINUX_X64_URL: "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu18_2023.3.0.13775.ceeafaf64f3_x86_64.tgz"
+  OV_LINUX_ARM_URL: "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu18_2023.3.0.13775.ceeafaf64f3_arm64.tgz"
 
 jobs:
   # ============================================================
@@ -46,17 +79,15 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p downloads
-
           NEED_WIN="${{ inputs.build_windows_gpu || inputs.build_windows_cpu }}"
           NEED_MAC="${{ inputs.build_mac_cpu }}"
-
           if [ "$NEED_WIN" = "true" ]; then
-            echo ">>> Downloading Windows Package..."
-            curl -L -o downloads/win.zip "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/windows/w_openvino_toolkit_windows_2023.3.0.13775.ceeafaf64f3_x86_64.zip"
+            echo ">>> Downloading Windows Package (OpenVINO ${{ env.OV_VERSION }})..."
+            curl -L -o downloads/win.zip "${{ env.OV_WIN_URL }}"
           fi
           if [ "$NEED_MAC" = "true" ]; then
-            echo ">>> Downloading Mac Package..."
-            curl -L -o downloads/mac.tgz "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/macos/m_openvino_toolkit_macos_10_15_2023.3.0.13775.ceeafaf64f3_x86_64.tgz"
+            echo ">>> Downloading Mac Package (OpenVINO ${{ env.OV_VERSION }})..."
+            curl -L -o downloads/mac.tgz "${{ env.OV_MAC_URL }}"
           fi
 
       - name: Extract Archives
@@ -64,7 +95,6 @@ jobs:
           set -euxo pipefail
           NEED_WIN="${{ inputs.build_windows_gpu || inputs.build_windows_cpu }}"
           NEED_MAC="${{ inputs.build_mac_cpu }}"
-
           if [ "$NEED_WIN" = "true" ]; then
             echo ">>> Extracting Windows..."
             unzip -q downloads/win.zip -d extracted_win
@@ -95,7 +125,6 @@ jobs:
           cp "$SRC_BIN/openvino_onnx_frontend.dll"    "$DST/"
           cp "$SRC_BIN/openvino_intel_gpu_plugin.dll" "$DST/"
           [ -f "$SRC_BIN/cache.json" ] && cp "$SRC_BIN/cache.json" "$DST/"
-          echo ">>> Copying Minimal TBB..."
           cp "$SRC_TBB/tbb12.dll"     "$DST/"
           cp "$SRC_TBB/tbbmalloc.dll" "$DST/"
           mkdir -p "$DST/include"
@@ -123,13 +152,11 @@ jobs:
           fi
           if [[ -z "${CPU_PLUGIN:-}" || ! -f "$CPU_PLUGIN" ]]; then
             echo "ERROR: Windows CPU plugin not found in $SRC_BIN"
-            ls -la "$SRC_BIN"
-            exit 1
+            ls -la "$SRC_BIN"; exit 1
           fi
           cp "$CPU_PLUGIN" "$DST/"
           CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
           [ -f "$SRC_BIN/cache.json" ] && cp "$SRC_BIN/cache.json" "$DST/"
-          echo ">>> Copying Minimal TBB..."
           cp "$SRC_TBB/tbb12.dll"     "$DST/"
           cp "$SRC_TBB/tbbmalloc.dll" "$DST/"
           mkdir -p "$DST/include"
@@ -155,19 +182,15 @@ jobs:
             \( -name "libopenvino_intel_cpu_plugin*.so" -o -name "libopenvino_intel_cpu_plugin*.dylib" \) \
             | head -n 1)
           if [[ -z "$CPU_PLUGIN" ]]; then
-            echo "ERROR: CPU plugin not found in $SRC_LIB"
-            ls -la "$SRC_LIB"
-            exit 1
+            echo "ERROR: CPU plugin not found in $SRC_LIB"; ls -la "$SRC_LIB"; exit 1
           fi
           cp "$CPU_PLUGIN" "$DST/"
           CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
-          echo ">>> Copying Minimal TBB..."
           cp "$SRC_TBB/libtbb.12.dylib"      "$DST/"
           cp "$SRC_TBB/libtbbmalloc.2.dylib" "$DST/"
           mkdir -p "$DST/include"
           cp "$SRC_INC/ie_c_api.h" "$DST/include/"
           cd "$DST"
-          echo ">>> Renaming dylibs..."
           mv -f "libopenvino.2023.3.0.dylib"               "libopenvino.dylib"
           mv -f "libopenvino_c.2023.3.0.dylib"             "libopenvino_c.dylib"
           mv -f "libopenvino_onnx_frontend.2023.3.0.dylib" "libopenvino_onnx_frontend.2330.dylib"
@@ -189,18 +212,15 @@ jobs:
             for DEP_PATH in $DEPS; do
               DEP_NAME=$(basename "$DEP_PATH")
               if [[ "$DEP_NAME" == "libopenvino.2330.dylib" || "$DEP_NAME" == "libopenvino.2023.3.0.dylib" ]]; then
-                install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino.dylib" "$LIB" || true
-                continue
+                install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino.dylib" "$LIB" || true; continue
               fi
               if [[ "$DEP_NAME" == "libopenvino_c.2330.dylib" || "$DEP_NAME" == "libopenvino_c.2023.3.0.dylib" ]]; then
-                install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino_c.dylib" "$LIB" || true
-                continue
+                install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino_c.dylib" "$LIB" || true; continue
               fi
               if [[ "$DEP_NAME" == "libopenvino_onnx_frontend.dylib" || \
                     "$DEP_NAME" == "libopenvino_onnx_frontend.2023.3.0.dylib" || \
                     "$DEP_NAME" == "libopenvino_onnx_frontend.2330.dylib" ]]; then
-                install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino_onnx_frontend.2330.dylib" "$LIB" || true
-                continue
+                install_name_tool -change "$DEP_PATH" "@loader_path/libopenvino_onnx_frontend.2330.dylib" "$LIB" || true; continue
               fi
               if [[ -f "$DEP_NAME" ]]; then
                 install_name_tool -change "$DEP_PATH" "@loader_path/$DEP_NAME" "$LIB" || true
@@ -217,7 +237,6 @@ jobs:
         run: |
           set -euxo pipefail
           cd final_output
-          # 只打包实际存在的目录
           DIRS=""
           [ -d windows_gpu ] && DIRS="$DIRS windows_gpu"
           [ -d windows_cpu ] && DIRS="$DIRS windows_cpu"
@@ -236,13 +255,14 @@ jobs:
   # Job 2: Linux x86_64 (CPU + GPU)
   # Runner：ubuntu-22.04
   # Docker 容器：ubuntu:20.04 (glibc 2.31)
-  # 兼容：Ubuntu 20.04+，麒麟 V10 x64，统信 UOS V20 x64
+  # OpenVINO：2023.3.0 ubuntu18 x86_64（glibc 基准 2.27）
+  # 兼容：Ubuntu 20.04+，麒麟 V10 x64，统信 UOS V20 x64（glibc ≥ 2.27）
   # ============================================================
   build-linux-x86_64:
     if: ${{ inputs.build_linux_x86_64_cpu || inputs.build_linux_x86_64_gpu }}
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Extract OpenVINO x86_64 CPU (Docker ubuntu:20.04)
         if: ${{ inputs.build_linux_x86_64_cpu }}
@@ -254,9 +274,10 @@ jobs:
             -e DEBIAN_FRONTEND=noninteractive \
             ubuntu:20.04 \
             bash /extract_ov.sh \
-              "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu20_2023.3.0.13775.ceeafaf64f3_x86_64.tgz" \
+              "${{ env.OV_LINUX_X64_URL }}" \
               "/out/linux_x86_64_cpu" \
-              "cpu"
+              "cpu" \
+              "${{ env.OV_VERSION }}"
 
       - name: Extract OpenVINO x86_64 GPU (Docker ubuntu:20.04)
         if: ${{ inputs.build_linux_x86_64_gpu }}
@@ -268,9 +289,10 @@ jobs:
             -e DEBIAN_FRONTEND=noninteractive \
             ubuntu:20.04 \
             bash /extract_ov.sh \
-              "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu20_2023.3.0.13775.ceeafaf64f3_x86_64.tgz" \
+              "${{ env.OV_LINUX_X64_URL }}" \
               "/out/linux_x86_64_gpu" \
-              "gpu"
+              "gpu" \
+              "${{ env.OV_VERSION }}"
 
       - name: Zip Linux x86_64
         run: |
@@ -290,16 +312,18 @@ jobs:
           path: ${{ github.workspace }}/final_output/openvino_linux_x86_64.zip
 
   # ============================================================
-  # Job 3: Linux aarch64 (CPU + GPU)
+  # Job 3: Linux aarch64 (CPU only)
   # Runner：ubuntu-24.04-arm（GitHub 原生 ARM64 Runner）
   # Docker 容器：ubuntu:20.04 (glibc 2.31)
-  # 兼容：麒麟 V10 ARM、统信 UOS V20 ARM、鸿蒙 OpenHarmony
+  # OpenVINO：2023.3.0 ubuntu18 aarch64（glibc 基准 2.27，包内自带 TBB）
+  # 兼容：麒麟 V10 ARM、统信 UOS V20 ARM、鸿蒙 OpenHarmony（glibc ≥ 2.27）
+  # 注：官方预编译包所有版本均不含 Intel GPU 插件（ARM 平台限制）
   # ============================================================
   build-linux-aarch64:
     if: ${{ inputs.build_linux_aarch64_cpu }}
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Extract OpenVINO aarch64 CPU (Docker ubuntu:20.04)
         run: |
@@ -310,9 +334,10 @@ jobs:
             -e DEBIAN_FRONTEND=noninteractive \
             ubuntu:20.04 \
             bash /extract_ov.sh \
-              "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu18_2023.3.0.13775.ceeafaf64f3_arm64.tgz" \
+              "${{ env.OV_LINUX_ARM_URL }}" \
               "/out/linux_aarch64_cpu" \
-              "cpu"
+              "cpu" \
+              "${{ env.OV_VERSION }}"
 
       - name: Zip Linux aarch64
         run: |
@@ -330,8 +355,8 @@ jobs:
 
   # ============================================================
   # Job 4: 合并所有产物（在 ubuntu-22.04 上运行）
-  # 依赖前三个 job，但各 job 可能因未勾选而被跳过，
-  # 使用 always() + 条件判断确保只解压实际存在的产物
+  # 依赖前三个 job，各 job 可能因未勾选而跳过，
+  # 使用 always() 确保只要有产物就执行合并
   # ============================================================
   merge-and-release:
     needs: [build-windows-mac, build-linux-x86_64, build-linux-aarch64]
@@ -347,7 +372,6 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p final_output
-
           if [ -f "artifacts/openvino_windows_mac/openvino_windows_mac.zip" ]; then
             echo ">>> Extracting Windows + Mac..."
             unzip -q artifacts/openvino_windows_mac/openvino_windows_mac.zip -d final_output/
@@ -360,7 +384,6 @@ jobs:
             echo ">>> Extracting Linux aarch64..."
             unzip -q artifacts/openvino_linux_aarch64/openvino_linux_aarch64.zip -d final_output/
           fi
-
           echo ">>> Final Output Structure:"
           find final_output/ -type f -o -type l | sort
 
