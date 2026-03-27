@@ -31,7 +31,7 @@ jobs:
           echo "WIN_ROOT=$WIN_ROOT" >> $GITHUB_ENV
           echo "MAC_ROOT=$MAC_ROOT" >> $GITHUB_ENV
 
-      # --- Windows 处理 (GPU Only + ONNX Only + Minimal TBB) ---
+      # --- Windows 处理 (GPU + ONNX + Minimal TBB) ---
       - name: Process Windows Runtime (GPU)
         run: |
           set -euxo pipefail
@@ -55,7 +55,7 @@ jobs:
           printf '<ie>\n    <plugins>\n        <plugin name="GPU" location="openvino_intel_gpu_plugin.dll">\n        </plugin>\n    </plugins>\n</ie>\n' \
             > "$DST/plugins.xml"
 
-      # --- Windows 处理 (CPU Only + ONNX Only + Minimal TBB) ---
+      # --- Windows 处理 (CPU + ONNX + Minimal TBB) ---
       - name: Process Windows Runtime (CPU)
         run: |
           set -euxo pipefail
@@ -89,7 +89,7 @@ jobs:
           printf '<ie>\n    <plugins>\n        <plugin name="CPU" location="%s">\n        </plugin>\n    </plugins>\n</ie>\n' \
             "$CPU_PLUGIN_NAME" > "$DST/plugins.xml"
 
-      # --- Mac 处理 (CPU Only + ONNX Only + Minimal TBB + Patch) ---
+      # --- Mac 处理 (CPU + ONNX + Minimal TBB + Patch) ---
       #     只保留实体 libopenvino_onnx_frontend.2330.dylib（非软链接）
       - name: Process Mac Runtime (CPU + ONNX)
         run: |
@@ -100,8 +100,8 @@ jobs:
           SRC_INC="$MAC_ROOT/runtime/include/ie/c_api"
           DST="final_output/mac"
           echo ">>> Copying Mac Libraries (REAL files only)..."
-          cp "$SRC_LIB/libopenvino.2023.3.0.dylib"              "$DST/"
-          cp "$SRC_LIB/libopenvino_c.2023.3.0.dylib"            "$DST/"
+          cp "$SRC_LIB/libopenvino.2023.3.0.dylib"               "$DST/"
+          cp "$SRC_LIB/libopenvino_c.2023.3.0.dylib"             "$DST/"
           cp "$SRC_LIB/libopenvino_onnx_frontend.2023.3.0.dylib" "$DST/"
           CPU_PLUGIN=$(find "$SRC_LIB" -maxdepth 1 -type f \
             \( -name "libopenvino_intel_cpu_plugin*.so" -o -name "libopenvino_intel_cpu_plugin*.dylib" \) \
@@ -120,8 +120,8 @@ jobs:
           cp "$SRC_INC/ie_c_api.h" "$DST/include/"
           cd "$DST"
           echo ">>> Renaming dylibs..."
-          mv -f "libopenvino.2023.3.0.dylib"              "libopenvino.dylib"
-          mv -f "libopenvino_c.2023.3.0.dylib"            "libopenvino_c.dylib"
+          mv -f "libopenvino.2023.3.0.dylib"               "libopenvino.dylib"
+          mv -f "libopenvino_c.2023.3.0.dylib"             "libopenvino_c.dylib"
           mv -f "libopenvino_onnx_frontend.2023.3.0.dylib" "libopenvino_onnx_frontend.2330.dylib"
           rm -f "libopenvino_onnx_frontend.dylib" || true
           echo ">>> Generating Mac plugins.xml..."
@@ -183,7 +183,7 @@ jobs:
           path: final_output/openvino_windows_mac.zip
 
   # ============================================================
-  # Job 2: Linux x86_64
+  # Job 2: Linux x86_64 (CPU + GPU)
   # Runner：ubuntu-22.04
   # Docker 容器：ubuntu:20.04 (glibc 2.31)
   # 兼容：Ubuntu 20.04+，麒麟 V10 x64，统信 UOS V20 x64
@@ -193,7 +193,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract OpenVINO x86_64 (Docker ubuntu:20.04)
+      - name: Extract OpenVINO x86_64 CPU (Docker ubuntu:20.04)
         run: |
           mkdir -p "${{ github.workspace }}/final_output"
           docker run --rm \
@@ -203,13 +203,26 @@ jobs:
             ubuntu:20.04 \
             bash /extract_ov.sh \
               "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu20_2023.3.0.13775.ceeafaf64f3_x86_64.tgz" \
-              "/out/linux_x86_64"
+              "/out/linux_x86_64_cpu" \
+              "cpu"
+
+      - name: Extract OpenVINO x86_64 GPU (Docker ubuntu:20.04)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/.github/scripts/extract_openvino_linux.sh:/extract_ov.sh:ro" \
+            -v "${{ github.workspace }}/final_output:/out" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ubuntu:20.04 \
+            bash /extract_ov.sh \
+              "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu20_2023.3.0.13775.ceeafaf64f3_x86_64.tgz" \
+              "/out/linux_x86_64_gpu" \
+              "gpu"
 
       - name: Zip Linux x86_64
         run: |
           set -euxo pipefail
           cd "${{ github.workspace }}/final_output"
-          zip -r openvino_linux_x86_64.zip linux_x86_64
+          zip -r openvino_linux_x86_64.zip linux_x86_64_cpu linux_x86_64_gpu
           echo ">>> Package Contents:"
           unzip -l openvino_linux_x86_64.zip
 
@@ -220,7 +233,7 @@ jobs:
           path: ${{ github.workspace }}/final_output/openvino_linux_x86_64.zip
 
   # ============================================================
-  # Job 3: Linux aarch64
+  # Job 3: Linux aarch64 (CPU + GPU)
   # Runner：ubuntu-24.04-arm（GitHub 原生 ARM64 Runner）
   # Docker 容器：ubuntu:20.04 (glibc 2.31)
   # 兼容：麒麟 V10 ARM、统信 UOS V20 ARM、鸿蒙 OpenHarmony
@@ -230,7 +243,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract OpenVINO aarch64 (Docker ubuntu:20.04)
+      - name: Extract OpenVINO aarch64 CPU (Docker ubuntu:20.04)
         run: |
           mkdir -p "${{ github.workspace }}/final_output"
           docker run --rm \
@@ -240,13 +253,26 @@ jobs:
             ubuntu:20.04 \
             bash /extract_ov.sh \
               "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu18_2023.3.0.13775.ceeafaf64f3_arm64.tgz" \
-              "/out/linux_aarch64"
+              "/out/linux_aarch64_cpu" \
+              "cpu"
+
+      - name: Extract OpenVINO aarch64 GPU (Docker ubuntu:20.04)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/.github/scripts/extract_openvino_linux.sh:/extract_ov.sh:ro" \
+            -v "${{ github.workspace }}/final_output:/out" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ubuntu:20.04 \
+            bash /extract_ov.sh \
+              "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu18_2023.3.0.13775.ceeafaf64f3_arm64.tgz" \
+              "/out/linux_aarch64_gpu" \
+              "gpu"
 
       - name: Zip Linux aarch64
         run: |
           set -euxo pipefail
           cd "${{ github.workspace }}/final_output"
-          zip -r openvino_linux_aarch64.zip linux_aarch64
+          zip -r openvino_linux_aarch64.zip linux_aarch64_cpu linux_aarch64_gpu
           echo ">>> Package Contents:"
           unzip -l openvino_linux_aarch64.zip
 
