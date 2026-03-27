@@ -123,6 +123,9 @@ PY
 # ------------------------------------------------------------
 echo "==> Build OpenCV static ($ARCH, Linux)"
 
+# cmake 3.10（Ubuntu 18.04）不会自动创建 -B 指定的构建目录，需要提前手动创建
+mkdir -p "$B/opencv"
+
 # Linux 特有：禁用图形和视频捕获后端（容器内无 GUI）
 # 移除 macOS 特有参数：CMAKE_OSX_*、WITH_AVFOUNDATION
 # 用数组拼接参数，避免续行符在旧版 cmake/shell 下的解析问题
@@ -233,6 +236,9 @@ PY
 #   - Linux 特有：静态链接 libstdc++ 和 libgcc（容器内避免动态链接问题）
 # ------------------------------------------------------------
 echo "==> Build OpenCvSharpExtern ($ARCH)"
+
+# cmake 3.10 不会自动创建 -B 目录
+mkdir -p "$B/opencvsharp"
 
 # Linux 编译参数：静态链接 C++ 运行时，避免容器内运行时依赖问题
 SHARP_ARGS=(
