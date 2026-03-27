@@ -33,14 +33,21 @@ gcc --version || true
 
 # ------------------------------------------------------------
 # 安装构建依赖（容器内）
-# 兼容多种 Ubuntu 版本：libstdc++-10-dev (Ubuntu 20.04) 或 libstdc++-12-dev 等
+# 关键：必须在 apt-get 之前设置以下环境变量，
+# 否则 tzdata 等包会触发交互式地区/时区选择界面，导致 workflow 永久卡死。
+# DEBIAN_FRONTEND=noninteractive  → 全程静默，不弹任何交互提示
+# TZ=UTC                          → 预设时区，tzdata 无需再询问
 # ------------------------------------------------------------
 echo "==> 安装构建依赖"
+
+export DEBIAN_FRONTEND=noninteractive
+export TZ=UTC
 
 apt-get update -qq
 
 # 安装必须的基础依赖（失败则直接报错退出）
 apt-get install -y --no-install-recommends \
+    tzdata \
     cmake \
     ninja-build \
     python3 \

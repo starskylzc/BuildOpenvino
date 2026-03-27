@@ -224,6 +224,8 @@ jobs:
           docker run --rm \
             -v "${{ github.workspace }}:/ws" \
             -w /ws \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e TZ=UTC \
             -e OPENCV_VERSION=${{ env.OPENCV_VERSION }} \
             -e OPENCVSHARP_REF=${{ env.OPENCVSHARP_REF }} \
             -e BUILD_LIST=${{ env.BUILD_LIST }} \
@@ -254,6 +256,8 @@ jobs:
           docker run --rm \
             -v "${{ github.workspace }}:/ws" \
             -w /ws \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e TZ=UTC \
             -e OPENCV_VERSION=${{ env.OPENCV_VERSION }} \
             -e OPENCVSHARP_REF=${{ env.OPENCVSHARP_REF }} \
             -e BUILD_LIST=${{ env.BUILD_LIST }} \
