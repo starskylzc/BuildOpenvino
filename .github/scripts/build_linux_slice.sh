@@ -125,36 +125,45 @@ echo "==> Build OpenCV static ($ARCH, Linux)"
 
 # Linux 特有：禁用图形和视频捕获后端（容器内无 GUI）
 # 移除 macOS 特有参数：CMAKE_OSX_*、WITH_AVFOUNDATION
-cmake -S "$SRC/opencv" -B "$B/opencv" -G Ninja \
-  -D CMAKE_BUILD_TYPE=Release \
-  -D OPENCV_EXTRA_MODULES_PATH="$SRC/opencv_contrib/modules" \
-  -D BUILD_SHARED_LIBS=OFF \
-  -D BUILD_LIST="$BUILD_LIST" \
-  -D BUILD_TESTS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_EXAMPLES=OFF -D BUILD_DOCS=OFF -D BUILD_opencv_apps=OFF \
-  -D OPENCV_FORCE_3RDPARTY_BUILD=ON \
-  \
-  -D WITH_FFMPEG=OFF \
-  -D WITH_GSTREAMER=OFF \
-  -D WITH_OPENCL=OFF \
-  -D WITH_TBB=OFF \
-  -D WITH_IPP=OFF \
-  -D WITH_OPENMP=OFF \
-  -D WITH_HDF5=OFF \
-  -D WITH_FREETYPE=OFF \
-  -D WITH_HARFBUZZ=OFF \
-  -D WITH_WEBP=OFF \
-  -D WITH_OPENJPEG=OFF \
-  -D WITH_JASPER=OFF \
-  -D WITH_GPHOTO2=OFF \
-  -D WITH_1394=OFF \
-  -D WITH_GTK=OFF \
-  -D WITH_QT=OFF \
-  -D WITH_OPENGL=OFF \
-  -D WITH_V4L=ON \
-  -D WITH_LIBV4L=OFF \
-  -D WITH_AVFOUNDATION=OFF \
-  -D WITH_OBSENSOR=OFF \
-  -D VIDEOIO_ENABLE_PLUGINS=OFF
+# 用数组拼接参数，避免续行符在旧版 cmake/shell 下的解析问题
+CMAKE_ARGS=(
+  -S "$SRC/opencv"
+  -B "$B/opencv"
+  -G Ninja
+  -DCMAKE_BUILD_TYPE=Release
+  -DOPENCV_EXTRA_MODULES_PATH="$SRC/opencv_contrib/modules"
+  -DBUILD_SHARED_LIBS=OFF
+  -DBUILD_LIST="$BUILD_LIST"
+  -DBUILD_TESTS=OFF
+  -DBUILD_PERF_TESTS=OFF
+  -DBUILD_EXAMPLES=OFF
+  -DBUILD_DOCS=OFF
+  -DBUILD_opencv_apps=OFF
+  -DOPENCV_FORCE_3RDPARTY_BUILD=ON
+  -DWITH_FFMPEG=OFF
+  -DWITH_GSTREAMER=OFF
+  -DWITH_OPENCL=OFF
+  -DWITH_TBB=OFF
+  -DWITH_IPP=OFF
+  -DWITH_OPENMP=OFF
+  -DWITH_HDF5=OFF
+  -DWITH_FREETYPE=OFF
+  -DWITH_HARFBUZZ=OFF
+  -DWITH_WEBP=OFF
+  -DWITH_OPENJPEG=OFF
+  -DWITH_JASPER=OFF
+  -DWITH_GPHOTO2=OFF
+  -DWITH_1394=OFF
+  -DWITH_GTK=OFF
+  -DWITH_QT=OFF
+  -DWITH_OPENGL=OFF
+  -DWITH_V4L=ON
+  -DWITH_LIBV4L=OFF
+  -DWITH_AVFOUNDATION=OFF
+  -DWITH_OBSENSOR=OFF
+  -DVIDEOIO_ENABLE_PLUGINS=OFF
+)
+cmake "${CMAKE_ARGS[@]}"
 
 ninja -C "$B/opencv"
 
@@ -226,12 +235,17 @@ PY
 echo "==> Build OpenCvSharpExtern ($ARCH)"
 
 # Linux 编译参数：静态链接 C++ 运行时，避免容器内运行时依赖问题
-cmake -S "$SRC/opencvsharp/src" -B "$B/opencvsharp" -G Ninja \
-  -D CMAKE_BUILD_TYPE=Release \
-  -D CMAKE_INSTALL_PREFIX="$OUT" \
-  -D CMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
-  -D CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  -D OpenCV_DIR="$B/opencv"
+SHARP_ARGS=(
+  -S "$SRC/opencvsharp/src"
+  -B "$B/opencvsharp"
+  -G Ninja
+  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_INSTALL_PREFIX="$OUT"
+  -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+  -DOpenCV_DIR="$B/opencv"
+)
+cmake "${SHARP_ARGS[@]}"
 
 ninja -C "$B/opencvsharp"
 ninja -C "$B/opencvsharp" install
