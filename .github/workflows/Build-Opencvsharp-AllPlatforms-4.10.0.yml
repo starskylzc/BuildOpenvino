@@ -11,9 +11,10 @@
 #          │ x86   (32-bit)
 #          │ arm64 (原生 ARM64 Runner)
 #   ───────┼──────────────────────────────────────────────────
-#   Linux  │ x86_64  (Docker ubuntu:20.04 / glibc 2.31)
-#          │ aarch64 (Docker arm64v8/ubuntu:20.04 / glibc 2.31)
-#          │   兼容：麒麟 V10、统信 UOS V20、鸿蒙 OpenHarmony
+  #   Linux  │ x86_64  (Docker ubuntu:18.04 / glibc 2.27)
+  #          │ aarch64 (Docker arm64v8/ubuntu:18.04 / glibc 2.27)
+  #          │   兼容：统信 UOS V20 (glibc 2.28+)、麒麟 V10 (glibc 2.31)、
+  #          │         Ubuntu 18.04+、鸿蒙 OpenHarmony
 #
 # 使用方式：
 #   在 GitHub Actions 页面手动触发（workflow_dispatch），
@@ -49,11 +50,11 @@ on:
         default: true
       # ── Linux ──────────────────────────────────────────────
       build_linux_x86_64:
-        description: "Linux x86_64 (glibc 2.31, 兼容麒麟/统信 x64)"
+        description: "Linux x86_64 (glibc 2.27, 兼容统信UOS/麒麟 x64)"
         type: boolean
         default: true
       build_linux_aarch64:
-        description: "Linux aarch64 (glibc 2.31, 兼容麒麟/统信 ARM)"
+        description: "Linux aarch64 (glibc 2.27, 兼容统信UOS/麒麟 ARM)"
         type: boolean
         default: true
 
@@ -237,8 +238,8 @@ jobs:
 
   # ============================================================
   # Linux x86_64
-  # Docker 容器：ubuntu:20.04 (glibc 2.31)
-  # 兼容：麒麟 V10 x64、统信 UOS V20 x64、Ubuntu 20.04+
+  # Docker 容器：ubuntu:18.04 (glibc 2.27)
+  # 兼容：统信 UOS V20 x64 (glibc 2.28)、麒麟 V10 x64 (glibc 2.31)、Ubuntu 18.04+
   # ============================================================
   build_linux_x86_64:
     if: ${{ inputs.build_linux_x86_64 }}
@@ -247,7 +248,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Build x86_64 slice (Docker ubuntu:20.04 / glibc 2.31)
+      - name: Build x86_64 slice (Docker ubuntu:18.04 / glibc 2.27)
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/ws" \
@@ -257,7 +258,7 @@ jobs:
             -e OPENCV_VERSION=${{ env.OPENCV_VERSION }} \
             -e OPENCVSHARP_REF=${{ env.OPENCVSHARP_REF }} \
             -e BUILD_LIST=${{ env.BUILD_LIST }} \
-            ubuntu:20.04 \
+            ubuntu:18.04 \
             bash .github/scripts/build_linux_slice.sh x86_64
 
       - name: Smoke test (Linux x86_64)
@@ -278,8 +279,8 @@ jobs:
   # ============================================================
   # Linux aarch64
   # Runner：ubuntu-24.04-arm（GitHub 原生 ARM64 Runner）
-  # Docker 容器：ubuntu:20.04 (glibc 2.31)
-  # 兼容：麒麟 V10 ARM、统信 UOS V20 ARM、鸿蒙 OpenHarmony
+  # Docker 容器：arm64v8/ubuntu:18.04 (glibc 2.27)
+  # 兼容：统信 UOS V20 ARM (glibc 2.28)、麒麟 V10 ARM (glibc 2.31)、鸿蒙 OpenHarmony
   # ============================================================
   build_linux_aarch64:
     if: ${{ inputs.build_linux_aarch64 }}
@@ -288,7 +289,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Build aarch64 slice (Docker ubuntu:20.04 / glibc 2.31)
+      - name: Build aarch64 slice (Docker arm64v8/ubuntu:18.04 / glibc 2.27)
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/ws" \
@@ -298,7 +299,7 @@ jobs:
             -e OPENCV_VERSION=${{ env.OPENCV_VERSION }} \
             -e OPENCVSHARP_REF=${{ env.OPENCVSHARP_REF }} \
             -e BUILD_LIST=${{ env.BUILD_LIST }} \
-            ubuntu:20.04 \
+            arm64v8/ubuntu:18.04 \
             bash .github/scripts/build_linux_slice.sh aarch64
 
       - name: Smoke test (Linux aarch64)

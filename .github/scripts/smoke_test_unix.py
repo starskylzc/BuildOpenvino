@@ -13,6 +13,7 @@ OpenCvSharpExtern 冒烟测试（Linux / macOS）
 """
 
 import ctypes
+import re
 import subprocess
 import sys
 import os
@@ -81,9 +82,68 @@ def runtime_test(lib_path: str) -> bool:
     return True
 
 
+def check_glibc_version(lib_path: str) -> None:
+    """用 objdump -T 打印产物实际依赖的最低 glibc 版本（仅信息，不影响通过/失败）"""
+    print("── glibc 最低版本检查 (objdump -T) ──────────────")
+    try:
+        result = subprocess.run(
+            ["objdump", "-T", lib_path], capture_output=True, text=True
+        )
+        output = result.stdout + result.stderr
+        # 提取所有 GLIBC_x.y 版本号
+        versions = re.findall(r"GLIBC_(\d+\.\d+)", output)
+        if versions:
+            # 按版本号排序找最高（即最低系统要求）
+            max_ver = max(versions, key=lambda v: tuple(int(x) for x in v.split(".")))
+            print(f"  产物依赖的最低 glibc 版本：{max_ver}")
+            # 给出兼容性提示
+            major, minor = (int(x) for x in max_ver.split("."))
+            if (major, minor) <= (2, 17):
+                print("  ✓  兼容 CentOS 7 及以上所有主流 Linux")
+            elif (major, minor) <= (2, 28):
+                print("  ✓  兼容 统信 UOS V20 / Debian 10 及以上")
+            elif (major, minor) <= (2, 31):
+                print(
+                    "  ⚠  需要 glibc >= 2.31（Ubuntu 20.04 / 麒麟 V10），统信 UOS V20 不兼容"
+                )
+            else:
+                print(f"  ⚠  需要 glibc >= {max_ver}，兼容性较差")
+        else:
+            print("  （未找到 GLIBC 符号版本信息，可能是静态链接）")
+    except FileNotFoundError:
+        print("  （objdump 不可用，跳过此检查）")
+
+
 def main():
     if len(sys.argv) != 2:
         print(f"用法: {sys.argv[0]} <库文件路径>")
+        sys.exit(1)
+
+    lib_path = os.path.abspath(sys.argv[1])
+    if not os.path.exists(lib_path):
+        print(f"错误：文件不存在: {lib_path}")
+        sys.exit(1)
+
+    print(f"\n{'=' * 52}")
+    print(f"  OpenCvSharpExtern 冒烟测试")
+    print(f"  文件: {lib_path}")
+    print(f"  大小: {os.path.getsize(lib_path):,} bytes")
+    print(f"{'=' * 52}\n")
+
+    ok_sym = check_symbols(lib_path)
+    print()
+    ok_runtime = runtime_test(lib_path)
+    print()
+    # glibc 版本检查（仅 Linux，macOS 无此概念）
+    if sys.platform != "darwin":
+        check_glibc_version(lib_path)
+        print()
+
+    if ok_sym and ok_runtime:
+        print("✅  所有测试通过")
+        sys.exit(0)
+    else:
+        print("❌  测试失败")
         sys.exit(1)
 
     lib_path = os.path.abspath(sys.argv[1])

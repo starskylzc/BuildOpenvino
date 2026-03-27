@@ -58,9 +58,15 @@ apt-get install -y --no-install-recommends \
     pkg-config
 
 # 尝试安装静态链接所需的 libstdc++ 开发包
-# Ubuntu 20.04 → libstdc++-10-dev，Ubuntu 22.04 → libstdc++-12-dev，依次尝试
+# Ubuntu 18.04 → libstdc++-7-dev（GCC 7）
+# Debian 10    → libstdc++-8-dev（GCC 8）
+# Ubuntu 20.04 → libstdc++-10-dev（GCC 10）
+# Ubuntu 22.04 → libstdc++-12-dev（GCC 12）
+# 依次尝试，找到一个能装的即可
 echo "==> 尝试安装 libstdc++ 静态开发包"
-apt-get install -y --no-install-recommends libstdc++-10-dev 2>/dev/null \
+apt-get install -y --no-install-recommends libstdc++-7-dev 2>/dev/null \
+  || apt-get install -y --no-install-recommends libstdc++-8-dev 2>/dev/null \
+  || apt-get install -y --no-install-recommends libstdc++-10-dev 2>/dev/null \
   || apt-get install -y --no-install-recommends libstdc++-12-dev 2>/dev/null \
   || apt-get install -y --no-install-recommends libstdc++-11-dev 2>/dev/null \
   || echo "Warning: libstdc++-dev not found, -static-libstdc++ may fail at link time"
