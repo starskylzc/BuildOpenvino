@@ -46,7 +46,9 @@ export TZ=UTC
 apt-get update -qq
 
 # 安装必须的基础依赖（失败则直接报错退出）
+# ca-certificates 必须最先装，否则 git clone https:// 会因 SSL 证书验证失败而报错
 apt-get install -y --no-install-recommends \
+    ca-certificates \
     tzdata \
     cmake \
     ninja-build \
