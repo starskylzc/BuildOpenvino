@@ -6,7 +6,7 @@ set -euo pipefail
 #   build_linux_slice.sh aarch64
 #
 # 注意事项：
-#   - 在 Docker 容器内执行
+#   - 在 Docker 容器内执行（ubuntu:18.04）
 #   - ARCH 只支持 x86_64 或 aarch64
 ARCH="$1"
 
@@ -26,11 +26,6 @@ OUT="$ROOT/out-$ARCH"
 
 mkdir -p "$SRC" "$B" "$OUT"
 
-echo "==> 工具版本"
-cmake --version || true
-ninja --version || true
-gcc --version || true
-
 # ------------------------------------------------------------
 # 安装构建依赖（容器内）
 # 关键：必须在 apt-get 之前设置以下环境变量，
@@ -45,17 +40,37 @@ export TZ=UTC
 
 apt-get update -qq
 
-# 安装必须的基础依赖（失败则直接报错退出）
 # ca-certificates 必须最先装，否则 git clone https:// 会因 SSL 证书验证失败而报错
 apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
-    cmake \
     ninja-build \
     python3 \
     git \
     build-essential \
-    pkg-config
+    pkg-config \
+    wget
+
+# ------------------------------------------------------------
+# 安装新版 cmake（通过 Kitware 官方 APT 源）
+# Ubuntu 18.04 自带 cmake 3.10，不支持 -S/-B 参数（需要 3.13+）
+# 也不支持 -B 自动创建目录（需要 3.14+）
+# 通过官方源安装最新稳定版解决所有兼容性问题
+# ------------------------------------------------------------
+echo "==> 安装新版 cmake（Kitware 官方源）"
+wget -qO /tmp/cmake-keyring.gpg https://apt.kitware.com/keys/kitware-archive-latest.asc
+apt-key add /tmp/cmake-keyring.gpg
+
+# 检测系统代号（ubuntu 18.04 = bionic，ubuntu 20.04 = focal 等）
+DISTRO_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+echo "deb https://apt.kitware.com/ubuntu/ ${DISTRO_CODENAME} main" \
+    > /etc/apt/sources.list.d/kitware.list
+
+apt-get update -qq
+apt-get install -y --no-install-recommends cmake
+
+echo "==> cmake 版本"
+cmake --version
 
 # 尝试安装静态链接所需的 libstdc++ 开发包
 # Ubuntu 18.04 → libstdc++-7-dev（GCC 7）
@@ -70,6 +85,11 @@ apt-get install -y --no-install-recommends libstdc++-7-dev 2>/dev/null \
   || apt-get install -y --no-install-recommends libstdc++-12-dev 2>/dev/null \
   || apt-get install -y --no-install-recommends libstdc++-11-dev 2>/dev/null \
   || echo "Warning: libstdc++-dev not found, -static-libstdc++ may fail at link time"
+
+echo "==> 工具版本"
+cmake --version
+ninja --version
+gcc --version
 
 # ------------------------------------------------------------
 # 克隆或更新源码
@@ -120,53 +140,42 @@ PY
 
 # ------------------------------------------------------------
 # Build OpenCV (STATIC, minimal modules, minimize deps)
+# 与 macOS 脚本保持一致的写法，Linux 特有：
+#   - 无 CMAKE_OSX_* 参数
+#   - 禁用 GUI 后端（GTK/Qt/OpenGL）
+#   - 启用 V4L（Linux 摄像头）
+#   - 禁用 AVFoundation（macOS 专属）
 # ------------------------------------------------------------
 echo "==> Build OpenCV static ($ARCH, Linux)"
-
-# cmake 3.10（Ubuntu 18.04）不会自动创建 -B 指定的构建目录，需要提前手动创建
-mkdir -p "$B/opencv"
-
-# Linux 特有：禁用图形和视频捕获后端（容器内无 GUI）
-# 移除 macOS 特有参数：CMAKE_OSX_*、WITH_AVFOUNDATION
-# 用数组拼接参数，避免续行符在旧版 cmake/shell 下的解析问题
-CMAKE_ARGS=(
-  -S "$SRC/opencv"
-  -B "$B/opencv"
-  -G Ninja
-  -DCMAKE_BUILD_TYPE=Release
-  -DOPENCV_EXTRA_MODULES_PATH="$SRC/opencv_contrib/modules"
-  -DBUILD_SHARED_LIBS=OFF
-  -DBUILD_LIST="$BUILD_LIST"
-  -DBUILD_TESTS=OFF
-  -DBUILD_PERF_TESTS=OFF
-  -DBUILD_EXAMPLES=OFF
-  -DBUILD_DOCS=OFF
-  -DBUILD_opencv_apps=OFF
-  -DOPENCV_FORCE_3RDPARTY_BUILD=ON
-  -DWITH_FFMPEG=OFF
-  -DWITH_GSTREAMER=OFF
-  -DWITH_OPENCL=OFF
-  -DWITH_TBB=OFF
-  -DWITH_IPP=OFF
-  -DWITH_OPENMP=OFF
-  -DWITH_HDF5=OFF
-  -DWITH_FREETYPE=OFF
-  -DWITH_HARFBUZZ=OFF
-  -DWITH_WEBP=OFF
-  -DWITH_OPENJPEG=OFF
-  -DWITH_JASPER=OFF
-  -DWITH_GPHOTO2=OFF
-  -DWITH_1394=OFF
-  -DWITH_GTK=OFF
-  -DWITH_QT=OFF
-  -DWITH_OPENGL=OFF
-  -DWITH_V4L=ON
-  -DWITH_LIBV4L=OFF
-  -DWITH_AVFOUNDATION=OFF
-  -DWITH_OBSENSOR=OFF
-  -DVIDEOIO_ENABLE_PLUGINS=OFF
-)
-cmake "${CMAKE_ARGS[@]}"
+cmake -S "$SRC/opencv" -B "$B/opencv" -G Ninja \
+  -D CMAKE_BUILD_TYPE=Release \
+  -D OPENCV_EXTRA_MODULES_PATH="$SRC/opencv_contrib/modules" \
+  -D BUILD_SHARED_LIBS=OFF \
+  -D BUILD_LIST="$BUILD_LIST" \
+  -D BUILD_TESTS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_EXAMPLES=OFF -D BUILD_DOCS=OFF -D BUILD_opencv_apps=OFF \
+  -D OPENCV_FORCE_3RDPARTY_BUILD=ON \
+  -D WITH_FFMPEG=OFF \
+  -D WITH_GSTREAMER=OFF \
+  -D WITH_OPENCL=OFF \
+  -D WITH_TBB=OFF \
+  -D WITH_IPP=OFF \
+  -D WITH_OPENMP=OFF \
+  -D WITH_HDF5=OFF \
+  -D WITH_FREETYPE=OFF \
+  -D WITH_HARFBUZZ=OFF \
+  -D WITH_WEBP=OFF \
+  -D WITH_OPENJPEG=OFF \
+  -D WITH_JASPER=OFF \
+  -D WITH_GPHOTO2=OFF \
+  -D WITH_1394=OFF \
+  -D WITH_GTK=OFF \
+  -D WITH_QT=OFF \
+  -D WITH_OPENGL=OFF \
+  -D WITH_V4L=ON \
+  -D WITH_LIBV4L=OFF \
+  -D WITH_AVFOUNDATION=OFF \
+  -D WITH_OBSENSOR=OFF \
+  -D VIDEOIO_ENABLE_PLUGINS=OFF
 
 ninja -C "$B/opencv"
 
@@ -233,25 +242,15 @@ PY
 # ------------------------------------------------------------
 # Build OpenCvSharpExtern
 #   - Use OpenCV BUILD TREE to avoid missing installed 3rdparty .a
-#   - Linux 特有：静态链接 libstdc++ 和 libgcc（容器内避免动态链接问题）
+#   - Linux 特有：静态链接 libstdc++ 和 libgcc（减少运行时依赖）
 # ------------------------------------------------------------
 echo "==> Build OpenCvSharpExtern ($ARCH)"
-
-# cmake 3.10 不会自动创建 -B 目录
-mkdir -p "$B/opencvsharp"
-
-# Linux 编译参数：静态链接 C++ 运行时，避免容器内运行时依赖问题
-SHARP_ARGS=(
-  -S "$SRC/opencvsharp/src"
-  -B "$B/opencvsharp"
-  -G Ninja
-  -DCMAKE_BUILD_TYPE=Release
-  -DCMAKE_INSTALL_PREFIX="$OUT"
-  -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-  -DOpenCV_DIR="$B/opencv"
-)
-cmake "${SHARP_ARGS[@]}"
+cmake -S "$SRC/opencvsharp/src" -B "$B/opencvsharp" -G Ninja \
+  -D CMAKE_BUILD_TYPE=Release \
+  -D CMAKE_INSTALL_PREFIX="$OUT" \
+  -D CMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
+  -D CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  -D OpenCV_DIR="$B/opencv"
 
 ninja -C "$B/opencvsharp"
 ninja -C "$B/opencvsharp" install
@@ -270,6 +269,6 @@ cp -f "$SOFILE" "$OUT/final/libOpenCvSharpExtern.so"
 # ------------------------------------------------------------
 echo "==> 验证产物 ($ARCH)"
 file "$OUT/final/libOpenCvSharpExtern.so" || true
-ldd "$OUT/final/libOpenCvSharpExtern.so" || true
+ldd  "$OUT/final/libOpenCvSharpExtern.so" || true
 
 echo "==> Done slice: $OUT/final/libOpenCvSharpExtern.so"
