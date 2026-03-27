@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 用法：
+#   build_linux_slice.sh x86_64
+#   build_linux_slice.sh aarch64
+#
+# 注意事项：
+#   - 在 Docker 容器内执行
+#   - ARCH 只支持 x86_64 或 aarch64
+ARCH="$1"
+
+OPENCV_VERSION="${OPENCV_VERSION:-4.11.0}"
+OPENCVSHARP_REF="${OPENCVSHARP_REF:-main}"
+BUILD_LIST="${BUILD_LIST:-core,imgproc,videoio}"
+
+# ------------------------------------------------------------
+# 确定工作目录
+# 如果在 Docker 容器中通过 -w /ws 运行，GITHUB_WORKSPACE 不存在
+# 此时 pwd 就是 /ws（即项目根目录）
+# ------------------------------------------------------------
+ROOT="${GITHUB_WORKSPACE:-$(pwd)}/_work"
+SRC="$ROOT/src"
+B="$ROOT/build-$ARCH"
+OUT="$ROOT/out-$ARCH"
+
+mkdir -p "$SRC" "$B" "$OUT"
+
+echo "==> 工具版本"
+cmake --version || true
+ninja --version || true
+gcc --version || true
+
+# ------------------------------------------------------------
+# 安装构建依赖（容器内）
+# 兼容多种 Ubuntu 版本：libstdc++-10-dev (Ubuntu 20.04) 或 libstdc++-12-dev 等
+# ------------------------------------------------------------
+echo "==> 安装构建依赖"
+
+apt-get update -qq
+
+# 安装必须的基础依赖（失败则直接报错退出）
+apt-get install -y --no-install-recommends \
+    cmake \
+    ninja-build \
+    python3 \
+    git \
+    build-essential \
+    pkg-config
+
+# 尝试安装静态链接所需的 libstdc++ 开发包
+# Ubuntu 20.04 → libstdc++-10-dev，Ubuntu 22.04 → libstdc++-12-dev，依次尝试
+echo "==> 尝试安装 libstdc++ 静态开发包"
+apt-get install -y --no-install-recommends libstdc++-10-dev 2>/dev/null \
+  || apt-get install -y --no-install-recommends libstdc++-12-dev 2>/dev/null \
+  || apt-get install -y --no-install-recommends libstdc++-11-dev 2>/dev/null \
+  || echo "Warning: libstdc++-dev not found, -static-libstdc++ may fail at link time"
+
+# ------------------------------------------------------------
+# 克隆或更新源码
+# ------------------------------------------------------------
+clone_or_update() {
+  local url="$1"
+  local dir="$2"
+  local ref="$3"
+  if [[ ! -d "$dir/.git" ]]; then
+    git clone --depth 1 "$url" "$dir"
+  fi
+  git -C "$dir" fetch --all --tags --prune
+  git -C "$dir" checkout "$ref"
+}
+
+echo "==> 获取源码"
+clone_or_update "https://github.com/opencv/opencv.git"         "$SRC/opencv"         "$OPENCV_VERSION"
+clone_or_update "https://github.com/opencv/opencv_contrib.git" "$SRC/opencv_contrib" "$OPENCV_VERSION"
+clone_or_update "https://github.com/shimat/opencvsharp.git"    "$SRC/opencvsharp"    "$OPENCVSHARP_REF"
+
+# ------------------------------------------------------------
+# Patch OpenCvSharpExtern to build only what you use:
+#   - core.cpp, imgproc.cpp, videoio.cpp
+# ------------------------------------------------------------
+echo "==> Patch OpenCvSharpExtern CMakeLists to minimal sources (core/imgproc/videoio)"
+python3 - <<PY
+import pathlib, re
+
+cmake = pathlib.Path(r"$SRC/opencvsharp") / "src" / "OpenCvSharpExtern" / "CMakeLists.txt"
+text = cmake.read_text(encoding="utf-8", errors="ignore")
+
+pattern = re.compile(r"add_library\s*\(\s*OpenCvSharpExtern\s+SHARED\s+.*?\)\s*", re.S)
+m = pattern.search(text)
+if not m:
+    raise SystemExit("Cannot find add_library(OpenCvSharpExtern SHARED ...) in OpenCvSharpExtern/CMakeLists.txt")
+
+minimal = """add_library(OpenCvSharpExtern SHARED
+    core.cpp
+    imgproc.cpp
+    videoio.cpp
+)
+
+"""
+text2 = text[:m.start()] + minimal + text[m.end():]
+cmake.write_text(text2, encoding="utf-8")
+print("Patched:", cmake)
+PY
+
+# ------------------------------------------------------------
+# Build OpenCV (STATIC, minimal modules, minimize deps)
+# ------------------------------------------------------------
+echo "==> Build OpenCV static ($ARCH, Linux)"
+
+# Linux 特有：禁用图形和视频捕获后端（容器内无 GUI）
+# 移除 macOS 特有参数：CMAKE_OSX_*、WITH_AVFOUNDATION
+cmake -S "$SRC/opencv" -B "$B/opencv" -G Ninja \
+  -D CMAKE_BUILD_TYPE=Release \
+  -D OPENCV_EXTRA_MODULES_PATH="$SRC/opencv_contrib/modules" \
+  -D BUILD_SHARED_LIBS=OFF \
+  -D BUILD_LIST="$BUILD_LIST" \
+  -D BUILD_TESTS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_EXAMPLES=OFF -D BUILD_DOCS=OFF -D BUILD_opencv_apps=OFF \
+  -D OPENCV_FORCE_3RDPARTY_BUILD=ON \
+  \
+  -D WITH_FFMPEG=OFF \
+  -D WITH_GSTREAMER=OFF \
+  -D WITH_OPENCL=OFF \
+  -D WITH_TBB=OFF \
+  -D WITH_IPP=OFF \
+  -D WITH_OPENMP=OFF \
+  -D WITH_HDF5=OFF \
+  -D WITH_FREETYPE=OFF \
+  -D WITH_HARFBUZZ=OFF \
+  -D WITH_WEBP=OFF \
+  -D WITH_OPENJPEG=OFF \
+  -D WITH_JASPER=OFF \
+  -D WITH_GPHOTO2=OFF \
+  -D WITH_1394=OFF \
+  -D WITH_GTK=OFF \
+  -D WITH_QT=OFF \
+  -D WITH_OPENGL=OFF \
+  -D WITH_V4L=OFF \
+  -D WITH_LIBV4L=OFF \
+  -D WITH_AVFOUNDATION=OFF \
+  -D VIDEOIO_ENABLE_PLUGINS=OFF
+
+ninja -C "$B/opencv"
+
+# ------------------------------------------------------------
+# Auto-filter include_opencv.h based on *actual compile include roots*,
+# NOT based on opencv_contrib source tree.
+#
+# Compile include roots (matching what your compiler uses):
+#   - $SRC/opencv/include
+#   - $SRC/opencv/modules/<module>/include   (only for modules in BUILD_LIST)
+#
+# Anything else (e.g. opencv_contrib headers like opencv2/shape.hpp)
+# must be commented out, otherwise compilation fails.
+# ------------------------------------------------------------
+echo "==> Auto-filter include_opencv.h based on compile include roots"
+
+python3 - <<PY
+import pathlib, re
+
+opencv_root = pathlib.Path(r"$SRC/opencv")
+opencv_include = opencv_root / "include"
+modules_root = opencv_root / "modules"
+
+build_list = r"$BUILD_LIST".split(",")
+module_includes = [modules_root / m / "include" for m in build_list if (modules_root / m / "include").exists()]
+
+# Only these roots are considered "visible" to the compiler in your build.
+include_roots = [opencv_include] + module_includes
+
+hdr = pathlib.Path(r"$SRC/opencvsharp") / "src" / "OpenCvSharpExtern" / "include_opencv.h"
+lines = hdr.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+pat = re.compile(r'^\s*#\s*include\s*<([^>]+)>\s*$')
+
+def visible_header_exists(rel: str) -> bool:
+    # rel like "opencv2/shape.hpp"
+    for root in include_roots:
+        if (root / rel).exists():
+            return True
+    return False
+
+out = []
+disabled = 0
+for line in lines:
+    m = pat.match(line)
+    if not m:
+        out.append(line)
+        continue
+    inc = m.group(1).strip()
+    # only filter opencv2/*
+    if inc.startswith("opencv2/") and not visible_header_exists(inc):
+        out.append("// [auto-disabled not in include roots] " + line)
+        disabled += 1
+    else:
+        out.append(line)
+
+hdr.write_text("\n".join(out) + "\n", encoding="utf-8")
+print(f"include_opencv.h filtered: disabled {disabled} includes")
+print("Include roots:")
+for r in include_roots:
+    print("  -", r)
+PY
+
+# ------------------------------------------------------------
+# Build OpenCvSharpExtern
+#   - Use OpenCV BUILD TREE to avoid missing installed 3rdparty .a
+#   - Linux 特有：静态链接 libstdc++ 和 libgcc（容器内避免动态链接问题）
+# ------------------------------------------------------------
+echo "==> Build OpenCvSharpExtern ($ARCH)"
+
+# Linux 编译参数：静态链接 C++ 运行时，避免容器内运行时依赖问题
+cmake -S "$SRC/opencvsharp/src" -B "$B/opencvsharp" -G Ninja \
+  -D CMAKE_BUILD_TYPE=Release \
+  -D CMAKE_INSTALL_PREFIX="$OUT" \
+  -D CMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
+  -D CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  -D OpenCV_DIR="$B/opencv"
+
+ninja -C "$B/opencvsharp"
+ninja -C "$B/opencvsharp" install
+
+SOFILE="$(find "$OUT" -name "libOpenCvSharpExtern.so" -print -quit)"
+if [[ -z "${SOFILE:-}" ]]; then
+  echo "ERROR: libOpenCvSharpExtern.so not found"
+  exit 1
+fi
+
+mkdir -p "$OUT/final"
+cp -f "$SOFILE" "$OUT/final/libOpenCvSharpExtern.so"
+
+# ------------------------------------------------------------
+# 验证最终产物
+# ------------------------------------------------------------
+echo "==> 验证产物 ($ARCH)"
+file "$OUT/final/libOpenCvSharpExtern.so" || true
+ldd "$OUT/final/libOpenCvSharpExtern.so" || true
+
+echo "==> Done slice: $OUT/final/libOpenCvSharpExtern.so"
