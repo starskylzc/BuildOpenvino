@@ -220,7 +220,8 @@ jobs:
         shell: pwsh
         run: |
           pwsh -File .github/scripts/smoke_test_windows.ps1 `
-            -LibPath "_work/out-win-${{ matrix.target }}/final/OpenCvSharpExtern.dll"
+            -LibPath "_work/out-win-${{ matrix.target }}/final/OpenCvSharpExtern.dll" `
+            -Arch "${{ matrix.target }}"
 
       - name: Upload artifact (${{ matrix.target }})
         if: steps.check.outputs.enabled == 'true'

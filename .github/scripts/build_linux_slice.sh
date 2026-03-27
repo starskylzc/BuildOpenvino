@@ -144,9 +144,11 @@ cmake -S "$SRC/opencv" -B "$B/opencv" -G Ninja \
   -D WITH_GTK=OFF \
   -D WITH_QT=OFF \
   -D WITH_OPENGL=OFF \
-  -D WITH_V4L=OFF \
+  -D WITH_V4L=ON \
   -D WITH_LIBV4L=OFF \
   -D WITH_AVFOUNDATION=OFF \
+  -D WITH_OBSENSOR=OFF \
+  -D WITH_ORBBEC=OFF \
   -D VIDEOIO_ENABLE_PLUGINS=OFF
 
 ninja -C "$B/opencv"

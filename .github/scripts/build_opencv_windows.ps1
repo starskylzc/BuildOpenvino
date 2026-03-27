@@ -126,31 +126,6 @@ Write-Host "==> Build OpenCV static (Windows $TargetArch)"
 $SRC_OPENCV = "$SRC_SLASH/opencv"
 $SRC_CONTRIB = "$SRC_SLASH/opencv_contrib/modules"
 $BUILD_OPENCV = "$B_DIR_SLASH/opencv"
-# [关键修复] 针对 ARM64 定义交叉编译参数
-# 这会告诉 CMake 不要尝试运行(try_run)生成的二进制文件，防止在 x64 机器上报错或静默失败
-$EXTRA_OPENCV_ARGS = @()
-if ($TargetArch -eq "arm64") {
-    Write-Host "--> Detected ARM64: Enabling CMake Cross-Compiling Mode & Disabling x86 intrinsics" 
-    
-    # 1. 基础交叉编译标识
-    $EXTRA_OPENCV_ARGS += "-D", "CMAKE_SYSTEM_NAME=Windows"
-    $EXTRA_OPENCV_ARGS += "-D", "CMAKE_SYSTEM_PROCESSOR=ARM64"
-    
-    # 2. 彻底禁用 x86 指令集 (关键修复)
-    $EXTRA_OPENCV_ARGS += "-D", "CPU_BASELINE=NEON" # 强制基准为 NEON
-    $EXTRA_OPENCV_ARGS += "-D", "CPU_DISPATCH="     # 禁用额外的指令集调度
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_SSE=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_SSE2=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_SSE3=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_AVX=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_AVX2=OFF"
-    
-    # 3. 禁用可能包含内联 x86 汇编的模块
-    # MSMF (Media Foundation) 和 DSHOW (DirectShow) 在旧版 OpenCV 中对 ARM64 支持可能不完善
-    # 如果不需要摄像头功能，建议关闭。如果需要，先尝试关闭看是否解决编译错误。
-    $EXTRA_OPENCV_ARGS += "-D", "WITH_MSMF=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "WITH_DSHOW=OFF"
-}
 cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D OPENCV_EXTRA_MODULES_PATH="$SRC_CONTRIB" `
@@ -240,31 +215,6 @@ Write-Host "==> Build OpenCvSharpExtern (Windows $TargetArch)"
 $SRC_SHARP = "$SRC_SLASH/opencvsharp/src"
 $BUILD_SHARP = "$B_DIR_SLASH/opencvsharp"
 $INSTALL_PREFIX = "$OUT_DIR_SLASH"
-# [关键修复] 针对 ARM64 定义交叉编译参数
-# 这会告诉 CMake 不要尝试运行(try_run)生成的二进制文件，防止在 x64 机器上报错或静默失败
-$EXTRA_OPENCV_ARGS = @()
-if ($TargetArch -eq "arm64") {
-    Write-Host "--> Detected ARM64: Enabling CMake Cross-Compiling Mode & Disabling x86 intrinsics" 
-    
-    # 1. 基础交叉编译标识
-    $EXTRA_OPENCV_ARGS += "-D", "CMAKE_SYSTEM_NAME=Windows"
-    $EXTRA_OPENCV_ARGS += "-D", "CMAKE_SYSTEM_PROCESSOR=ARM64"
-    
-    # 2. 彻底禁用 x86 指令集 (关键修复)
-    $EXTRA_OPENCV_ARGS += "-D", "CPU_BASELINE=NEON" # 强制基准为 NEON
-    $EXTRA_OPENCV_ARGS += "-D", "CPU_DISPATCH="     # 禁用额外的指令集调度
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_SSE=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_SSE2=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_SSE3=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_AVX=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "ENABLE_AVX2=OFF"
-    
-    # 3. 禁用可能包含内联 x86 汇编的模块
-    # MSMF (Media Foundation) 和 DSHOW (DirectShow) 在旧版 OpenCV 中对 ARM64 支持可能不完善
-    # 如果不需要摄像头功能，建议关闭。如果需要，先尝试关闭看是否解决编译错误。
-    $EXTRA_OPENCV_ARGS += "-D", "WITH_MSMF=OFF"
-    $EXTRA_OPENCV_ARGS += "-D", "WITH_DSHOW=OFF"
-}
 cmake -S "$SRC_SHARP" -B "$BUILD_SHARP" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D CMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" `
