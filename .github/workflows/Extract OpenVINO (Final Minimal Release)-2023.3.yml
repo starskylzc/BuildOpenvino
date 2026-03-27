@@ -261,149 +261,99 @@ jobs:
           path: final_output/openvino_windows_mac.zip
 
   # ============================================================
-  # Job 2: Linux x86_64 构建（在 ubuntu-22.04 上运行）
-  # 兼容：Ubuntu 20.04+，麒麟 V10，统信 UOS V20 等（glibc >= 2.28）
+  # Job 2: Linux x86_64
+  # Runner：ubuntu-22.04
+  # Docker 容器：ubuntu:20.04 (glibc 2.31)
+  # 兼容：Ubuntu 20.04+，麒麟 V10 x64，统信 UOS V20 x64
   # ============================================================
   build-linux-x86_64:
     runs-on: ubuntu-22.04
     steps:
-      - name: Download Linux x86_64 Package
+      - name: Extract OpenVINO x86_64 (Docker ubuntu:20.04)
         run: |
-          set -euxo pipefail
-          mkdir -p downloads
-          echo ">>> Downloading Linux x86_64 Package..."
-          curl -L -o downloads/linux.tgz "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_linux_2023.3.0.13775.ceeafaf64f3_x86_64.tgz"
+          docker run --rm \
+            -v "${{ github.workspace }}/final_output:/out" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ubuntu:20.04 \
+            bash -euxo pipefail -c '
+              apt-get update -qq
+              apt-get install -y --no-install-recommends curl ca-certificates patchelf
 
-      - name: Extract Archive
-        run: |
-          set -euxo pipefail
-          echo ">>> Extracting..."
-          mkdir -p extracted_linux
-          tar -xzf downloads/linux.tgz -C extracted_linux
+              # 下载官方 ubuntu20 x86_64 包
+              echo ">>> Downloading OpenVINO ubuntu20 x86_64..."
+              curl -L -o /tmp/ov.tgz \
+                "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu20_2023.3.0.13775.ceeafaf64f3_x86_64.tgz"
 
-          LINUX_ROOT=$(find extracted_linux -maxdepth 1 -type d -name "l_openvino_toolkit_linux*" | head -n 1)
-          echo "LINUX_ROOT=$LINUX_ROOT" >> $GITHUB_ENV
+              echo ">>> Extracting..."
+              mkdir -p /tmp/ov_src
+              tar -xzf /tmp/ov.tgz -C /tmp/ov_src
 
-      - name: Process Linux x86_64 Runtime (CPU + ONNX)
-        run: |
-          set -euxo pipefail
-          mkdir -p final_output/linux_x86_64
+              OV_ROOT=$(find /tmp/ov_src -maxdepth 1 -type d -name "l_openvino_toolkit_*" | head -n 1)
+              echo ">>> OV_ROOT: $OV_ROOT"
 
-          LINUX_ROOT="${{ env.LINUX_ROOT }}"
-          DST="final_output/linux_x86_64"
+              # 动态定位库目录（通过 libopenvino.so.2023.3.0 所在位置）
+              SRC_LIB=$(find "$OV_ROOT/runtime" -maxdepth 5 -type f \
+                -name "libopenvino.so.2023.3.0" | head -n 1 | xargs dirname)
+              echo ">>> SRC_LIB: $SRC_LIB"
 
-          # 动态查找库目录（兼容不同架构路径，如 intel64/Release 或 aarch64/Release）
-          echo ">>> Locating library directory..."
-          SRC_LIB=$(find "$LINUX_ROOT/runtime" -maxdepth 5 -type f -name "libopenvino.so.2023.3.0" 2>/dev/null | head -n 1 | xargs dirname 2>/dev/null || true)
-          if [[ -z "$SRC_LIB" || ! -d "$SRC_LIB" ]]; then
-            echo "ERROR: Cannot find libopenvino.so.2023.3.0 in $LINUX_ROOT/runtime"
-            find "$LINUX_ROOT/runtime" -name "*.so*" 2>/dev/null | head -n 30
-            exit 1
-          fi
-          echo ">>> Using library dir: $SRC_LIB"
+              # 动态定位 TBB 目录
+              SRC_TBB=$(find "$OV_ROOT/runtime/3rdparty/tbb" -type d -name "lib" | head -n 1)
+              echo ">>> SRC_TBB: $SRC_TBB"
 
-          # 动态查找 TBB 目录
-          SRC_TBB=$(find "$LINUX_ROOT/runtime/3rdparty/tbb" -type d -name "lib" 2>/dev/null | head -n 1)
-          if [[ -z "$SRC_TBB" || ! -d "$SRC_TBB" ]]; then
-            SRC_TBB="$LINUX_ROOT/runtime/3rdparty/tbb/lib"
-          fi
-          echo ">>> Using TBB dir: $SRC_TBB"
+              SRC_INC="$OV_ROOT/runtime/include/ie/c_api"
+              DST="/out/linux_x86_64"
+              mkdir -p "$DST/include"
 
-          # 头文件目录
-          SRC_INC="$LINUX_ROOT/runtime/include/ie/c_api"
+              echo ">>> Copying real files (no symlinks)..."
+              # 1) 核心库（实体文件）
+              cp "$SRC_LIB/libopenvino.so.2023.3.0"             "$DST/"
+              cp "$SRC_LIB/libopenvino_c.so.2023.3.0"           "$DST/"
+              cp "$SRC_LIB/libopenvino_onnx_frontend.so.2023.3.0" "$DST/"
 
-          echo ">>> Copying Linux Libraries (REAL files only)..."
+              # 2) CPU 插件
+              CPU_PLUGIN=$(find "$SRC_LIB" -maxdepth 1 -type f \
+                -name "libopenvino_intel_cpu_plugin.so*" | head -n 1)
+              [ -z "$CPU_PLUGIN" ] && { echo "ERROR: CPU plugin not found"; ls "$SRC_LIB"; exit 1; }
+              cp "$CPU_PLUGIN" "$DST/"
+              CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
 
-          # 1) 复制实体库（.so.2023.3.0，非软链接）
-          # 核心库
-          CORE_LIB=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino.so.2023.3.0" | head -n 1)
-          if [[ -z "$CORE_LIB" ]]; then
-            CORE_LIB=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino.so*" | grep -v "\.so\." | head -n 1)
-          fi
-          cp "$CORE_LIB" "$DST/"
+              # 3) TBB 实体库
+              cp "$SRC_TBB/libtbb.so.12"      "$DST/"
+              cp "$SRC_TBB/libtbbmalloc.so.2" "$DST/"
 
-          CORE_C_LIB=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino_c.so.2023.3.0" | head -n 1)
-          cp "$CORE_C_LIB" "$DST/"
+              # 4) 头文件
+              cp "$SRC_INC/ie_c_api.h" "$DST/include/"
 
-          ONNX_LIB=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino_onnx_frontend.so.2023.3.0" | head -n 1)
-          cp "$ONNX_LIB" "$DST/"
+              cd "$DST"
 
-          # 2) CPU 插件
-          CPU_PLUGIN=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino_intel_cpu_plugin.so*" | head -n 1)
-          if [[ -z "$CPU_PLUGIN" ]]; then
-            echo "ERROR: CPU plugin not found in $SRC_LIB"
-            ls -la "$SRC_LIB"
-            exit 1
-          fi
-          cp "$CPU_PLUGIN" "$DST/"
-          CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
+              echo ">>> Renaming..."
+              mv -f "libopenvino.so.2023.3.0"              "libopenvino.so"
+              mv -f "libopenvino_c.so.2023.3.0"            "libopenvino_c.so"
+              mv -f "libopenvino_onnx_frontend.so.2023.3.0" "libopenvino_onnx_frontend.2330.so"
 
-          # 3) TBB 实体库
-          echo ">>> Copying Minimal TBB (Core + Malloc Only)..."
-          TBB_LIB=$(find "$SRC_TBB" -maxdepth 1 -type f -name "libtbb.so.12" | head -n 1)
-          TBB_MALLOC_LIB=$(find "$SRC_TBB" -maxdepth 1 -type f -name "libtbbmalloc.so.2" | head -n 1)
-          cp "$TBB_LIB" "$DST/"
-          cp "$TBB_MALLOC_LIB" "$DST/"
+              # TBB 软链接（供运行时按无版本号名称查找）
+              ln -sf "libtbb.so.12"      "libtbb.so"
+              ln -sf "libtbbmalloc.so.2" "libtbbmalloc.so"
 
-          # 4) C API 头文件
-          mkdir -p "$DST/include"
-          cp "$SRC_INC/ie_c_api.h" "$DST/include/"
+              echo ">>> Generating plugins.xml..."
+              cat > "plugins.xml" <<EOF
+<ie>
+    <plugins>
+        <plugin name="CPU" location="${CPU_PLUGIN_NAME}">
+        </plugin>
+    </plugins>
+</ie>
+EOF
 
-          cd "$DST"
+              echo ">>> Patching RPATH to \$ORIGIN..."
+              for LIB in $(find . -maxdepth 1 \( -name "*.so" -o -name "*.so.*" \) -type f); do
+                echo "  patchelf: $LIB"
+                patchelf --set-rpath "\$ORIGIN" "$LIB"
+              done
 
-          echo ">>> Renaming libraries (clean names, ONNX frontend => 2330)..."
-          # core / c api：干净名（不带版本号）
-          mv -f "libopenvino.so.2023.3.0" "libopenvino.so"
-          mv -f "libopenvino_c.so.2023.3.0" "libopenvino_c.so"
-
-          # onnx frontend：2330 名（与 Mac 版本命名风格一致）
-          mv -f "libopenvino_onnx_frontend.so.2023.3.0" "libopenvino_onnx_frontend.2330.so"
-
-          # 创建 TBB 软链接（OpenVINO 可能通过无版本号名称查找 TBB）
-          ln -sf "libtbb.so.12" "libtbb.so"
-          ln -sf "libtbbmalloc.so.2" "libtbbmalloc.so"
-
-          # 5) plugins.xml（CPU）
-          echo ">>> Generating Linux plugins.xml..."
-          cat <<EOF > "plugins.xml"
-          <ie>
-              <plugins>
-                  <plugin name="CPU" location="$CPU_PLUGIN_NAME">
-                  </plugin>
-              </plugins>
-          </ie>
-          EOF
-
-          echo ">>> Pre-Verify files:"
-          ls -la libopenvino*.so* libtbb*.so* "$CPU_PLUGIN_NAME" plugins.xml
-
-      - name: Patch Linux x86_64 Binaries (patchelf)
-        run: |
-          set -euxo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y patchelf
-
-          DST="final_output/linux_x86_64"
-          cd "$DST"
-
-          echo ">>> Patching RPATH to \$ORIGIN for local execution..."
-          LIBS=$(find . -maxdepth 1 \( -name "*.so" -o -name "*.so.*" \) -type f 2>/dev/null || true)
-          if [[ -z "$LIBS" ]]; then
-            echo "WARNING: No .so files found to patch"
-          else
-            for LIB in $LIBS; do
-              echo "---- patching RPATH for: $LIB ----"
-              patchelf --set-rpath '$ORIGIN' "$LIB" || true
-            done
-
-            echo ">>> Verify RPATH:"
-            for LIB in $LIBS; do
-              echo "---- $LIB ----"
-              patchelf --print-rpath "$LIB" || true
-            done
-          fi
-
-          cd ../..
+              echo ">>> Final files:"
+              ls -la
+            '
 
       - name: Zip Linux x86_64
         run: |
@@ -420,149 +370,99 @@ jobs:
           path: final_output/openvino_linux_x86_64.zip
 
   # ============================================================
-  # Job 3: Linux aarch64 构建（在 ubuntu-24.04-arm 上运行）
-  # 兼容：Ubuntu 20.04+， ARM64 国产系统等
+  # Job 3: Linux aarch64
+  # Runner：ubuntu-24.04-arm（GitHub 原生 ARM64 Runner）
+  # Docker 容器：ubuntu:20.04 (glibc 2.31)
+  # 兼容：麒麟 V10 ARM、统信 UOS V20 ARM、鸿蒙 OpenHarmony
   # ============================================================
   build-linux-aarch64:
     runs-on: ubuntu-24.04-arm
     steps:
-      - name: Download Linux aarch64 Package
+      - name: Extract OpenVINO aarch64 (Docker ubuntu:20.04)
         run: |
-          set -euxo pipefail
-          mkdir -p downloads
-          echo ">>> Downloading Linux aarch64 Package..."
-          curl -L -o downloads/linux.tgz "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_linux_2023.3.0.13775.ceeafaf64f3_aarch64.tgz"
+          docker run --rm \
+            -v "${{ github.workspace }}/final_output:/out" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ubuntu:20.04 \
+            bash -euxo pipefail -c '
+              apt-get update -qq
+              apt-get install -y --no-install-recommends curl ca-certificates patchelf
 
-      - name: Extract Archive
-        run: |
-          set -euxo pipefail
-          echo ">>> Extracting..."
-          mkdir -p extracted_linux
-          tar -xzf downloads/linux.tgz -C extracted_linux
+              # 下载官方 ubuntu18 arm64 包（2023.3 仅提供 ubuntu18 版本的 arm64）
+              echo ">>> Downloading OpenVINO ubuntu18 arm64..."
+              curl -L -o /tmp/ov.tgz \
+                "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu18_2023.3.0.13775.ceeafaf64f3_arm64.tgz"
 
-          LINUX_ROOT=$(find extracted_linux -maxdepth 1 -type d -name "l_openvino_toolkit_linux*" | head -n 1)
-          echo "LINUX_ROOT=$LINUX_ROOT" >> $GITHUB_ENV
+              echo ">>> Extracting..."
+              mkdir -p /tmp/ov_src
+              tar -xzf /tmp/ov.tgz -C /tmp/ov_src
 
-      - name: Process Linux aarch64 Runtime (CPU + ONNX)
-        run: |
-          set -euxo pipefail
-          mkdir -p final_output/linux_aarch64
+              OV_ROOT=$(find /tmp/ov_src -maxdepth 1 -type d -name "l_openvino_toolkit_*" | head -n 1)
+              echo ">>> OV_ROOT: $OV_ROOT"
 
-          LINUX_ROOT="${{ env.LINUX_ROOT }}"
-          DST="final_output/linux_aarch64"
+              # 动态定位库目录
+              SRC_LIB=$(find "$OV_ROOT/runtime" -maxdepth 5 -type f \
+                -name "libopenvino.so.2023.3.0" | head -n 1 | xargs dirname)
+              echo ">>> SRC_LIB: $SRC_LIB"
 
-          # 动态查找库目录（兼容不同架构路径，如 intel64/Release 或 aarch64/Release）
-          echo ">>> Locating library directory..."
-          SRC_LIB=$(find "$LINUX_ROOT/runtime" -maxdepth 5 -type f -name "libopenvino.so.2023.3.0" 2>/dev/null | head -n 1 | xargs dirname 2>/dev/null || true)
-          if [[ -z "$SRC_LIB" || ! -d "$SRC_LIB" ]]; then
-            echo "ERROR: Cannot find libopenvino.so.2023.3.0 in $LINUX_ROOT/runtime"
-            find "$LINUX_ROOT/runtime" -name "*.so*" 2>/dev/null | head -n 30
-            exit 1
-          fi
-          echo ">>> Using library dir: $SRC_LIB"
+              # 动态定位 TBB 目录
+              SRC_TBB=$(find "$OV_ROOT/runtime/3rdparty/tbb" -type d -name "lib" | head -n 1)
+              echo ">>> SRC_TBB: $SRC_TBB"
 
-          # 动态查找 TBB 目录
-          SRC_TBB=$(find "$LINUX_ROOT/runtime/3rdparty/tbb" -type d -name "lib" 2>/dev/null | head -n 1)
-          if [[ -z "$SRC_TBB" || ! -d "$SRC_TBB" ]]; then
-            SRC_TBB="$LINUX_ROOT/runtime/3rdparty/tbb/lib"
-          fi
-          echo ">>> Using TBB dir: $SRC_TBB"
+              SRC_INC="$OV_ROOT/runtime/include/ie/c_api"
+              DST="/out/linux_aarch64"
+              mkdir -p "$DST/include"
 
-          # 头文件目录
-          SRC_INC="$LINUX_ROOT/runtime/include/ie/c_api"
+              echo ">>> Copying real files (no symlinks)..."
+              # 1) 核心库（实体文件）
+              cp "$SRC_LIB/libopenvino.so.2023.3.0"             "$DST/"
+              cp "$SRC_LIB/libopenvino_c.so.2023.3.0"           "$DST/"
+              cp "$SRC_LIB/libopenvino_onnx_frontend.so.2023.3.0" "$DST/"
 
-          echo ">>> Copying Linux Libraries (REAL files only)..."
+              # 2) CPU 插件
+              CPU_PLUGIN=$(find "$SRC_LIB" -maxdepth 1 -type f \
+                -name "libopenvino_intel_cpu_plugin.so*" | head -n 1)
+              [ -z "$CPU_PLUGIN" ] && { echo "ERROR: CPU plugin not found"; ls "$SRC_LIB"; exit 1; }
+              cp "$CPU_PLUGIN" "$DST/"
+              CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
 
-          # 1) 复制实体库（.so.2023.3.0，非软链接）
-          # 核心库
-          CORE_LIB=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino.so.2023.3.0" | head -n 1)
-          if [[ -z "$CORE_LIB" ]]; then
-            CORE_LIB=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino.so*" | grep -v "\.so\." | head -n 1)
-          fi
-          cp "$CORE_LIB" "$DST/"
+              # 3) TBB 实体库
+              cp "$SRC_TBB/libtbb.so.12"      "$DST/"
+              cp "$SRC_TBB/libtbbmalloc.so.2" "$DST/"
 
-          CORE_C_LIB=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino_c.so.2023.3.0" | head -n 1)
-          cp "$CORE_C_LIB" "$DST/"
+              # 4) 头文件
+              cp "$SRC_INC/ie_c_api.h" "$DST/include/"
 
-          ONNX_LIB=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino_onnx_frontend.so.2023.3.0" | head -n 1)
-          cp "$ONNX_LIB" "$DST/"
+              cd "$DST"
 
-          # 2) CPU 插件
-          CPU_PLUGIN=$(find "$SRC_LIB" -maxdepth 1 -type f -name "libopenvino_intel_cpu_plugin.so*" | head -n 1)
-          if [[ -z "$CPU_PLUGIN" ]]; then
-            echo "ERROR: CPU plugin not found in $SRC_LIB"
-            ls -la "$SRC_LIB"
-            exit 1
-          fi
-          cp "$CPU_PLUGIN" "$DST/"
-          CPU_PLUGIN_NAME=$(basename "$CPU_PLUGIN")
+              echo ">>> Renaming..."
+              mv -f "libopenvino.so.2023.3.0"              "libopenvino.so"
+              mv -f "libopenvino_c.so.2023.3.0"            "libopenvino_c.so"
+              mv -f "libopenvino_onnx_frontend.so.2023.3.0" "libopenvino_onnx_frontend.2330.so"
 
-          # 3) TBB 实体库
-          echo ">>> Copying Minimal TBB (Core + Malloc Only)..."
-          TBB_LIB=$(find "$SRC_TBB" -maxdepth 1 -type f -name "libtbb.so.12" | head -n 1)
-          TBB_MALLOC_LIB=$(find "$SRC_TBB" -maxdepth 1 -type f -name "libtbbmalloc.so.2" | head -n 1)
-          cp "$TBB_LIB" "$DST/"
-          cp "$TBB_MALLOC_LIB" "$DST/"
+              # TBB 软链接
+              ln -sf "libtbb.so.12"      "libtbb.so"
+              ln -sf "libtbbmalloc.so.2" "libtbbmalloc.so"
 
-          # 4) C API 头文件
-          mkdir -p "$DST/include"
-          cp "$SRC_INC/ie_c_api.h" "$DST/include/"
+              echo ">>> Generating plugins.xml..."
+              cat > "plugins.xml" <<EOF
+<ie>
+    <plugins>
+        <plugin name="CPU" location="${CPU_PLUGIN_NAME}">
+        </plugin>
+    </plugins>
+</ie>
+EOF
 
-          cd "$DST"
+              echo ">>> Patching RPATH to \$ORIGIN..."
+              for LIB in $(find . -maxdepth 1 \( -name "*.so" -o -name "*.so.*" \) -type f); do
+                echo "  patchelf: $LIB"
+                patchelf --set-rpath "\$ORIGIN" "$LIB"
+              done
 
-          echo ">>> Renaming libraries (clean names, ONNX frontend => 2330)..."
-          # core / c api：干净名（不带版本号）
-          mv -f "libopenvino.so.2023.3.0" "libopenvino.so"
-          mv -f "libopenvino_c.so.2023.3.0" "libopenvino_c.so"
-
-          # onnx frontend：2330 名（与 Mac 版本命名风格一致）
-          mv -f "libopenvino_onnx_frontend.so.2023.3.0" "libopenvino_onnx_frontend.2330.so"
-
-          # 创建 TBB 软链接（OpenVINO 可能通过无版本号名称查找 TBB）
-          ln -sf "libtbb.so.12" "libtbb.so"
-          ln -sf "libtbbmalloc.so.2" "libtbbmalloc.so"
-
-          # 5) plugins.xml（CPU）
-          echo ">>> Generating Linux plugins.xml..."
-          cat <<EOF > "plugins.xml"
-          <ie>
-              <plugins>
-                  <plugin name="CPU" location="$CPU_PLUGIN_NAME">
-                  </plugin>
-              </plugins>
-          </ie>
-          EOF
-
-          echo ">>> Pre-Verify files:"
-          ls -la libopenvino*.so* libtbb*.so* "$CPU_PLUGIN_NAME" plugins.xml
-
-      - name: Patch Linux aarch64 Binaries (patchelf)
-        run: |
-          set -euxo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y patchelf
-
-          DST="final_output/linux_aarch64"
-          cd "$DST"
-
-          echo ">>> Patching RPATH to \$ORIGIN for local execution..."
-          LIBS=$(find . -maxdepth 1 \( -name "*.so" -o -name "*.so.*" \) -type f 2>/dev/null || true)
-          if [[ -z "$LIBS" ]]; then
-            echo "WARNING: No .so files found to patch"
-          else
-            for LIB in $LIBS; do
-              echo "---- patching RPATH for: $LIB ----"
-              patchelf --set-rpath '$ORIGIN' "$LIB" || true
-            done
-
-            echo ">>> Verify RPATH:"
-            for LIB in $LIBS; do
-              echo "---- $LIB ----"
-              patchelf --print-rpath "$LIB" || true
-            done
-          fi
-
-          cd ../..
+              echo ">>> Final files:"
+              ls -la
+            '
 
       - name: Zip Linux aarch64
         run: |

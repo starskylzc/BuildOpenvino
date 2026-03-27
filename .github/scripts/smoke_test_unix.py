@@ -26,12 +26,16 @@ REQUIRED_SYMBOLS = [
 
 
 def check_symbols(lib_path: str) -> bool:
-    """用 nm -D 检查导出符号是否存在"""
-    print("── 符号检查 (nm -D) ──────────────────────────────")
+    """检查导出符号是否存在。
+    Linux .so  → nm -D（动态符号表）
+    macOS .dylib → nm -gU（全局已定义符号；.dylib 无动态符号表，-D 会报错）
+    """
+    is_macos = sys.platform == "darwin"
+    nm_args = ["nm", "-gU", lib_path] if is_macos else ["nm", "-D", lib_path]
+    flag_desc = "-gU" if is_macos else "-D"
+    print(f"── 符号检查 (nm {flag_desc}) ──────────────────────────────")
     try:
-        result = subprocess.run(
-            ["nm", "-D", lib_path], capture_output=True, text=True, check=True
-        )
+        result = subprocess.run(nm_args, capture_output=True, text=True, check=True)
         symbols = result.stdout
     except subprocess.CalledProcessError as e:
         print(f"  nm 执行失败: {e.stderr.strip()}")
