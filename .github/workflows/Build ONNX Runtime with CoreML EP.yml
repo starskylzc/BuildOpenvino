@@ -24,13 +24,26 @@ jobs:
           - ort_version: 'v1.16.3'
             arch: 'x86_64'
             deploy_target: '10.15'
+            xcode_version: ''
             
           # === Apple Silicon arm64 (macOS 11.0) ===
+          # 必须使用 Xcode 15.2 (SDK 14.2)，避免新版 SDK (>=14.4) 触发
+          # C++20 std::to_chars 在 deploy_target < 13.3 时不可用的编译错误
+          # 参考: https://github.com/microsoft/onnxruntime/issues/21033
           - ort_version: 'v1.18.1'
             arch: 'arm64'
             deploy_target: '11.0'
+            xcode_version: '15.2'
 
     steps:
+      - name: Select Xcode Version
+        if: matrix.xcode_version != ''
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_${{ matrix.xcode_version }}.app/Contents/Developer
+          echo "Switched to Xcode ${{ matrix.xcode_version }}"
+          xcodebuild -version
+          xcrun --show-sdk-version
+
       - name: Checkout ONNX Runtime
         uses: actions/checkout@v6
         with:
@@ -46,8 +59,12 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          brew install cmake ninja
-          pip install numpy
+          # runner 预装的 CMake 可能是 4.x，ORT 1.18.1 及更早版本不支持 CMake 4.x
+          # 参考: https://github.com/microsoft/onnxruntime/issues/27503
+          # 使用 pip 安装 CMake 3.x 以确保兼容性
+          pip install "cmake>=3.26,<4" numpy
+          brew install ninja
+          echo "CMake version: $(cmake --version | head -1)"
 
       - name: Patch Source Code (Fix Eigen Hash)
         shell: bash
