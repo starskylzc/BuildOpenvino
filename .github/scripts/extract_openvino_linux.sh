@@ -45,13 +45,6 @@ SRC_LIB=$(find "$OV_ROOT/runtime/lib" -maxdepth 2 -type f \
   -name "libopenvino.so.${OV_VERSION}" | head -n 1 | xargs dirname)
 echo ">>> SRC_LIB: $SRC_LIB"
 
-# 定位 TBB 目录（2024.x 两个架构包内均自带）
-SRC_TBB=$(find "$OV_ROOT/runtime/3rdparty/tbb/lib" -maxdepth 1 -type f \
-  -name "libtbb.so.*" 2>/dev/null | grep -v debug | sort -V | tail -n 1 | xargs dirname 2>/dev/null || true)
-if [ -z "$SRC_TBB" ]; then
-  SRC_TBB="$OV_ROOT/runtime/3rdparty/tbb/lib"
-fi
-echo ">>> SRC_TBB: $SRC_TBB"
 
 # 定位头文件（优先新路径，兼容旧路径）
 if [ -f "$OV_ROOT/runtime/include/openvino/c/ov_common.h" ]; then
@@ -100,22 +93,50 @@ else
   PLUGIN_NAME="CPU"
 fi
 
-echo ">>> Copying bundled TBB (libtbb.so.12.x + libtbbmalloc.so.2.x)..."
-# 找实体文件（最完整版本号，如 libtbb.so.12.13）
-TBB_REAL=$(find "$SRC_TBB" -maxdepth 1 -type f -name "libtbb.so.*" | grep -v debug | sort -V | tail -n 1)
-TBB_SONAME=$(echo "$TBB_REAL" | grep -oP 'libtbb\.so\.\d+')   # libtbb.so.12
-TBB_BASENAME=$(basename "$TBB_REAL")                            # libtbb.so.12.13
-cp "$TBB_REAL" "$DST/$TBB_BASENAME"
-ln -sf "$TBB_BASENAME" "$DST/$TBB_SONAME"
-ln -sf "$TBB_SONAME"   "$DST/libtbb.so"
+echo ">>> Handling TBB..."
+# 优先使用包内自带 TBB（aarch64 包有，x86_64 ubuntu18 包无）
+TBB_REAL=""
+if [ -d "$OV_ROOT/runtime/3rdparty/tbb/lib" ]; then
+  TBB_REAL=$(find "$OV_ROOT/runtime/3rdparty/tbb/lib" -maxdepth 1 -type f \
+    -name "libtbb.so.*" 2>/dev/null | grep -v debug | sort -V | tail -n 1 || true)
+fi
 
-MALLOC_REAL=$(find "$SRC_TBB" -maxdepth 1 -type f -name "libtbbmalloc.so.*" | grep -v debug | sort -V | tail -n 1)
-if [ -n "$MALLOC_REAL" ]; then
-  MALLOC_SONAME=$(echo "$MALLOC_REAL" | grep -oP 'libtbbmalloc\.so\.\d+')
-  MALLOC_BASENAME=$(basename "$MALLOC_REAL")
-  cp "$MALLOC_REAL" "$DST/$MALLOC_BASENAME"
-  ln -sf "$MALLOC_BASENAME" "$DST/$MALLOC_SONAME"
-  ln -sf "$MALLOC_SONAME"   "$DST/libtbbmalloc.so"
+if [ -n "$TBB_REAL" ]; then
+  echo ">>> Using bundled TBB: $TBB_REAL"
+  TBB_SONAME=$(echo "$TBB_REAL" | grep -oP 'libtbb\.so\.\d+')   # e.g. libtbb.so.12
+  TBB_BASENAME=$(basename "$TBB_REAL")                            # e.g. libtbb.so.12.2
+  cp "$TBB_REAL" "$DST/$TBB_BASENAME"
+  ln -sf "$TBB_BASENAME" "$DST/$TBB_SONAME"
+  ln -sf "$TBB_SONAME"   "$DST/libtbb.so"
+
+  MALLOC_REAL=$(find "$OV_ROOT/runtime/3rdparty/tbb/lib" -maxdepth 1 -type f \
+    -name "libtbbmalloc.so.*" 2>/dev/null | grep -v debug | sort -V | tail -n 1 || true)
+  if [ -n "$MALLOC_REAL" ]; then
+    MALLOC_SONAME=$(echo "$MALLOC_REAL" | grep -oP 'libtbbmalloc\.so\.\d+')
+    MALLOC_BASENAME=$(basename "$MALLOC_REAL")
+    cp "$MALLOC_REAL" "$DST/$MALLOC_BASENAME"
+    ln -sf "$MALLOC_BASENAME" "$DST/$MALLOC_SONAME"
+    ln -sf "$MALLOC_SONAME"   "$DST/libtbbmalloc.so"
+  fi
+else
+  echo ">>> No bundled TBB found, installing system libtbb2 (libtbb.so.2)..."
+  apt-get install -y --no-install-recommends libtbb2 libtbb-dev
+
+  TBB_SO=$(find /usr -maxdepth 5 -type f -name "libtbb.so.2" 2>/dev/null | head -n 1)
+  if [ -z "$TBB_SO" ]; then
+    echo "ERROR: libtbb.so.2 not found after installing libtbb2"
+    find /usr -name "libtbb*" 2>/dev/null
+    exit 1
+  fi
+  echo ">>> System TBB: $TBB_SO"
+  cp "$TBB_SO" "$DST/libtbb.so.2"
+  ln -sf "libtbb.so.2" "$DST/libtbb.so"
+
+  TBB_MALLOC_SO=$(find /usr -maxdepth 5 -type f -name "libtbbmalloc.so.2" 2>/dev/null | head -n 1)
+  if [ -n "$TBB_MALLOC_SO" ]; then
+    cp "$TBB_MALLOC_SO" "$DST/libtbbmalloc.so.2"
+    ln -sf "libtbbmalloc.so.2" "$DST/libtbbmalloc.so"
+  fi
 fi
 
 cd "$DST"
