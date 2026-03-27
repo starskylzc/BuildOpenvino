@@ -26,7 +26,7 @@ jobs:
             deploy_target: '10.15'
             
           # === Apple Silicon arm64 (macOS 11.0) ===
-          - ort_version: 'v1.19.2'
+          - ort_version: 'v1.18.1'
             arch: 'arm64'
             deploy_target: '11.0'
 
