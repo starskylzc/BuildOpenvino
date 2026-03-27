@@ -49,7 +49,9 @@ apt-get install -y --no-install-recommends \
     git \
     build-essential \
     pkg-config \
-    wget
+    wget \
+    gpg \
+    gpg-agent
 
 # ------------------------------------------------------------
 # 安装新版 cmake（通过 Kitware 官方 APT 源）
@@ -58,12 +60,17 @@ apt-get install -y --no-install-recommends \
 # 通过官方源安装最新稳定版解决所有兼容性问题
 # ------------------------------------------------------------
 echo "==> 安装新版 cmake（Kitware 官方源）"
-wget -qO /tmp/cmake-keyring.gpg https://apt.kitware.com/keys/kitware-archive-latest.asc
-apt-key add /tmp/cmake-keyring.gpg
 
 # 检测系统代号（ubuntu 18.04 = bionic，ubuntu 20.04 = focal 等）
 DISTRO_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-echo "deb https://apt.kitware.com/ubuntu/ ${DISTRO_CODENAME} main" \
+
+# 用 gpg 直接写入 trusted keyring，不依赖已废弃的 apt-key
+wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc \
+    | gpg --dearmor \
+    > /usr/share/keyrings/kitware-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] \
+https://apt.kitware.com/ubuntu/ ${DISTRO_CODENAME} main" \
     > /etc/apt/sources.list.d/kitware.list
 
 apt-get update -qq
