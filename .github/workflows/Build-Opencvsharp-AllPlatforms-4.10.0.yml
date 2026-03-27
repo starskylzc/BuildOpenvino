@@ -89,6 +89,16 @@ jobs:
           BUILD_LIST=${{ env.BUILD_LIST }} \
             .github/scripts/build_macos_slice.sh x86_64 10.15
 
+      - name: Smoke test (macOS x86_64)
+        shell: bash
+        run: |
+          LIB=_work/out-x86_64/final/libOpenCvSharpExtern.dylib
+          echo "── 文件信息 ──────────────────────────────────────"
+          lipo -info "$LIB"
+          otool -L   "$LIB"
+          echo "── 冒烟测试 ──────────────────────────────────────"
+          python3 .github/scripts/smoke_test_unix.py "$LIB"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -120,6 +130,16 @@ jobs:
           OPENCVSHARP_REF=${{ env.OPENCVSHARP_REF }} \
           BUILD_LIST=${{ env.BUILD_LIST }} \
             .github/scripts/build_macos_slice.sh arm64 11.0
+
+      - name: Smoke test (macOS arm64)
+        shell: bash
+        run: |
+          LIB=_work/out-arm64/final/libOpenCvSharpExtern.dylib
+          echo "── 文件信息 ──────────────────────────────────────"
+          lipo -info "$LIB"
+          otool -L   "$LIB"
+          echo "── 冒烟测试 ──────────────────────────────────────"
+          python3 .github/scripts/smoke_test_unix.py "$LIB"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -195,6 +215,13 @@ jobs:
           $env:BUILD_LIST        = "${{ env.BUILD_LIST }}"
           pwsh -File .github/scripts/build_opencv_windows.ps1 -TargetArch ${{ matrix.target }}
 
+      - name: Smoke test (Windows ${{ matrix.target }})
+        if: steps.check.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          pwsh -File .github/scripts/smoke_test_windows.ps1 `
+            -LibPath "_work/out-win-${{ matrix.target }}/final/OpenCvSharpExtern.dll"
+
       - name: Upload artifact (${{ matrix.target }})
         if: steps.check.outputs.enabled == 'true'
         uses: actions/upload-artifact@v7
@@ -232,6 +259,15 @@ jobs:
             ubuntu:20.04 \
             bash .github/scripts/build_linux_slice.sh x86_64
 
+      - name: Smoke test (Linux x86_64)
+        run: |
+          LIB=_work/out-x86_64/final/libOpenCvSharpExtern.so
+          echo "── 文件信息 ──────────────────────────────────────"
+          file "$LIB"
+          ldd  "$LIB"
+          echo "── 冒烟测试 ──────────────────────────────────────"
+          python3 .github/scripts/smoke_test_unix.py "$LIB"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -263,6 +299,15 @@ jobs:
             -e BUILD_LIST=${{ env.BUILD_LIST }} \
             ubuntu:20.04 \
             bash .github/scripts/build_linux_slice.sh aarch64
+
+      - name: Smoke test (Linux aarch64)
+        run: |
+          LIB=_work/out-aarch64/final/libOpenCvSharpExtern.so
+          echo "── 文件信息 ──────────────────────────────────────"
+          file "$LIB"
+          ldd  "$LIB"
+          echo "── 冒烟测试 ──────────────────────────────────────"
+          python3 .github/scripts/smoke_test_unix.py "$LIB"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
