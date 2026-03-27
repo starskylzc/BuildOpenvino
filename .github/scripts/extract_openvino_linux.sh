@@ -7,10 +7,15 @@
 #
 # 在 Docker ubuntu:20.04 容器内运行，提取 OpenVINO 最小运行时
 #
-# Linux 版 OpenVINO 2023.3 包结构：
-#   runtime/lib/<arch>/       <- 所有 .so（无 Release 子目录）
-#   runtime/include/ie/c_api/ <- C API 头文件
-#   TBB 不在包内，链接系统 libtbb.so.2（Ubuntu 20.04 libtbb2 包）
+# 两个包的差异：
+#   x86_64 (ubuntu20):
+#     - CPU 插件: libopenvino_intel_cpu_plugin.so
+#     - GPU 插件: libopenvino_intel_gpu_plugin.so
+#     - TBB: 包内无，需系统安装 libtbb2 (libtbb.so.2)
+#   aarch64 (ubuntu18):
+#     - CPU 插件: libopenvino_arm_cpu_plugin.so
+#     - GPU 插件: 不存在（ARM 平台不支持 Intel GPU）
+#     - TBB: 包内自带 3rdparty/tbb/lib/libtbb.so.12.2
 set -euxo pipefail
 
 OV_URL="$1"
@@ -18,7 +23,7 @@ DST="$2"
 VARIANT="${3:-cpu}"   # cpu 或 gpu
 
 apt-get update -qq
-apt-get install -y --no-install-recommends curl ca-certificates patchelf libtbb2 libtbb-dev
+apt-get install -y --no-install-recommends curl ca-certificates patchelf
 
 echo ">>> Downloading OpenVINO..."
 curl -L -o /tmp/ov.tgz "$OV_URL"
@@ -30,9 +35,9 @@ tar -xzf /tmp/ov.tgz -C /tmp/ov_src
 OV_ROOT=$(find /tmp/ov_src -maxdepth 1 -type d -name "l_openvino_toolkit_*" | head -n 1)
 echo ">>> OV_ROOT: $OV_ROOT"
 
-# 动态定位库目录（通过 libopenvino_intel_cpu_plugin.so 所在位置，兼容 intel64/aarch64 等路径）
+# 动态定位库目录（通过 libopenvino.so.2023.3.0 所在位置，兼容 intel64/aarch64 路径）
 SRC_LIB=$(find "$OV_ROOT/runtime/lib" -maxdepth 2 -type f \
-  -name "libopenvino_intel_cpu_plugin.so" | head -n 1 | xargs dirname)
+  -name "libopenvino.so.2023.3.0" | head -n 1 | xargs dirname)
 echo ">>> SRC_LIB: $SRC_LIB"
 
 SRC_INC="$OV_ROOT/runtime/include/ie/c_api"
@@ -46,10 +51,10 @@ cp "$SRC_INC/ie_c_api.h"                            "$DST/include/"
 
 echo ">>> VARIANT: $VARIANT"
 if [ "$VARIANT" = "gpu" ]; then
-  # GPU 插件
+  # GPU 插件（仅 x86_64 有）
   GPU_PLUGIN="$SRC_LIB/libopenvino_intel_gpu_plugin.so"
   if [ ! -f "$GPU_PLUGIN" ]; then
-    echo "ERROR: GPU plugin not found in $SRC_LIB"
+    echo "ERROR: GPU plugin not found in $SRC_LIB (not supported on this arch?)"
     ls -la "$SRC_LIB"
     exit 1
   fi
@@ -57,35 +62,61 @@ if [ "$VARIANT" = "gpu" ]; then
   PLUGIN_LOCATION="libopenvino_intel_gpu_plugin.so"
   PLUGIN_NAME="GPU"
 else
-  # CPU 插件
-  CPU_PLUGIN="$SRC_LIB/libopenvino_intel_cpu_plugin.so"
-  if [ ! -f "$CPU_PLUGIN" ]; then
+  # CPU 插件：x86_64 叫 intel_cpu，aarch64 叫 arm_cpu，动态查找
+  CPU_PLUGIN=$(find "$SRC_LIB" -maxdepth 1 -type f \
+    \( -name "libopenvino_intel_cpu_plugin.so" -o -name "libopenvino_arm_cpu_plugin.so" \) \
+    | head -n 1)
+  if [ -z "$CPU_PLUGIN" ]; then
     echo "ERROR: CPU plugin not found in $SRC_LIB"
     ls -la "$SRC_LIB"
     exit 1
   fi
   cp "$CPU_PLUGIN" "$DST/"
-  PLUGIN_LOCATION="libopenvino_intel_cpu_plugin.so"
+  PLUGIN_LOCATION=$(basename "$CPU_PLUGIN")
   PLUGIN_NAME="CPU"
 fi
 
-echo ">>> Locating and copying TBB from system (libtbb2)..."
-# OpenVINO 2023.3 Linux 版链接 libtbb.so.2（Ubuntu 20.04 libtbb2 包提供）
-TBB_SO=$(find /usr -maxdepth 5 -type f -name "libtbb.so.2" 2>/dev/null | head -n 1)
-if [ -z "$TBB_SO" ]; then
-  echo "ERROR: libtbb.so.2 not found after installing libtbb2"
-  find /usr -name "libtbb*" 2>/dev/null
-  exit 1
-fi
-echo ">>> TBB_SO: $TBB_SO"
-cp "$TBB_SO" "$DST/libtbb.so.2"
+echo ">>> Handling TBB..."
+# aarch64 包内自带 3rdparty/tbb/lib/libtbb.so.12.2
+# x86_64  包内无 TBB，需从系统 libtbb2 获取 libtbb.so.2
+BUNDLED_TBB=$(find "$OV_ROOT/runtime/3rdparty/tbb/lib" -maxdepth 1 -type f \
+  -name "libtbb.so.*" 2>/dev/null | grep -v debug | sort -V | tail -n 1 || true)
 
-TBB_MALLOC_SO=$(find /usr -maxdepth 5 -type f -name "libtbbmalloc.so.2" 2>/dev/null | head -n 1)
-if [ -n "$TBB_MALLOC_SO" ]; then
-  echo ">>> TBB_MALLOC_SO: $TBB_MALLOC_SO"
-  cp "$TBB_MALLOC_SO" "$DST/libtbbmalloc.so.2"
+if [ -n "$BUNDLED_TBB" ]; then
+  echo ">>> Using bundled TBB: $BUNDLED_TBB"
+  TBB_BASENAME=$(basename "$BUNDLED_TBB")   # e.g. libtbb.so.12.2
+  TBB_SONAME=$(echo "$TBB_BASENAME" | grep -oP 'libtbb\.so\.\d+')  # e.g. libtbb.so.12
+  cp "$BUNDLED_TBB" "$DST/$TBB_BASENAME"
+  ln -sf "$TBB_BASENAME" "$DST/$TBB_SONAME"
+  ln -sf "$TBB_SONAME"   "$DST/libtbb.so"
+
+  BUNDLED_MALLOC=$(find "$OV_ROOT/runtime/3rdparty/tbb/lib" -maxdepth 1 -type f \
+    -name "libtbbmalloc.so.*" 2>/dev/null | grep -v debug | sort -V | tail -n 1 || true)
+  if [ -n "$BUNDLED_MALLOC" ]; then
+    MALLOC_BASENAME=$(basename "$BUNDLED_MALLOC")
+    MALLOC_SONAME=$(echo "$MALLOC_BASENAME" | grep -oP 'libtbbmalloc\.so\.\d+')
+    cp "$BUNDLED_MALLOC" "$DST/$MALLOC_BASENAME"
+    ln -sf "$MALLOC_BASENAME" "$DST/$MALLOC_SONAME"
+    ln -sf "$MALLOC_SONAME"   "$DST/libtbbmalloc.so"
+  fi
 else
-  echo ">>> libtbbmalloc.so.2 not found, skipping"
+  echo ">>> No bundled TBB, installing system libtbb2..."
+  apt-get install -y --no-install-recommends libtbb2 libtbb-dev
+  TBB_SO=$(find /usr -maxdepth 5 -type f -name "libtbb.so.2" 2>/dev/null | head -n 1)
+  if [ -z "$TBB_SO" ]; then
+    echo "ERROR: libtbb.so.2 not found after installing libtbb2"
+    find /usr -name "libtbb*" 2>/dev/null
+    exit 1
+  fi
+  echo ">>> System TBB: $TBB_SO"
+  cp "$TBB_SO" "$DST/libtbb.so.2"
+  ln -sf "libtbb.so.2" "$DST/libtbb.so"
+
+  TBB_MALLOC_SO=$(find /usr -maxdepth 5 -type f -name "libtbbmalloc.so.2" 2>/dev/null | head -n 1)
+  if [ -n "$TBB_MALLOC_SO" ]; then
+    cp "$TBB_MALLOC_SO" "$DST/libtbbmalloc.so.2"
+    ln -sf "libtbbmalloc.so.2" "$DST/libtbbmalloc.so"
+  fi
 fi
 
 cd "$DST"
@@ -94,12 +125,6 @@ echo ">>> Renaming core libs..."
 mv -f "libopenvino.so.2023.3.0"               "libopenvino.so"
 mv -f "libopenvino_c.so.2023.3.0"             "libopenvino_c.so"
 mv -f "libopenvino_onnx_frontend.so.2023.3.0" "libopenvino_onnx_frontend.2330.so"
-
-# TBB 软链接（供运行时按无版本号名称查找）
-ln -sf "libtbb.so.2" "libtbb.so"
-if [ -f "libtbbmalloc.so.2" ]; then
-  ln -sf "libtbbmalloc.so.2" "libtbbmalloc.so"
-fi
 
 echo ">>> Generating plugins.xml ($VARIANT)..."
 printf '<ie>\n    <plugins>\n        <plugin name="%s" location="%s">\n        </plugin>\n    </plugins>\n</ie>\n' \

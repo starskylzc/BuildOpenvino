@@ -31,10 +31,7 @@ on:
         description: "Linux aarch64 CPU (glibc 2.31, 兼容麒麟/统信 ARM)"
         type: boolean
         default: true
-      build_linux_aarch64_gpu:
-        description: "Linux aarch64 GPU (glibc 2.31, 兼容麒麟/统信 ARM)"
-        type: boolean
-        default: true
+      # 注：aarch64 平台不支持 Intel GPU，无 GPU 变体
 
 jobs:
   # ============================================================
@@ -299,13 +296,12 @@ jobs:
   # 兼容：麒麟 V10 ARM、统信 UOS V20 ARM、鸿蒙 OpenHarmony
   # ============================================================
   build-linux-aarch64:
-    if: ${{ inputs.build_linux_aarch64_cpu || inputs.build_linux_aarch64_gpu }}
+    if: ${{ inputs.build_linux_aarch64_cpu }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
       - name: Extract OpenVINO aarch64 CPU (Docker ubuntu:20.04)
-        if: ${{ inputs.build_linux_aarch64_cpu }}
         run: |
           mkdir -p "${{ github.workspace }}/final_output"
           docker run --rm \
@@ -318,28 +314,11 @@ jobs:
               "/out/linux_aarch64_cpu" \
               "cpu"
 
-      - name: Extract OpenVINO aarch64 GPU (Docker ubuntu:20.04)
-        if: ${{ inputs.build_linux_aarch64_gpu }}
-        run: |
-          mkdir -p "${{ github.workspace }}/final_output"
-          docker run --rm \
-            -v "${{ github.workspace }}/.github/scripts/extract_openvino_linux.sh:/extract_ov.sh:ro" \
-            -v "${{ github.workspace }}/final_output:/out" \
-            -e DEBIAN_FRONTEND=noninteractive \
-            ubuntu:20.04 \
-            bash /extract_ov.sh \
-              "https://storage.openvinotoolkit.org/repositories/openvino/packages/2023.3/linux/l_openvino_toolkit_ubuntu18_2023.3.0.13775.ceeafaf64f3_arm64.tgz" \
-              "/out/linux_aarch64_gpu" \
-              "gpu"
-
       - name: Zip Linux aarch64
         run: |
           set -euxo pipefail
           cd "${{ github.workspace }}/final_output"
-          DIRS=""
-          [ -d linux_aarch64_cpu ] && DIRS="$DIRS linux_aarch64_cpu"
-          [ -d linux_aarch64_gpu ] && DIRS="$DIRS linux_aarch64_gpu"
-          zip -r openvino_linux_aarch64.zip $DIRS
+          zip -r openvino_linux_aarch64.zip linux_aarch64_cpu
           echo ">>> Package Contents:"
           unzip -l openvino_linux_aarch64.zip
 
