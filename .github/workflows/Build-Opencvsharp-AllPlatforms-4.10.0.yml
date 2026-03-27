@@ -70,7 +70,7 @@ jobs:
     if: ${{ inputs.build_macos_x64 }}
     runs-on: macos-15-intel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install tools
         shell: bash
@@ -90,7 +90,7 @@ jobs:
             .github/scripts/build_macos_slice.sh x86_64 10.15
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: osx-x64-slice
           path: _work/out-x86_64/final/libOpenCvSharpExtern.dylib
@@ -102,7 +102,7 @@ jobs:
     if: ${{ inputs.build_macos_arm64 }}
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install tools
         shell: bash
@@ -122,7 +122,7 @@ jobs:
             .github/scripts/build_macos_slice.sh arm64 11.0
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: osx-arm64-slice
           path: _work/out-arm64/final/libOpenCvSharpExtern.dylib
@@ -169,7 +169,7 @@ jobs:
           esac
           echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         if: steps.check.outputs.enabled == 'true'
 
       - uses: ilammy/msvc-dev-cmd@v1
@@ -197,7 +197,7 @@ jobs:
 
       - name: Upload artifact (${{ matrix.target }})
         if: steps.check.outputs.enabled == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: win-${{ matrix.target }}
           path: _work/out-win-${{ matrix.target }}/final/OpenCvSharpExtern.dll
@@ -217,7 +217,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build x86_64 slice (Docker ubuntu:20.04 / glibc 2.31)
         run: |
@@ -233,7 +233,7 @@ jobs:
             bash .github/scripts/build_linux_slice.sh x86_64
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           path: _work/out-x86_64/final/libOpenCvSharpExtern.so
@@ -249,7 +249,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build aarch64 slice (Docker ubuntu:20.04 / glibc 2.31)
         run: |
@@ -265,7 +265,7 @@ jobs:
             bash .github/scripts/build_linux_slice.sh aarch64
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-aarch64
           path: _work/out-aarch64/final/libOpenCvSharpExtern.so

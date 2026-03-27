@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout ONNX Runtime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: microsoft/onnxruntime
           ref: ${{ matrix.ort_version }}
@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -104,7 +104,7 @@ jobs:
           echo "Arch: ${{ matrix.arch }}" >> artifacts/version.txt
           echo "MinOS: ${{ matrix.deploy_target }}" >> artifacts/version.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: onnxruntime-${{ matrix.ort_version }}-${{ matrix.arch }}-macos${{ matrix.deploy_target }}
           path: artifacts/

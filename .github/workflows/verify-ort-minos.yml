@@ -19,10 +19,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "8.0.x"
 
@@ -333,19 +333,19 @@ jobs:
           $summary | Sort-Object package, @{Expression='version'; Descending=$true} | Select-Object -First 30 | Format-Table -AutoSize
 
       - name: Upload Windows CSV
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows_min_details
           path: out/windows_min_details.csv
 
       - name: Upload Windows summary CSV
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows_min_summary
           path: out/windows_min_summary.csv
 
       - name: Upload dumpbin logs (imports/headers)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows_dumpbin_logs
           path: out/imports
@@ -468,13 +468,13 @@ jobs:
           head -n 30 out/macos_min_summary.csv || true
 
       - name: Upload macOS CSV
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos_min_details
           path: out/macos_min_details.csv
 
       - name: Upload macOS summary CSV
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos_min_summary
           path: out/macos_min_summary.csv

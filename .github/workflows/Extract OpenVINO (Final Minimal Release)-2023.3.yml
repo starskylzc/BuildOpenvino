@@ -251,7 +251,7 @@ jobs:
           ls -R
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openvino_runtime_final
           path: final_output/openvino_final_minimal.zip
