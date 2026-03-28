@@ -38,6 +38,8 @@ jobs:
   build:
     name: Build v1.18.1 (${{ matrix.arch }}, minos ${{ matrix.deploy_target }})
     runs-on: ${{ matrix.runner }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
