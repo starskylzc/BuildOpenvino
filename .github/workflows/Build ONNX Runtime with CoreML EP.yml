@@ -37,23 +37,28 @@ on:
 jobs:
   build:
     name: Build v1.18.1 (${{ matrix.arch }}, minos ${{ matrix.deploy_target }})
-    runs-on: macos-14
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # === Intel x64 (macOS 10.15) ===
+          # 使用 macos-13 (Intel runner) 原生编译 x86_64，避免在 arm64 runner 上
+          # 交叉编译导致的工具链冲突（pip 安装的 cmake 是 arm64 架构，交叉编译 x86_64 会报错）
           - arch: 'x86_64'
             deploy_target: '10.15'
+            runner: 'macos-13'
             xcode_version: ''
             artifact_name: 'onnxruntime-1.18.1-x86_64-macos10.15-coreml'
 
           # === Apple Silicon arm64 (macOS 11.0) ===
+          # 使用 macos-14 (Apple Silicon runner) 原生编译 arm64
           # 必须使用 Xcode 15.2 (SDK 14.2)，避免新版 SDK (>=14.4) 触发
           # C++20 std::to_chars 在 deploy_target < 13.3 时不可用的编译错误
           # 参考: https://github.com/microsoft/onnxruntime/issues/21033
           - arch: 'arm64'
             deploy_target: '11.0'
+            runner: 'macos-14'
             xcode_version: '15.2'
             artifact_name: 'onnxruntime-1.18.1-arm64-macos11.0-coreml'
 
@@ -218,10 +223,15 @@ jobs:
       - name: Organize artifacts
         run: |
           mkdir -p artifacts
-          cp build/${{ inputs.build_type }}/libonnxruntime*.dylib artifacts/
+          # 复制两个 dylib：
+          #   libonnxruntime.dylib         → 调用方链接用（符号链接或主文件）
+          #   libonnxruntime.1.18.1.dylib  → 带版本号的实际文件（运行时 @rpath 解析需要）
+          cp build/${{ inputs.build_type }}/libonnxruntime.dylib artifacts/
+          cp build/${{ inputs.build_type }}/libonnxruntime.1.18.1.dylib artifacts/
           cat > artifacts/version.txt <<EOF
           ORT Version:    ${{ env.ORT_VERSION }}
           Arch:           ${{ matrix.arch }}
+          Runner:         ${{ matrix.runner }}
           MinOS:          ${{ matrix.deploy_target }}
           CoreML EP:      enabled
           Build Type:     ${{ inputs.build_type }}
