@@ -17,7 +17,7 @@ Write-Host "============================================================"
 # ============================================================
 
 $OPENCV_VERSION = if ($env:OPENCV_VERSION) { $env:OPENCV_VERSION } else { "4.10.0" }
-$OPENCVSHARP_REF = if ($env:OPENCVSHARP_REF) { $env:OPENCVSHARP_REF } else { "4.10.0.20241024" }
+$OPENCVSHARP_REF = if ($env:OPENCVSHARP_REF) { $env:OPENCVSHARP_REF } else { "352c778e2034a05b42d0b472a7930aef47147b14" }
 $BUILD_LIST = if ($env:BUILD_LIST) { $env:BUILD_LIST } else { "core,imgproc,videoio" }
 
 # 使用当前位置作为根目录
