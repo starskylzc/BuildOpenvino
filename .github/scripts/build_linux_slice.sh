@@ -11,7 +11,7 @@ set -euo pipefail
 ARCH="$1"
 
 OPENCV_VERSION="${OPENCV_VERSION:-4.10.0}"
-OPENCVSHARP_REF="${OPENCVSHARP_REF:-4.10.0.20241108}"
+OPENCVSHARP_REF="${OPENCVSHARP_REF:-4.10.0.20241024}"
 BUILD_LIST="${BUILD_LIST:-core,imgproc,videoio}"
 
 # ------------------------------------------------------------

@@ -60,7 +60,7 @@ on:
 
 env:
   OPENCV_VERSION: "4.10.0"
-  OPENCVSHARP_REF: "4.10.0.20241108"
+  OPENCVSHARP_REF: "4.10.0.20241024"
   BUILD_LIST: "core,imgproc,videoio"
 
 jobs:
