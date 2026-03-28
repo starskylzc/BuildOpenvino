@@ -5,13 +5,14 @@ name: Build ORT 1.18.1 macOS (with CoreML EP)
 #   两平台统一版本 v1.18.1。
 #
 # 平台配置：
-#   Intel x64    : v1.18.1, minos 10.15, Xcode 15.4, macos-15-intel runner
-#   Silicon arm64: v1.18.1, minos 11.0,  Xcode 15.2, macos-14 runner
+#   Intel x64    : v1.18.1, minos 10.15, 默认 Xcode 16.x, macos-15-intel runner
+#   Silicon arm64: v1.18.1, minos 11.0,  Xcode 15.2,      macos-14 runner
 #
 # 编译兼容性修复：
-#   - 两平台均固定 Xcode 15.x，避免 Xcode 16.x libc++ 中 <ostream> 引入 <format>
-#     导致 std::to_chars (macOS 13.3+) 与低 deployment target 不兼容的编译错误
-#   - Xcode 15.x 同时也避免了 ATOMIC_VAR_INIT deprecated warning
+#   - arm64 固定 Xcode 15.2 (SDK 14.2)，避免 std::to_chars 编译错误 (issue #21033)
+#   - x64 使用默认 Xcode 16.x（macos-15-intel 无 Xcode 15.x），通过 patch
+#     ostream_sink.cc 绕过 libc++ <format> 引入 std::to_chars (macOS 13.3+)
+#     与低 deployment target 不兼容的编译错误
 #
 # CoreML EP 说明：
 #   保留 CoreML EP（与官方 NuGet 包一致）。
@@ -54,7 +55,7 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          X64='{"arch":"x86_64","deploy_target":"10.15","runner":"macos-15-intel","xcode_version":"15.4","artifact_name":"onnxruntime-1.18.1-x86_64-macos10.15-coreml"}'
+          X64='{"arch":"x86_64","deploy_target":"10.15","runner":"macos-15-intel","xcode_version":"","artifact_name":"onnxruntime-1.18.1-x86_64-macos10.15-coreml"}'
           ARM64='{"arch":"arm64","deploy_target":"11.0","runner":"macos-14","xcode_version":"15.2","artifact_name":"onnxruntime-1.18.1-arm64-macos11.0-coreml"}'
 
           case "${{ inputs.target_platform }}" in
@@ -74,8 +75,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     # matrix 配置说明：
-    #   Intel x64  : macos-15-intel, 固定 Xcode 15.4, 避免 Xcode 16.x std::to_chars 编译错误
-    #   Silicon arm64: macos-14, 固定 Xcode 15.2, 避免 std::to_chars 编译错误 (issue #21033)
+    #   Intel x64  : macos-15-intel, 默认 Xcode 16.x + patch ostream_sink.cc
+    #   Silicon arm64: macos-14, 固定 Xcode 15.2, 避免 std::to_chars 编译错误
 
     steps:
       - name: Select Xcode Version
@@ -118,6 +119,67 @@ jobs:
           grep -rl "be8be39fdbc6e60e94fa7870b280707069b5b81a" . \
             | xargs sed -i '' 's/be8be39fdbc6e60e94fa7870b280707069b5b81a/32b145f525a8308d7ab1c09388b2e288312d8eba/g' \
             || true
+
+      - name: Patch ostream_sink.cc (Fix std::to_chars on Xcode 16.x)
+        # Xcode 16.x libc++ 的 <ostream> 引入 <format>，std::format 浮点格式化
+        # 需要 std::to_chars (macOS 13.3+)，与 deployment_target 10.15 不兼容。
+        # 修复：将 chrono time_point 的 operator<< 替换为 strftime 手动格式化。
+        # arm64 用 Xcode 15.2 不受影响，但此 patch 对两平台均安全。
+        run: |
+          FILE="onnxruntime/core/common/logging/sinks/ostream_sink.cc"
+          echo ">>> Patching $FILE to avoid std::to_chars dependency"
+          cat > "$FILE" << 'PATCH_EOF'
+          // Copyright (c) Microsoft Corporation. All rights reserved.
+          // Licensed under the MIT License.
+
+          // Patched: replaced chrono operator<< with strftime to avoid
+          // Xcode 16.x libc++ <format> -> std::to_chars (macOS 13.3+) dependency.
+
+          #include "core/common/logging/sinks/ostream_sink.h"
+          #include "core/common/logging/logging.h"
+          #include <ctime>
+          #include <iomanip>
+          #include <iostream>
+          #include <sstream>
+
+          namespace onnxruntime {
+          namespace logging {
+
+          using Timestamp = std::chrono::time_point<std::chrono::system_clock>;
+
+          void OStreamSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id,
+                                     const Capture& message) {
+            // Format timestamp via strftime + microseconds (avoids std::format)
+            auto time_t_val = std::chrono::system_clock::to_time_t(timestamp);
+            auto tm_val = *std::localtime(&time_t_val);
+            auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                           timestamp.time_since_epoch()) %
+                       1000000;
+
+            std::ostringstream msg;
+            msg << std::put_time(&tm_val, "%Y-%m-%d %H:%M:%S")
+                << "." << std::setfill('0') << std::setw(6) << us.count()
+                << " [" << message.SeverityPrefix() << ":" << message.Category()
+                << ":" << logger_id << ", "
+                << message.Location().ToString() << "] " << message.Message();
+
+          #ifndef ORT_MINIMAL_BUILD
+            if (message.DataType() == DataType::USER) {
+              msg << "\n";
+              stream_ << msg.str();
+              stream_.flush();
+            }
+          #else
+            msg << "\n";
+            stream_ << msg.str();
+            stream_.flush();
+          #endif
+          }
+
+          }  // namespace logging
+          }  // namespace onnxruntime
+          PATCH_EOF
+          echo ">>> Patch applied"
 
       - name: Build
         run: |
