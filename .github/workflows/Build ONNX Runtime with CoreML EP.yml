@@ -43,11 +43,12 @@ jobs:
       matrix:
         include:
           # === Intel x64 (macOS 10.15) ===
-          # 使用 macos-13 (Intel runner) 原生编译 x86_64，避免在 arm64 runner 上
+          # 使用 macos-15-intel (Intel runner) 原生编译 x86_64，避免在 arm64 runner 上
           # 交叉编译导致的工具链冲突（pip 安装的 cmake 是 arm64 架构，交叉编译 x86_64 会报错）
+          # 注：macos-13 已于 2025-12-04 退役，当前可用 Intel runner 为 macos-15-intel / macos-26-intel
           - arch: 'x86_64'
             deploy_target: '10.15'
-            runner: 'macos-13'
+            runner: 'macos-15-intel'
             xcode_version: ''
             artifact_name: 'onnxruntime-1.18.1-x86_64-macos10.15-coreml'
 
