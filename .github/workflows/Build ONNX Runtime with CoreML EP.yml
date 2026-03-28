@@ -1,15 +1,18 @@
-name: Build ORT 1.18.1 macOS (with CoreML EP)
+name: Build ORT macOS (with CoreML EP)
 
 # 目的：
-#   自行编译 ONNX Runtime 1.18.1 macOS native dylib，两平台统一版本。
-#   带 CoreML EP（与官方 NuGet 包行为一致）。
+#   自行编译 ONNX Runtime macOS native dylib，带 CoreML EP。
 #
 # 平台配置：
-#   Intel x64  : v1.18.1, minos 10.15, 默认 Xcode
-#   Silicon arm64: v1.18.1, minos 11.0, 固定 Xcode 15.2
-#     ↑ arm64 必须固定 Xcode 15.2 (SDK 14.2)，避免新版 SDK (>=14.4) 触发
-#       C++20 std::to_chars 在 deploy_target < 13.3 时不可用的编译错误
-#       参考: https://github.com/microsoft/onnxruntime/issues/21033
+#   Intel x64    : v1.16.3, minos 10.15, 默认 Xcode, macos-15-intel runner
+#   Silicon arm64: v1.18.1, minos 11.0,  Xcode 15.2, macos-14 runner
+#
+# 为什么两个平台版本不同？
+#   v1.18.1 在 deploy_target < 13.3 + Xcode SDK >= 14.4 时触发 C++20 std::to_chars
+#   编译错误 (issue #21033)。macos-15-intel 上最低 Xcode 为 16.0 (SDK 15.0)，
+#   无法降级到 SDK < 14.4，因此 x64 必须使用不受此问题影响的 v1.16.3。
+#   arm64 使用 macos-14 runner，上面有 Xcode 15.2 (SDK 14.2 < 14.4)，可编译 v1.18.1。
+#   managed 层 Microsoft.ML.OnnxRuntime.Managed 1.18.1 向下兼容 native 1.16.3。
 #
 # CoreML EP 说明：
 #   保留 CoreML EP（与官方 NuGet 包一致）。
@@ -36,37 +39,10 @@ on:
 
 jobs:
   build:
-    name: Build v1.18.1 (${{ matrix.arch }}, minos ${{ matrix.deploy_target }})
+    name: Build ${{ matrix.ort_version }} (${{ matrix.arch }}, minos ${{ matrix.deploy_target }})
     runs-on: ${{ matrix.runner }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # === Intel x64 (macOS 10.15) ===
-          # 使用 macos-15-intel (Intel runner) 原生编译 x86_64，避免在 arm64 runner 上
-          # 交叉编译导致的工具链冲突（pip 安装的 cmake 是 arm64 架构，交叉编译 x86_64 会报错）
-          # 注：macos-13 已于 2025-12-04 退役，当前可用 Intel runner 为 macos-15-intel / macos-26-intel
-          - arch: 'x86_64'
-            deploy_target: '10.15'
-            runner: 'macos-15-intel'
-            xcode_version: ''
-            artifact_name: 'onnxruntime-1.18.1-x86_64-macos10.15-coreml'
-
-          # === Apple Silicon arm64 (macOS 11.0) ===
-          # 使用 macos-14 (Apple Silicon runner) 原生编译 arm64
-          # 必须使用 Xcode 15.2 (SDK 14.2)，避免新版 SDK (>=14.4) 触发
-          # C++20 std::to_chars 在 deploy_target < 13.3 时不可用的编译错误
-          # 参考: https://github.com/microsoft/onnxruntime/issues/21033
-          - arch: 'arm64'
-            deploy_target: '11.0'
-            runner: 'macos-14'
-            xcode_version: '15.2'
-            artifact_name: 'onnxruntime-1.18.1-arm64-macos11.0-coreml'
-
-    env:
-      ORT_VERSION: 'v1.18.1'
 
     steps:
       - name: Select Xcode Version
@@ -77,11 +53,11 @@ jobs:
           xcodebuild -version
           xcrun --show-sdk-version
 
-      - name: Checkout ONNX Runtime ${{ env.ORT_VERSION }}
+      - name: Checkout ONNX Runtime ${{ matrix.ort_version }}
         uses: actions/checkout@v4.2.2
         with:
           repository: microsoft/onnxruntime
-          ref: ${{ env.ORT_VERSION }}
+          ref: ${{ matrix.ort_version }}
           submodules: recursive
           fetch-depth: 1
 
@@ -112,7 +88,7 @@ jobs:
 
       - name: Build
         run: |
-          echo ">>> Building ORT ${{ env.ORT_VERSION }} for ${{ matrix.arch }} (minos ${{ matrix.deploy_target }})"
+          echo ">>> Building ORT ${{ matrix.ort_version }} for ${{ matrix.arch }} (minos ${{ matrix.deploy_target }})"
           python3 tools/ci_build/build.py \
             --build_dir build \
             --config ${{ inputs.build_type }} \
@@ -235,7 +211,7 @@ jobs:
           # libonnxruntime.1.18.1.dylib 是编译产物的版本号软链，不需要随包分发
           cp build/${{ inputs.build_type }}/libonnxruntime.dylib artifacts/
           cat > artifacts/version.txt <<EOF
-          ORT Version:    ${{ env.ORT_VERSION }}
+          ORT Version:    ${{ matrix.ort_version }}
           Arch:           ${{ matrix.arch }}
           Runner:         ${{ matrix.runner }}
           MinOS:          ${{ matrix.deploy_target }}
