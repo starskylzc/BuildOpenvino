@@ -138,7 +138,7 @@ jobs:
               CMAKE_OSX_SYSROOT=macosx \
               onnxruntime_BUILD_UNIT_TESTS=OFF \
               onnxruntime_BUILD_BENCHMARKS=OFF \
-              CMAKE_CXX_FLAGS="-Wno-error=deprecated-pragma"
+              CMAKE_CXX_FLAGS="-Wno-error=deprecated-pragma -Wno-error=deprecated-this-capture"
 
       - name: Verify - file exists
         run: |
