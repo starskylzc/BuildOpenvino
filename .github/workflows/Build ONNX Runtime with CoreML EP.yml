@@ -124,6 +124,8 @@ jobs:
         # Xcode 16.x libc++ 的 <ostream> 引入 <format>，std::format 浮点格式化
         # 需要 std::to_chars (macOS 13.3+)，与 deployment_target 10.15 不兼容。
         # 修复：将 chrono time_point 的 operator<< 替换为 strftime 手动格式化。
+        # 注意：ostream_sink.h 中 stream_ 是 std::ostream* 指针类型，
+        #       必须用 (*stream_) 和 stream_-> 语法访问。
         # arm64 用 Xcode 15.2 不受影响，但此 patch 对两平台均安全。
         run: |
           FILE="onnxruntime/core/common/logging/sinks/ostream_sink.cc"
@@ -134,6 +136,7 @@ jobs:
 
           // Patched: replaced chrono operator<< with strftime to avoid
           // Xcode 16.x libc++ <format> -> std::to_chars (macOS 13.3+) dependency.
+          // Note: stream_ is std::ostream* (pointer), use (*stream_) and stream_->
 
           #include "core/common/logging/sinks/ostream_sink.h"
           #include "core/common/logging/logging.h"
@@ -145,11 +148,18 @@ jobs:
           namespace onnxruntime {
           namespace logging {
 
-          using Timestamp = std::chrono::time_point<std::chrono::system_clock>;
+          #ifndef ORT_MINIMAL_BUILD
+          struct Color {
+            constexpr static const char* kWarn = "\033[0;93m";
+            constexpr static const char* kError = "\033[1;31m";
+            constexpr static const char* kFatal = "\033[1;37;41m";
+            constexpr static const char* kEnd = "\033[m";
+          };
+          #endif
 
           void OStreamSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id,
                                      const Capture& message) {
-            // Format timestamp via strftime + microseconds (avoids std::format)
+            // Format timestamp via strftime + microseconds (avoids std::format / std::to_chars)
             auto time_t_val = std::chrono::system_clock::to_time_t(timestamp);
             auto tm_val = *std::localtime(&time_t_val);
             auto us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -157,6 +167,17 @@ jobs:
                        1000000;
 
             std::ostringstream msg;
+
+          #ifndef ORT_MINIMAL_BUILD
+            if (message.Severity() == Severity::kWARNING) {
+              msg << Color::kWarn;
+            } else if (message.Severity() == Severity::kERROR) {
+              msg << Color::kError;
+            } else if (message.Severity() == Severity::kFATAL) {
+              msg << Color::kFatal;
+            }
+          #endif
+
             msg << std::put_time(&tm_val, "%Y-%m-%d %H:%M:%S")
                 << "." << std::setfill('0') << std::setw(6) << us.count()
                 << " [" << message.SeverityPrefix() << ":" << message.Category()
@@ -164,16 +185,19 @@ jobs:
                 << message.Location().ToString() << "] " << message.Message();
 
           #ifndef ORT_MINIMAL_BUILD
-            if (message.DataType() == DataType::USER) {
-              msg << "\n";
-              stream_ << msg.str();
-              stream_.flush();
+            if (message.Severity() == Severity::kWARNING ||
+                message.Severity() == Severity::kERROR ||
+                message.Severity() == Severity::kFATAL) {
+              msg << Color::kEnd;
             }
-          #else
-            msg << "\n";
-            stream_ << msg.str();
-            stream_.flush();
           #endif
+            msg << "\n";
+
+            (*stream_) << msg.str();
+
+            if (flush_) {
+              stream_->flush();
+            }
           }
 
           }  // namespace logging
