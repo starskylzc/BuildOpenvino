@@ -1,36 +1,237 @@
-name: "[DEPRECATED] Build ORT CoreML (Fast & No Tests)"
+name: Build ORT 1.18.1 macOS (with CoreML EP)
 
-# ⚠️  此 workflow 已废弃，请使用：
-#     "Extract ORT 1.18.1 macOS (CPU-only, No CoreML).yml"
+# 目的：
+#   自行编译 ONNX Runtime 1.18.1 macOS native dylib，两平台统一版本。
+#   带 CoreML EP（与官方 NuGet 包行为一致）。
 #
-# 废弃原因：
-#   1. 版本不统一：x86_64 用 v1.16.3，arm64 用 v1.18.1
-#   2. CoreML EP 导致崩溃：CoreML 框架在初始化时会向 .NET TP Worker 线程注册
-#      Objective-C TLS 析构回调，线程退出时 autorelease pool 清理会访问已释放
-#      的 ObjC 对象，导致 SIGSEGV（约运行 20-60 秒后必现）
-#   3. 编译耗时长（约 30-60 分钟），而官方 NuGet 包已包含所需 dylib，直接提取即可
+# 平台配置：
+#   Intel x64  : v1.18.1, minos 10.15, 默认 Xcode
+#   Silicon arm64: v1.18.1, minos 11.0, 固定 Xcode 15.2
+#     ↑ arm64 必须固定 Xcode 15.2 (SDK 14.2)，避免新版 SDK (>=14.4) 触发
+#       C++20 std::to_chars 在 deploy_target < 13.3 时不可用的编译错误
+#       参考: https://github.com/microsoft/onnxruntime/issues/21033
 #
-# 新方案：直接从官方 NuGet microsoft.ml.onnxruntime 1.18.1 提取：
-#   - osx-x64  libonnxruntime.dylib  (minos 10.15, CPU-only)
-#   - osx-arm64 libonnxruntime.dylib (minos 11.0,  CPU-only)
+# CoreML EP 说明：
+#   保留 CoreML EP（与官方 NuGet 包一致）。
+#   CoreML 崩溃问题（SIGSEGV）在调用方代码层面解决：
+#   不调用 AppendExecutionProvider_CoreML()，CoreML 框架就不会被初始化。
+#
+# 验证：
+#   - lipo 确认 arch
+#   - otool 确认 minos
+#   - otool -L 列出依赖（CoreML 应存在）
+#   - python3 ctypes 加载并调用 OrtGetApiBase()
 
 on:
   workflow_dispatch:
     inputs:
-      confirm:
-        description: '此 workflow 已废弃。输入 yes 确认仍要运行（不推荐）'
+      build_type:
+        description: 'Build Configuration'
         required: true
-        default: 'no'
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
 
 jobs:
-  deprecated-warning:
-    runs-on: ubuntu-latest
+  build:
+    name: Build v1.18.1 (${{ matrix.arch }}, minos ${{ matrix.deploy_target }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # === Intel x64 (macOS 10.15) ===
+          - arch: 'x86_64'
+            deploy_target: '10.15'
+            xcode_version: ''
+            artifact_name: 'onnxruntime-1.18.1-x86_64-macos10.15-coreml'
+
+          # === Apple Silicon arm64 (macOS 11.0) ===
+          # 必须使用 Xcode 15.2 (SDK 14.2)，避免新版 SDK (>=14.4) 触发
+          # C++20 std::to_chars 在 deploy_target < 13.3 时不可用的编译错误
+          # 参考: https://github.com/microsoft/onnxruntime/issues/21033
+          - arch: 'arm64'
+            deploy_target: '11.0'
+            xcode_version: '15.2'
+            artifact_name: 'onnxruntime-1.18.1-arm64-macos11.0-coreml'
+
+    env:
+      ORT_VERSION: 'v1.18.1'
+
     steps:
-      - name: Show deprecation notice
+      - name: Select Xcode Version
+        if: matrix.xcode_version != ''
         run: |
-          echo "::warning::此 workflow 已废弃！请使用 'Extract ORT 1.18.1 macOS (CPU-only, No CoreML)' workflow。"
-          if [ "${{ inputs.confirm }}" != "yes" ]; then
-            echo "::error::未确认继续运行，已中止。请使用新 workflow。"
+          sudo xcode-select --switch /Applications/Xcode_${{ matrix.xcode_version }}.app/Contents/Developer
+          echo "Switched to Xcode ${{ matrix.xcode_version }}"
+          xcodebuild -version
+          xcrun --show-sdk-version
+
+      - name: Checkout ONNX Runtime ${{ env.ORT_VERSION }}
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/onnxruntime
+          ref: ${{ env.ORT_VERSION }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          # runner 预装的 CMake 可能是 4.x，ORT 1.18.1 不支持 CMake 4.x
+          # 参考: https://github.com/microsoft/onnxruntime/issues/27503
+          pip install "cmake>=3.26,<4" numpy
+          brew install ninja
+          echo "CMake version: $(cmake --version | head -1)"
+          echo "Ninja version: $(ninja --version)"
+
+      - name: Patch Source Code (Fix Eigen Hash)
+        run: |
+          grep -rl "be8be39fdbc6e60e94fa7870b280707069b5b81a" . \
+            | xargs sed -i '' 's/be8be39fdbc6e60e94fa7870b280707069b5b81a/32b145f525a8308d7ab1c09388b2e288312d8eba/g' \
+            || true
+
+      - name: Build
+        run: |
+          echo ">>> Building ORT ${{ env.ORT_VERSION }} for ${{ matrix.arch }} (minos ${{ matrix.deploy_target }})"
+          python3 tools/ci_build/build.py \
+            --build_dir build \
+            --config ${{ inputs.build_type }} \
+            --use_coreml \
+            --parallel \
+            --build_shared_lib \
+            --skip_tests \
+            --skip_submodule_sync \
+            --osx_arch ${{ matrix.arch }} \
+            --cmake_extra_defines \
+              CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+              CMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deploy_target }} \
+              CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+              CMAKE_OSX_SYSROOT=macosx \
+              onnxruntime_BUILD_UNIT_TESTS=OFF \
+              onnxruntime_BUILD_BENCHMARKS=OFF
+
+      - name: Verify - file exists
+        run: |
+          FILE="build/${{ inputs.build_type }}/libonnxruntime.dylib"
+          if [ -f "$FILE" ]; then
+            echo "✅ Build succeeded"
+            ls -lh "$FILE"
+          else
+            echo "❌ Build failed: $FILE not found"
             exit 1
           fi
-          echo "::warning::用户确认继续运行已废弃的 workflow，建议尽快迁移到新 workflow。"
+
+      - name: Verify - arch
+        run: |
+          FILE="build/${{ inputs.build_type }}/libonnxruntime.dylib"
+          echo ">>> lipo -info:"
+          lipo -info "$FILE"
+          lipo -info "$FILE" | grep -q "${{ matrix.arch }}" \
+            && echo "✅ arch=${{ matrix.arch }} confirmed" \
+            || (echo "❌ arch mismatch!" && exit 1)
+
+      - name: Verify - minos (deployment target)
+        run: |
+          FILE="build/${{ inputs.build_type }}/libonnxruntime.dylib"
+
+          echo ">>> otool LC_BUILD_VERSION:"
+          otool -l "$FILE" | grep -A 6 LC_BUILD_VERSION || true
+
+          echo ">>> otool LC_VERSION_MIN_MACOSX (fallback):"
+          otool -l "$FILE" | grep -A 3 LC_VERSION_MIN_MACOSX || true
+
+          # 提取实际 minos（优先 LC_BUILD_VERSION，回退 LC_VERSION_MIN_MACOSX）
+          MINOS=$(otool -l "$FILE" | awk '
+            $1=="cmd" && $2=="LC_BUILD_VERSION" { in_blk=1 }
+            in_blk && $1=="minos" { print $2; exit }
+          ')
+          if [ -z "$MINOS" ]; then
+            MINOS=$(otool -l "$FILE" | awk '
+              $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX" { in_blk=1 }
+              in_blk && $1=="version" { print $2; exit }
+            ')
+          fi
+
+          echo ">>> Detected minos : $MINOS"
+          echo ">>> Expected minos : ${{ matrix.deploy_target }}"
+
+          if [ "$MINOS" = "${{ matrix.deploy_target }}" ]; then
+            echo "✅ minos=$MINOS confirmed"
+          else
+            echo "❌ minos mismatch! got=$MINOS expected=${{ matrix.deploy_target }}"
+            exit 1
+          fi
+
+      - name: Verify - dylib dependencies (otool -L)
+        run: |
+          FILE="build/${{ inputs.build_type }}/libonnxruntime.dylib"
+          echo ">>> otool -L:"
+          otool -L "$FILE"
+          # CoreML 应存在（带 CoreML EP 编译）
+          if otool -L "$FILE" | grep -q "CoreML"; then
+            echo "✅ CoreML dependency present (expected for CoreML EP build)"
+          else
+            echo "⚠️  WARNING: CoreML dependency not found (unexpected for CoreML EP build)"
+          fi
+
+      - name: Verify - load with Python ctypes
+        run: |
+          FILE="$(pwd)/build/${{ inputs.build_type }}/libonnxruntime.dylib"
+          python3 - <<EOF
+          import ctypes, sys, os
+
+          lib_path = "$FILE"
+          print(f"Loading: {lib_path}")
+          print(f"Size: {os.path.getsize(lib_path):,} bytes")
+
+          try:
+              lib = ctypes.CDLL(lib_path)
+              print("✅ ctypes.CDLL load succeeded")
+          except OSError as e:
+              print(f"❌ Load failed: {e}")
+              sys.exit(1)
+
+          try:
+              fn = lib.OrtGetApiBase
+              fn.restype = ctypes.c_void_p
+              fn.argtypes = []
+              ptr = fn()
+              if ptr:
+                  print(f"✅ OrtGetApiBase() = {hex(ptr)}")
+              else:
+                  print("❌ OrtGetApiBase() returned NULL")
+                  sys.exit(1)
+          except AttributeError as e:
+              print(f"❌ Symbol not found: {e}")
+              sys.exit(1)
+
+          print("✅ All verification passed")
+          EOF
+
+      - name: Organize artifacts
+        run: |
+          mkdir -p artifacts
+          cp build/${{ inputs.build_type }}/libonnxruntime*.dylib artifacts/
+          cat > artifacts/version.txt <<EOF
+          ORT Version:    ${{ env.ORT_VERSION }}
+          Arch:           ${{ matrix.arch }}
+          MinOS:          ${{ matrix.deploy_target }}
+          CoreML EP:      enabled
+          Build Type:     ${{ inputs.build_type }}
+          EOF
+          echo ">>> Artifacts:"
+          ls -lh artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifacts/
+          retention-days: 90
