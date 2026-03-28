@@ -1,0 +1,170 @@
+name: Extract ORT 1.18.1 macOS (CPU-only, No CoreML)
+
+# 目的：
+#   从官方 NuGet 包 Microsoft.ML.OnnxRuntime 1.18.1 中提取 macOS native dylib，
+#   无需自行编译，两个平台统一使用同一版本。
+#
+# 背景：
+#   原方案 x86_64 用 v1.16.3、arm64 用 v1.18.1（需固定 Xcode 15.2），版本不统一。
+#   官方 NuGet 1.18.1 包已包含：
+#     - runtimes/osx-x64/native/libonnxruntime.dylib   (minos 10.15)
+#     - runtimes/osx-arm64/native/libonnxruntime.dylib (minos 11.0)
+#   直接提取即可，完全满足需求且无需编译。
+#
+# CoreML EP 说明：
+#   不使用 CoreML EP。CoreML 框架在初始化时会向 .NET TP Worker 线程注册
+#   Objective-C TLS 析构回调，线程退出时 autorelease pool 清理会访问已释放
+#   的 ObjC 对象，导致 SIGSEGV 崩溃（约运行 20-60 秒后必现）。
+#   官方 CPU EP 在 Apple M 系列芯片上性能完全满足需求。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract-and-verify:
+    name: Extract & Verify (${{ matrix.rid }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Intel x64，macOS 10.15+
+          - rid: 'osx-x64'
+            arch: 'x86_64'
+            expected_minos: '10.15'
+            artifact_name: 'onnxruntime-1.18.1-x86_64-macos10.15-cpu'
+
+          # Apple Silicon arm64，macOS 11.0+
+          - rid: 'osx-arm64'
+            arch: 'arm64'
+            expected_minos: '11.0'
+            artifact_name: 'onnxruntime-1.18.1-arm64-macos11.0-cpu'
+
+    env:
+      ORT_VERSION: '1.18.1'
+      NUPKG_ID: 'microsoft.ml.onnxruntime'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download NuGet package
+        run: |
+          URL="https://api.nuget.org/v3-flatcontainer/${NUPKG_ID}/${ORT_VERSION}/${NUPKG_ID}.${ORT_VERSION}.nupkg"
+          echo ">>> Downloading: $URL"
+          curl -L --fail --retry 3 --retry-delay 5 -o ort.nupkg "$URL"
+          echo ">>> Downloaded size: $(du -sh ort.nupkg | cut -f1)"
+
+      - name: Extract dylib
+        run: |
+          mkdir -p extracted
+          # nupkg 是标准 zip 格式，直接 unzip 提取目标文件
+          unzip -p ort.nupkg "runtimes/${{ matrix.rid }}/native/libonnxruntime.dylib" \
+            > extracted/libonnxruntime.dylib
+          echo ">>> Extracted size: $(du -sh extracted/libonnxruntime.dylib | cut -f1)"
+
+      - name: Verify - arch
+        run: |
+          echo ">>> lipo -info:"
+          lipo -info extracted/libonnxruntime.dylib
+          # 确认架构匹配
+          lipo -info extracted/libonnxruntime.dylib | grep -q "${{ matrix.arch }}" \
+            && echo "✅ arch=${{ matrix.arch }} confirmed" \
+            || (echo "❌ arch mismatch!" && exit 1)
+
+      - name: Verify - minos (deployment target)
+        run: |
+          echo ">>> otool LC_BUILD_VERSION:"
+          otool -l extracted/libonnxruntime.dylib | grep -A 5 LC_BUILD_VERSION || true
+
+          echo ">>> otool LC_VERSION_MIN_MACOSX (fallback):"
+          otool -l extracted/libonnxruntime.dylib | grep -A 3 LC_VERSION_MIN_MACOSX || true
+
+          # 提取实际 minos 值（优先 LC_BUILD_VERSION，回退 LC_VERSION_MIN_MACOSX）
+          MINOS=$(otool -l extracted/libonnxruntime.dylib | awk '
+            $1=="cmd" && $2=="LC_BUILD_VERSION" { in_blk=1 }
+            in_blk && $1=="minos" { print $2; exit }
+          ')
+          if [ -z "$MINOS" ]; then
+            MINOS=$(otool -l extracted/libonnxruntime.dylib | awk '
+              $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX" { in_blk=1 }
+              in_blk && $1=="version" { print $2; exit }
+            ')
+          fi
+
+          echo ">>> Detected minos: $MINOS"
+          echo ">>> Expected minos: ${{ matrix.expected_minos }}"
+
+          if [ "$MINOS" = "${{ matrix.expected_minos }}" ]; then
+            echo "✅ minos=$MINOS confirmed"
+          else
+            echo "❌ minos mismatch! got=$MINOS expected=${{ matrix.expected_minos }}"
+            exit 1
+          fi
+
+      - name: Verify - dylib dependencies (otool -L)
+        run: |
+          echo ">>> otool -L (dynamic dependencies):"
+          otool -L extracted/libonnxruntime.dylib
+          # 确认没有 CoreML 依赖（官方 CPU-only 包不应包含 CoreML）
+          if otool -L extracted/libonnxruntime.dylib | grep -q "CoreML"; then
+            echo "⚠️  WARNING: CoreML dependency detected in official CPU package (unexpected)"
+          else
+            echo "✅ No CoreML dependency (CPU-only confirmed)"
+          fi
+
+      - name: Verify - load with Python ctypes
+        run: |
+          python3 - <<'EOF'
+          import ctypes, sys, os
+
+          lib_path = os.path.abspath("extracted/libonnxruntime.dylib")
+          print(f"Loading: {lib_path}")
+          print(f"Size: {os.path.getsize(lib_path):,} bytes")
+
+          try:
+              lib = ctypes.CDLL(lib_path)
+              print("✅ ctypes.CDLL load succeeded")
+          except OSError as e:
+              print(f"❌ Load failed: {e}")
+              sys.exit(1)
+
+          # 验证核心符号存在且可调用
+          try:
+              fn = lib.OrtGetApiBase
+              fn.restype = ctypes.c_void_p
+              fn.argtypes = []
+              ptr = fn()
+              if ptr:
+                  print(f"✅ OrtGetApiBase() returned non-null ptr: {hex(ptr)}")
+              else:
+                  print("❌ OrtGetApiBase() returned NULL")
+                  sys.exit(1)
+          except AttributeError as e:
+              print(f"❌ Symbol not found: {e}")
+              sys.exit(1)
+
+          print("✅ All verification passed")
+          EOF
+
+      - name: Organize artifacts
+        run: |
+          mkdir -p artifacts
+          cp extracted/libonnxruntime.dylib artifacts/
+          cat > artifacts/version.txt <<EOF
+          ORT Version:    ${{ env.ORT_VERSION }}
+          RID:            ${{ matrix.rid }}
+          Arch:           ${{ matrix.arch }}
+          MinOS:          ${{ matrix.expected_minos }}
+          CoreML EP:      disabled (CPU-only)
+          Source:         NuGet microsoft.ml.onnxruntime ${{ env.ORT_VERSION }}
+          EOF
+          echo ">>> Artifacts:"
+          ls -lh artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifacts/
+          retention-days: 90

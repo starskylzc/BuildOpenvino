@@ -1,127 +1,36 @@
-name: Build ORT CoreML (Fast & No Tests)
+name: "[DEPRECATED] Build ORT CoreML (Fast & No Tests)"
+
+# ⚠️  此 workflow 已废弃，请使用：
+#     "Extract ORT 1.18.1 macOS (CPU-only, No CoreML).yml"
+#
+# 废弃原因：
+#   1. 版本不统一：x86_64 用 v1.16.3，arm64 用 v1.18.1
+#   2. CoreML EP 导致崩溃：CoreML 框架在初始化时会向 .NET TP Worker 线程注册
+#      Objective-C TLS 析构回调，线程退出时 autorelease pool 清理会访问已释放
+#      的 ObjC 对象，导致 SIGSEGV（约运行 20-60 秒后必现）
+#   3. 编译耗时长（约 30-60 分钟），而官方 NuGet 包已包含所需 dylib，直接提取即可
+#
+# 新方案：直接从官方 NuGet microsoft.ml.onnxruntime 1.18.1 提取：
+#   - osx-x64  libonnxruntime.dylib  (minos 10.15, CPU-only)
+#   - osx-arm64 libonnxruntime.dylib (minos 11.0,  CPU-only)
 
 on:
   workflow_dispatch:
     inputs:
-      build_type:
-        description: 'Build Configuration'
+      confirm:
+        description: '此 workflow 已废弃。输入 yes 确认仍要运行（不推荐）'
         required: true
-        default: 'Release'
-        type: choice
-        options:
-        - Release
-        - RelWithDebInfo
+        default: 'no'
 
 jobs:
-  build:
-    name: Build ${{ matrix.ort_version }} (${{ matrix.arch }})
-    runs-on: macos-14
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # === Intel x64 (macOS 10.15) ===
-          - ort_version: 'v1.16.3'
-            arch: 'x86_64'
-            deploy_target: '10.15'
-            xcode_version: ''
-            
-          # === Apple Silicon arm64 (macOS 11.0) ===
-          # 必须使用 Xcode 15.2 (SDK 14.2)，避免新版 SDK (>=14.4) 触发
-          # C++20 std::to_chars 在 deploy_target < 13.3 时不可用的编译错误
-          # 参考: https://github.com/microsoft/onnxruntime/issues/21033
-          - ort_version: 'v1.18.1'
-            arch: 'arm64'
-            deploy_target: '11.0'
-            xcode_version: '15.2'
-
+  deprecated-warning:
+    runs-on: ubuntu-latest
     steps:
-      - name: Select Xcode Version
-        if: matrix.xcode_version != ''
+      - name: Show deprecation notice
         run: |
-          sudo xcode-select --switch /Applications/Xcode_${{ matrix.xcode_version }}.app/Contents/Developer
-          echo "Switched to Xcode ${{ matrix.xcode_version }}"
-          xcodebuild -version
-          xcrun --show-sdk-version
-
-      - name: Checkout ONNX Runtime
-        uses: actions/checkout@v6
-        with:
-          repository: microsoft/onnxruntime
-          ref: ${{ matrix.ort_version }}
-          submodules: recursive
-          fetch-depth: 1
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11'
-
-      - name: Install Dependencies
-        run: |
-          # runner 预装的 CMake 可能是 4.x，ORT 1.18.1 及更早版本不支持 CMake 4.x
-          # 参考: https://github.com/microsoft/onnxruntime/issues/27503
-          # 使用 pip 安装 CMake 3.x 以确保兼容性
-          pip install "cmake>=3.26,<4" numpy
-          brew install ninja
-          echo "CMake version: $(cmake --version | head -1)"
-
-      - name: Patch Source Code (Fix Eigen Hash)
-        shell: bash
-        run: |
-          grep -rl "be8be39fdbc6e60e94fa7870b280707069b5b81a" . | xargs sed -i '' 's/be8be39fdbc6e60e94fa7870b280707069b5b81a/32b145f525a8308d7ab1c09388b2e288312d8eba/g' || true
-
-      - name: Build Shared Library (Optimized)
-        shell: bash
-        run: |
-          echo ">>> Building ${{ matrix.ort_version }} for ${{ matrix.arch }} (No Tests)"
-          
-          # 关键修改：
-          # 添加 onnxruntime_BUILD_UNIT_TESTS=OFF 彻底禁止编译测试代码
-          # 将所有 cmake_extra_defines 合并，防止参数覆盖
-          
-          python3 tools/ci_build/build.py \
-            --build_dir build \
-            --config ${{ inputs.build_type }} \
-            --use_coreml \
-            --parallel \
-            --build_shared_lib \
-            --skip_tests \
-            --skip_submodule_sync \
-            --osx_arch ${{ matrix.arch }} \
-            --cmake_extra_defines \
-              CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-              CMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deploy_target }} \
-              CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
-              CMAKE_OSX_SYSROOT=macosx \
-              onnxruntime_BUILD_UNIT_TESTS=OFF \
-              onnxruntime_BUILD_BENCHMARKS=OFF
-
-      - name: Check Output
-        run: |
-          FILE_PATH="build/${{ inputs.build_type }}/libonnxruntime.dylib"
-          if [ -f "$FILE_PATH" ]; then
-            echo "✅ Build Success!"
-            ls -lh $FILE_PATH
-            lipo -info $FILE_PATH
-          else
-            echo "❌ Error: Build failed."
+          echo "::warning::此 workflow 已废弃！请使用 'Extract ORT 1.18.1 macOS (CPU-only, No CoreML)' workflow。"
+          if [ "${{ inputs.confirm }}" != "yes" ]; then
+            echo "::error::未确认继续运行，已中止。请使用新 workflow。"
             exit 1
           fi
-
-      - name: Organize Artifacts
-        run: |
-          mkdir -p artifacts
-          cp build/${{ inputs.build_type }}/libonnxruntime*.dylib artifacts/
-          mkdir -p artifacts/include
-          if [ -d "include/onnxruntime/core/session" ]; then
-             cp -r include/onnxruntime/core/session/*.h artifacts/include/
-          fi
-          echo "Version: ${{ matrix.ort_version }}" > artifacts/version.txt
-          echo "Arch: ${{ matrix.arch }}" >> artifacts/version.txt
-          echo "MinOS: ${{ matrix.deploy_target }}" >> artifacts/version.txt
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: onnxruntime-${{ matrix.ort_version }}-${{ matrix.arch }}-macos${{ matrix.deploy_target }}
-          path: artifacts/
+          echo "::warning::用户确认继续运行已废弃的 workflow，建议尽快迁移到新 workflow。"
