@@ -46,42 +46,36 @@ on:
           - arm64-only
 
 jobs:
+  # 前置 job：根据 target_platform 输入生成 matrix JSON
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          X64='{"arch":"x86_64","deploy_target":"10.15","runner":"macos-15-intel","xcode_version":"","artifact_name":"onnxruntime-1.18.1-x86_64-macos10.15-coreml"}'
+          ARM64='{"arch":"arm64","deploy_target":"11.0","runner":"macos-14","xcode_version":"15.2","artifact_name":"onnxruntime-1.18.1-arm64-macos11.0-coreml"}'
+
+          case "${{ inputs.target_platform }}" in
+            x64-only)   echo "matrix={\"include\":[$X64]}" >> $GITHUB_OUTPUT ;;
+            arm64-only) echo "matrix={\"include\":[$ARM64]}" >> $GITHUB_OUTPUT ;;
+            *)          echo "matrix={\"include\":[$X64,$ARM64]}" >> $GITHUB_OUTPUT ;;
+          esac
+
   build:
     name: Build v1.18.1 (${{ matrix.arch }}, minos ${{ matrix.deploy_target }})
+    needs: prepare
     runs-on: ${{ matrix.runner }}
-    # 根据 target_platform 输入过滤：
-    #   both     → 两个都跑
-    #   x64-only → 只跑 x86_64
-    #   arm64-only → 只跑 arm64
-    if: >-
-      inputs.target_platform == 'both' ||
-      (inputs.target_platform == 'x64-only' && matrix.arch == 'x86_64') ||
-      (inputs.target_platform == 'arm64-only' && matrix.arch == 'arm64')
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       ORT_VERSION: 'v1.18.1'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # === Intel x64 (macOS 10.15) ===
-          # macos-15-intel 上默认 Xcode 16.4 (SDK 15.5)，需要：
-          #   -Wno-error=deprecated-pragma 修复 ATOMIC_VAR_INIT deprecated 错误
-          - arch: 'x86_64'
-            deploy_target: '10.15'
-            runner: 'macos-15-intel'
-            xcode_version: ''
-            artifact_name: 'onnxruntime-1.18.1-x86_64-macos10.15-coreml'
-
-          # === Apple Silicon arm64 (macOS 11.0) ===
-          # 必须使用 Xcode 15.2 (SDK 14.2)，避免新版 SDK (>=14.4) 触发
-          # C++20 std::to_chars 在 deploy_target < 13.3 时不可用的编译错误
-          # 参考: https://github.com/microsoft/onnxruntime/issues/21033
-          - arch: 'arm64'
-            deploy_target: '11.0'
-            runner: 'macos-14'
-            xcode_version: '15.2'
-            artifact_name: 'onnxruntime-1.18.1-arm64-macos11.0-coreml'
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    # matrix 配置说明：
+    #   Intel x64  : macos-15-intel, 默认 Xcode 16.4, -Wno-error=deprecated-pragma 修复 ATOMIC_VAR_INIT
+    #   Silicon arm64: macos-14, 固定 Xcode 15.2 (SDK 14.2), 避免 std::to_chars 错误 (issue #21033)
 
     steps:
       - name: Select Xcode Version
