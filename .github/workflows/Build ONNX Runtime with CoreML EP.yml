@@ -104,7 +104,8 @@ jobs:
               CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
               CMAKE_OSX_SYSROOT=macosx \
               onnxruntime_BUILD_UNIT_TESTS=OFF \
-              onnxruntime_BUILD_BENCHMARKS=OFF
+              onnxruntime_BUILD_BENCHMARKS=OFF \
+              CMAKE_CXX_FLAGS="-Wno-error=deprecated-pragma"
 
       - name: Verify - file exists
         run: |
