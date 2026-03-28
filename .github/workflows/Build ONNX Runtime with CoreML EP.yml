@@ -5,13 +5,13 @@ name: Build ORT 1.18.1 macOS (with CoreML EP)
 #   两平台统一版本 v1.18.1。
 #
 # 平台配置：
-#   Intel x64    : v1.18.1, minos 10.15, 默认 Xcode, macos-15-intel runner
+#   Intel x64    : v1.18.1, minos 10.15, Xcode 15.4, macos-15-intel runner
 #   Silicon arm64: v1.18.1, minos 11.0,  Xcode 15.2, macos-14 runner
 #
 # 编译兼容性修复：
-#   - ATOMIC_VAR_INIT deprecated (Xcode 16.x SDK):
-#     添加 -Wno-error=deprecated-pragma 将此 warning 从 error 降级
-#   - arm64 固定 Xcode 15.2 (SDK 14.2)，避免 std::to_chars 编译错误 (issue #21033)
+#   - 两平台均固定 Xcode 15.x，避免 Xcode 16.x libc++ 中 <ostream> 引入 <format>
+#     导致 std::to_chars (macOS 13.3+) 与低 deployment target 不兼容的编译错误
+#   - Xcode 15.x 同时也避免了 ATOMIC_VAR_INIT deprecated warning
 #
 # CoreML EP 说明：
 #   保留 CoreML EP（与官方 NuGet 包一致）。
@@ -54,7 +54,7 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          X64='{"arch":"x86_64","deploy_target":"10.15","runner":"macos-15-intel","xcode_version":"","artifact_name":"onnxruntime-1.18.1-x86_64-macos10.15-coreml"}'
+          X64='{"arch":"x86_64","deploy_target":"10.15","runner":"macos-15-intel","xcode_version":"15.4","artifact_name":"onnxruntime-1.18.1-x86_64-macos10.15-coreml"}'
           ARM64='{"arch":"arm64","deploy_target":"11.0","runner":"macos-14","xcode_version":"15.2","artifact_name":"onnxruntime-1.18.1-arm64-macos11.0-coreml"}'
 
           case "${{ inputs.target_platform }}" in
@@ -74,8 +74,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     # matrix 配置说明：
-    #   Intel x64  : macos-15-intel, 默认 Xcode 16.4, -Wno-error=deprecated-pragma 修复 ATOMIC_VAR_INIT
-    #   Silicon arm64: macos-14, 固定 Xcode 15.2 (SDK 14.2), 避免 std::to_chars 错误 (issue #21033)
+    #   Intel x64  : macos-15-intel, 固定 Xcode 15.4, 避免 Xcode 16.x std::to_chars 编译错误
+    #   Silicon arm64: macos-14, 固定 Xcode 15.2, 避免 std::to_chars 编译错误 (issue #21033)
 
     steps:
       - name: Select Xcode Version
