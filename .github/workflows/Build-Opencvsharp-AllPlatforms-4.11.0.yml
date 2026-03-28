@@ -1,7 +1,7 @@
 # ============================================================
-# Build-Opencvsharp-AllPlatforms-4.10.0
+# Build-Opencvsharp-AllPlatforms-4.11.0
 #
-# 统一跨平台构建 workflow：OpenCvSharpExtern 4.10.0
+# 统一跨平台构建 workflow：OpenCvSharpExtern 4.11.0
 #
 # 支持的构建目标：
 #   macOS  │ x86_64 (Intel, macOS 10.15+)
@@ -21,7 +21,7 @@
 #   勾选需要构建的平台，未勾选的平台将被跳过。
 # ============================================================
 
-name: Build-Opencvsharp-AllPlatforms-4.10.0
+name: Build-Opencvsharp-AllPlatforms-4.11.0
 
 on:
   workflow_dispatch:
@@ -59,7 +59,7 @@ on:
         default: true
 
 env:
-  OPENCV_VERSION: "4.10.0"
+  OPENCV_VERSION: "4.11.0"
   OPENCVSHARP_REF: "4.11.0.20250507"
   BUILD_LIST: "core,imgproc,videoio"
 
