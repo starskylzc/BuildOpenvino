@@ -75,7 +75,7 @@ jobs:
           xcrun --show-sdk-version
 
       - name: Checkout ONNX Runtime ${{ env.ORT_VERSION }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           repository: microsoft/onnxruntime
           ref: ${{ env.ORT_VERSION }}
@@ -83,7 +83,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.11'
 
@@ -92,7 +92,12 @@ jobs:
           # runner 预装的 CMake 可能是 4.x，ORT 1.18.1 不支持 CMake 4.x
           # 参考: https://github.com/microsoft/onnxruntime/issues/27503
           pip install "cmake>=3.26,<4" numpy
-          brew install ninja
+          # ninja 在 runner 上可能已预装，brew reinstall 会产生警告，用 which 判断跳过
+          if ! command -v ninja &>/dev/null; then
+            brew install ninja
+          else
+            echo "ninja $(ninja --version) already installed, skipping"
+          fi
           echo "CMake version: $(cmake --version | head -1)"
           echo "Ninja version: $(ninja --version)"
 
@@ -223,11 +228,9 @@ jobs:
       - name: Organize artifacts
         run: |
           mkdir -p artifacts
-          # 复制两个 dylib：
-          #   libonnxruntime.dylib         → 调用方链接用（符号链接或主文件）
-          #   libonnxruntime.1.18.1.dylib  → 带版本号的实际文件（运行时 @rpath 解析需要）
+          # 只复制 libonnxruntime.dylib（调用方直接引用此文件）
+          # libonnxruntime.1.18.1.dylib 是编译产物的版本号软链，不需要随包分发
           cp build/${{ inputs.build_type }}/libonnxruntime.dylib artifacts/
-          cp build/${{ inputs.build_type }}/libonnxruntime.1.18.1.dylib artifacts/
           cat > artifacts/version.txt <<EOF
           ORT Version:    ${{ env.ORT_VERSION }}
           Arch:           ${{ matrix.arch }}
@@ -240,7 +243,7 @@ jobs:
           ls -lh artifacts/
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: ${{ matrix.artifact_name }}
           path: artifacts/
