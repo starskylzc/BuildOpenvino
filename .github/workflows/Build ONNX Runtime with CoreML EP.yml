@@ -255,14 +255,17 @@ jobs:
 
           echo "=== [3/3] Scan for other potential chrono operator<< usage ==="
           # 扫描 ORT 源码中可能触发同样问题的文件：
-          #   - 使用 "using timestamp_ns::operator<<" 的文件
-          #   - .cc/.mm 文件中同时 include "date/date.h" 并使用 operator<< 输出 timestamp
-          # 排除已 patch 的文件和第三方依赖
+          #   - 使用 "using timestamp_ns::operator<<" 或 "using date::operator<<" 的文件
+          # 排除规则：
+          #   - 已 patch 的文件
+          #   - posix/logging/syslog_sink.cc：仅在 onnxruntime_USE_SYSLOG=ON 时编译，
+          #     本构建未启用该选项，不会触发问题
           SUSPECTS=$(grep -rl "timestamp_ns::operator<<\|using date::operator<<" \
             --include='*.cc' --include='*.cpp' --include='*.mm' \
             onnxruntime/ 2>/dev/null \
             | grep -v "ostream_sink.cc" \
             | grep -v "apple_log_sink.mm" \
+            | grep -v "syslog_sink.cc" \
             || true)
           if [ -n "$SUSPECTS" ]; then
             echo "⚠️  WARNING: Found additional files using chrono/date operator<<"
