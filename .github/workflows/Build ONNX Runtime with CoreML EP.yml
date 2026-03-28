@@ -130,6 +130,7 @@ jobs:
             --build_shared_lib \
             --skip_tests \
             --skip_submodule_sync \
+            --compile_no_warning_as_error \
             --osx_arch ${{ matrix.arch }} \
             --cmake_extra_defines \
               CMAKE_POLICY_VERSION_MINIMUM=3.5 \
@@ -137,8 +138,7 @@ jobs:
               CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
               CMAKE_OSX_SYSROOT=macosx \
               onnxruntime_BUILD_UNIT_TESTS=OFF \
-              onnxruntime_BUILD_BENCHMARKS=OFF \
-              CMAKE_CXX_FLAGS="-Wno-error=deprecated-pragma -Wno-error=deprecated-this-capture"
+              onnxruntime_BUILD_BENCHMARKS=OFF
 
       - name: Verify - file exists
         run: |
