@@ -10,8 +10,8 @@ set -euo pipefail
 #   - ARCH 只支持 x86_64 或 aarch64
 ARCH="$1"
 
-OPENCV_VERSION="${OPENCV_VERSION:-4.11.0}"
-OPENCVSHARP_REF="${OPENCVSHARP_REF:-4.11.0.20250507}"
+OPENCV_VERSION="${OPENCV_VERSION:-4.10.0}"
+OPENCVSHARP_REF="${OPENCVSHARP_REF:-4.10.0.20241108}"
 BUILD_LIST="${BUILD_LIST:-core,imgproc,videoio}"
 
 # ------------------------------------------------------------
