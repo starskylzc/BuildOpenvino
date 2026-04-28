@@ -1,0 +1,617 @@
+name: Build ORT 1.25.0 (Win + Mac + Linux, DML/CoreML/CPU)
+
+# 目的：
+#   一个 workflow 一次性产出 Windows + macOS + Linux 三平台的 ORT v1.25.0 native 二进制。
+#   每个平台自动启用对应的 GPU/加速 EP + CPU EP，**不需要客户端再装匹配 DirectML/CoreML**。
+#
+# 平台 / EP 组合：
+#   ┌────────────────┬───────┬─────────┬──────────────────┬─────────────────┐
+#   │ Target         │ Arch  │ EP      │ Runner           │ Min OS          │
+#   ├────────────────┼───────┼─────────┼──────────────────┼─────────────────┤
+#   │ Windows DML    │ x64   │ DML+CPU │ windows-2022     │ Win 10 1903     │
+#   │ Windows DML    │ arm64 │ DML+CPU │ windows-11-arm   │ Win 10 1903 ARM │
+#   │ Windows CPU    │ x86   │ CPU     │ windows-2022     │ Win 10 1903     │
+#   │ macOS CoreML   │ x64   │ CoreML  │ macos-15-intel   │ 10.15           │
+#   │ macOS CoreML   │ arm64 │ CoreML  │ macos-14 (Xc15.2)│ 11.0            │
+#   │ Linux CPU      │ x64   │ CPU     │ ubuntu-22.04     │ glibc 2.35      │
+#   │ Linux CPU      │ arm64 │ CPU     │ ubuntu-22.04-arm │ glibc 2.35      │
+#   └────────────────┴───────┴─────────┴──────────────────┴─────────────────┘
+#
+# DirectML.dll "自动版本匹配" 策略：
+#   1. ORT 1.25 构建时 CMake 通过 FetchContent 从 NuGet 拉一个**钉死版本**的
+#      Microsoft.AI.DirectML 包,把 DirectML.dll 解压到 build/_deps/...。
+#   2. 链接阶段 onnxruntime.dll 引用这个 DirectML.dll 的 import lib。
+#   3. 我们 build 完后扫描整个 build/ 目录,把这个**同一个**DirectML.dll
+#      复制到 artifact,跟 onnxruntime.dll 同级。客户端 ship 时直接连同发布,
+#      绝对不会出现客户机器系统 DirectML.dll 版本低 / 不匹配的问题。
+#   4. version.txt 里记录 DirectML.dll 的精确版本 (从二进制 file version 提取)。
+#
+# 兼容性 patch：
+#   仅 macOS 需要 (chrono operator<< → strftime, 见 1.18.1 历史 workflow)。
+#   Windows / Linux 不受 std::to_chars 编译错误影响,跳过。
+#
+# CoreML EP 说明：
+#   CoreML EP 在 ORT 1.25 起拆为独立 dylib (libonnxruntime_providers_coreml.dylib),
+#   会一起打包到 macOS artifact 里。
+#
+# 不包含：
+#   - Windows CUDA EP (NVIDIA 专用,需要单独 workflow + cuDNN 大依赖)
+#   - Linux GPU EP   (NVIDIA/AMD/Intel 各厂商 EP 装一套要 ~2 GB 依赖,后续单独处理)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+      target_set:
+        description: 'Which platforms to build'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - windows-only
+          - macos-only
+          - linux-only
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          # platform: linux/windows/macos     用于条件 step 分流
+          # arch:    x64/x86/arm64/x86_64     ORT build.py / cmake 用的 arch 名 (注意 macOS 用 x86_64)
+          # ep:      dml/coreml/cpu           启用哪个加速 EP
+          # deploy_target:  10.15/11.0/<空>   仅 macOS 用,minos
+          # xcode_version:  15.2/<空>         仅 macOS arm64 用,绕开 to_chars
+          # artifact_name:  上传产物名
+
+          WIN_X64_DML='{"platform":"windows","arch":"x64","ep":"dml","runner":"windows-2022","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x64-dml"}'
+          WIN_ARM64_DML='{"platform":"windows","arch":"arm64","ep":"dml","runner":"windows-11-arm","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-arm64-dml"}'
+          WIN_X86_CPU='{"platform":"windows","arch":"x86","ep":"cpu","runner":"windows-2022","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x86-cpu"}'
+          MAC_X64_COREML='{"platform":"macos","arch":"x86_64","ep":"coreml","runner":"macos-15-intel","deploy_target":"10.15","xcode_version":"","artifact_name":"onnxruntime-1.25.0-osx-x64-coreml"}'
+          MAC_ARM64_COREML='{"platform":"macos","arch":"arm64","ep":"coreml","runner":"macos-14","deploy_target":"11.0","xcode_version":"15.2","artifact_name":"onnxruntime-1.25.0-osx-arm64-coreml"}'
+          LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
+          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-22.04-arm","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
+
+          case "${{ inputs.target_set }}" in
+            windows-only)
+              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML,$WIN_X86_CPU]}" >> $GITHUB_OUTPUT ;;
+            macos-only)
+              echo "matrix={\"include\":[$MAC_X64_COREML,$MAC_ARM64_COREML]}" >> $GITHUB_OUTPUT ;;
+            linux-only)
+              echo "matrix={\"include\":[$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+            *)
+              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML,$WIN_X86_CPU,$MAC_X64_COREML,$MAC_ARM64_COREML,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+          esac
+
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}-${{ matrix.ep }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    env:
+      ORT_VERSION: 'v1.25.0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      # ============================================================
+      # 1. 通用 checkout
+      # ============================================================
+      - name: Checkout ONNX Runtime ${{ env.ORT_VERSION }}
+        uses: actions/checkout@v4.2.2
+        with:
+          repository: microsoft/onnxruntime
+          ref: ${{ env.ORT_VERSION }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: '3.11'
+
+      # ============================================================
+      # 2. macOS arm64: 锁 Xcode 15.2 (SDK 14.2,无 std::to_chars 问题)
+      # ============================================================
+      - name: Select Xcode Version (macOS only)
+        if: matrix.platform == 'macos' && matrix.xcode_version != ''
+        shell: bash
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_${{ matrix.xcode_version }}.app/Contents/Developer
+          echo "Switched to Xcode ${{ matrix.xcode_version }}"
+          xcodebuild -version
+          xcrun --show-sdk-version
+
+      - name: Show default Xcode (macOS only, when not pinned)
+        if: matrix.platform == 'macos' && matrix.xcode_version == ''
+        shell: bash
+        run: |
+          echo "Using default Xcode on this runner"
+          xcodebuild -version
+          xcrun --show-sdk-version
+
+      # ============================================================
+      # 3. 装依赖 (per-OS)
+      # ============================================================
+      - name: Install deps (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          pip install "cmake>=3.28,<4" "numpy<2" setuptools wheel
+          cmake --version
+
+      - name: Setup MSBuild (Windows)
+        if: matrix.platform == 'windows'
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install deps (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          pip install "cmake>=3.28,<4" "numpy<2"
+          if ! command -v ninja &>/dev/null; then brew install ninja; fi
+          cmake --version
+          ninja --version
+
+      - name: Install deps (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential libssl-dev ninja-build \
+            libcurl4-openssl-dev zlib1g-dev pkg-config protobuf-compiler libprotobuf-dev
+          pip install "cmake>=3.28,<4" "numpy<2"
+          cmake --version
+          ninja --version
+
+      # ============================================================
+      # 4. macOS-only: patch chrono operator<< → strftime
+      #    避开 Xcode 16.x libc++ <format> → std::to_chars 链。
+      #    arm64 用 Xcode 15.2 不受影响,但 patch 等价无害。
+      # ============================================================
+      - name: Patch chrono stream (macOS only)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          echo "=== [1/3] Patch ostream_sink.cc ==="
+          F1="onnxruntime/core/common/logging/sinks/ostream_sink.cc"
+          if [ ! -f "$F1" ]; then
+            echo "::error::$F1 not found in ORT v1.25.0 (path may have changed)"
+            find onnxruntime -name "ostream_sink*" -type f
+            exit 1
+          fi
+          cat > "$F1" << 'PATCH_EOF'
+          // Copyright (c) Microsoft Corporation. All rights reserved.
+          // Licensed under the MIT License.
+          // Patched: chrono operator<< → strftime, avoid libc++ <format> → std::to_chars.
+          #include "core/common/logging/sinks/ostream_sink.h"
+          #include "core/common/logging/logging.h"
+          #include <ctime>
+          #include <iomanip>
+          #include <iostream>
+          #include <sstream>
+
+          namespace onnxruntime {
+          namespace logging {
+
+          #ifndef ORT_MINIMAL_BUILD
+          struct Color {
+            constexpr static const char* kWarn = "\033[0;93m";
+            constexpr static const char* kError = "\033[1;31m";
+            constexpr static const char* kFatal = "\033[1;37;41m";
+            constexpr static const char* kEnd = "\033[m";
+          };
+          #endif
+
+          void OStreamSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id,
+                                     const Capture& message) {
+            auto time_t_val = std::chrono::system_clock::to_time_t(timestamp);
+            auto tm_val = *std::localtime(&time_t_val);
+            auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                           timestamp.time_since_epoch()) % 1000000;
+            std::ostringstream msg;
+          #ifndef ORT_MINIMAL_BUILD
+            if (message.Severity() == Severity::kWARNING) msg << Color::kWarn;
+            else if (message.Severity() == Severity::kERROR) msg << Color::kError;
+            else if (message.Severity() == Severity::kFATAL) msg << Color::kFatal;
+          #endif
+            msg << std::put_time(&tm_val, "%Y-%m-%d %H:%M:%S")
+                << "." << std::setfill('0') << std::setw(6) << us.count()
+                << " [" << message.SeverityPrefix() << ":" << message.Category()
+                << ":" << logger_id << ", "
+                << message.Location().ToString() << "] " << message.Message();
+          #ifndef ORT_MINIMAL_BUILD
+            if (message.Severity() == Severity::kWARNING || message.Severity() == Severity::kERROR
+                || message.Severity() == Severity::kFATAL) msg << Color::kEnd;
+          #endif
+            msg << "\n";
+            (*stream_) << msg.str();
+            if (flush_) stream_->flush();
+          }
+
+          }  // namespace logging
+          }  // namespace onnxruntime
+          PATCH_EOF
+
+          echo "=== [2/3] Patch apple_log_sink.mm ==="
+          F2="onnxruntime/core/platform/apple/logging/apple_log_sink.mm"
+          if [ ! -f "$F2" ]; then
+            echo "::error::$F2 not found in ORT v1.25.0"
+            find onnxruntime -name "apple_log_sink*" -type f
+            exit 1
+          fi
+          cat > "$F2" << 'PATCH_EOF'
+          // Copyright (c) Microsoft Corporation. All rights reserved.
+          // Licensed under the MIT License.
+          // Patched: chrono operator<< → strftime.
+          #include "core/platform/apple/logging/apple_log_sink.h"
+          #import <Foundation/Foundation.h>
+          #include <ctime>
+          #include <iomanip>
+          #include <sstream>
+
+          namespace onnxruntime {
+          namespace logging {
+
+          void AppleLogSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id,
+                                      const Capture& message) {
+            auto time_t_val = std::chrono::system_clock::to_time_t(timestamp);
+            auto tm_val = *std::localtime(&time_t_val);
+            auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                           timestamp.time_since_epoch()) % 1000000;
+            std::ostringstream msg;
+            msg << std::put_time(&tm_val, "%Y-%m-%d %H:%M:%S")
+                << "." << std::setfill('0') << std::setw(6) << us.count()
+                << " [" << message.SeverityPrefix() << ":" << message.Category()
+                << ":" << logger_id << ", "
+                << message.Location().ToString() << "] " << message.Message();
+            NSLog(@"%s", msg.str().c_str());
+          }
+
+          }  // namespace logging
+          }  // namespace onnxruntime
+          PATCH_EOF
+
+          echo "=== [3/3] Scan for other chrono operator<< usage ==="
+          SUSPECTS=$(grep -rl "timestamp_ns::operator<<\|using date::operator<<" \
+            --include='*.cc' --include='*.cpp' --include='*.mm' \
+            onnxruntime/ 2>/dev/null \
+            | grep -v "ostream_sink.cc" \
+            | grep -v "apple_log_sink.mm" \
+            | grep -v "syslog_sink.cc" \
+            || true)
+          if [ -n "$SUSPECTS" ]; then
+            echo "::warning::Found additional chrono/date operator<< files (may need patch):"
+            echo "$SUSPECTS"
+          fi
+
+      # ============================================================
+      # 5. Build (per-OS)
+      # ============================================================
+      - name: Build (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $epFlags = @()
+          switch ("${{ matrix.ep }}") {
+            "dml" { $epFlags += "--use_dml" }
+            "cpu" { } # CPU 默认,不加 flag
+          }
+          $archFlags = @()
+          switch ("${{ matrix.arch }}") {
+            "x86"   { $archFlags += "--x86" }
+            "arm64" { $archFlags += "--arm64" }
+          }
+
+          $allArgs = @(
+            "tools/ci_build/build.py",
+            "--build_dir", "build",
+            "--config", "${{ inputs.build_type }}",
+            "--parallel",
+            "--build_shared_lib",
+            "--skip_tests",
+            "--skip_submodule_sync",
+            "--compile_no_warning_as_error",
+            "--cmake_generator", "Visual Studio 17 2022"
+          )
+          $allArgs += $epFlags
+          $allArgs += $archFlags
+          $allArgs += @(
+            "--cmake_extra_defines",
+            "onnxruntime_BUILD_UNIT_TESTS=OFF",
+            "onnxruntime_BUILD_BENCHMARKS=OFF"
+          )
+          Write-Host ">>> python $($allArgs -join ' ')"
+          python @allArgs
+          if ($LASTEXITCODE -ne 0) { throw "Build failed code=$LASTEXITCODE" }
+
+      - name: Build (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          echo ">>> Building ORT $ORT_VERSION for ${{ matrix.arch }} (minos ${{ matrix.deploy_target }})"
+          python3 tools/ci_build/build.py \
+            --build_dir build \
+            --config ${{ inputs.build_type }} \
+            --use_coreml \
+            --parallel \
+            --build_shared_lib \
+            --skip_tests \
+            --skip_submodule_sync \
+            --compile_no_warning_as_error \
+            --osx_arch ${{ matrix.arch }} \
+            --cmake_extra_defines \
+              CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+              CMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deploy_target }} \
+              CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+              CMAKE_OSX_SYSROOT=macosx \
+              onnxruntime_BUILD_UNIT_TESTS=OFF \
+              onnxruntime_BUILD_BENCHMARKS=OFF
+
+      - name: Build (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          echo ">>> Building ORT $ORT_VERSION for Linux ${{ matrix.arch }} (CPU EP)"
+          python3 tools/ci_build/build.py \
+            --build_dir build \
+            --config ${{ inputs.build_type }} \
+            --parallel \
+            --build_shared_lib \
+            --skip_tests \
+            --skip_submodule_sync \
+            --compile_no_warning_as_error \
+            --allow_running_as_root \
+            --cmake_extra_defines \
+              onnxruntime_BUILD_UNIT_TESTS=OFF \
+              onnxruntime_BUILD_BENCHMARKS=OFF
+
+      # ============================================================
+      # 6. Verify (per-OS)
+      # ============================================================
+      - name: Verify - artifact exists (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $cfg = "${{ inputs.build_type }}"
+          $outDir = "build\$cfg\$cfg"
+          if (-not (Test-Path $outDir)) { $outDir = "build\$cfg" }
+          $main = Get-ChildItem -Path $outDir -Filter "onnxruntime.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $main) {
+            Write-Host "::error::onnxruntime.dll not found under $outDir"
+            Get-ChildItem -Path $outDir -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+          Write-Host "✅ onnxruntime.dll: $($main.FullName) ($($main.Length) bytes)"
+
+          # DML build: 必须有 DirectML.dll. 1.25 的 cmake 通常会复制到 build dir,
+          # 没有的话从 _deps 里找
+          if ("${{ matrix.ep }}" -eq "dml") {
+            $dmlList = Get-ChildItem -Path "build" -Recurse -Filter "DirectML.dll" -ErrorAction SilentlyContinue
+            if (-not $dmlList) {
+              Write-Host "::error::DirectML.dll not found anywhere under build/ — DML EP needs it!"
+              exit 1
+            }
+            Write-Host ">>> DirectML.dll candidates:"
+            $dmlList | ForEach-Object { Write-Host "   $($_.FullName) ($($_.Length) bytes)" }
+          }
+
+      - name: Verify - artifact exists (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          FILE="build/${{ inputs.build_type }}/libonnxruntime.dylib"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Build failed: $FILE not found"
+            ls -la build/${{ inputs.build_type }}/ || true
+            exit 1
+          fi
+          ls -lh "$FILE"
+          echo "✅ Build succeeded: libonnxruntime.dylib"
+
+          # arch 校验
+          lipo -info "$FILE" | grep -q "${{ matrix.arch }}" \
+            || (echo "::error::arch mismatch" && exit 1)
+
+          # minos 校验
+          MINOS=$(otool -l "$FILE" | awk '
+            $1=="cmd" && $2=="LC_BUILD_VERSION" { in_blk=1 }
+            in_blk && $1=="minos" { print $2; exit }
+          ')
+          if [ -z "$MINOS" ]; then
+            MINOS=$(otool -l "$FILE" | awk '
+              $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX" { in_blk=1 }
+              in_blk && $1=="version" { print $2; exit }
+            ')
+          fi
+          if [ "$MINOS" != "${{ matrix.deploy_target }}" ]; then
+            echo "::error::minos mismatch got=$MINOS expected=${{ matrix.deploy_target }}"
+            exit 1
+          fi
+          echo "✅ arch + minos OK"
+
+          # 关键: 扫 dylib 是否漏 std::to_chars 浮点符号
+          # macOS 13.4 才有的符号若链入,运行在 10.15/11 会 dyld 找不到符号崩溃
+          LEAKED=$(nm -u "$FILE" 2>/dev/null \
+            | grep -E "to_chars.*[^io]+(d|f|e)$|__ZNKSt6chrono" \
+            || true)
+          if [ -n "$LEAKED" ]; then
+            echo "::error::FP std::to_chars symbol leaked (will crash on macOS < 13.4):"
+            echo "$LEAKED"
+            exit 1
+          fi
+          echo "✅ no FP to_chars symbols leaked"
+
+      - name: Verify - artifact exists (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          FILE="build/${{ inputs.build_type }}/libonnxruntime.so"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Build failed: $FILE not found"
+            ls -la build/${{ inputs.build_type }}/ || true
+            exit 1
+          fi
+          ls -lh "$FILE"
+          echo "✅ Build succeeded: libonnxruntime.so"
+          echo ">>> ldd:"
+          ldd "$FILE" || true
+          echo ">>> file:"
+          file "$FILE"
+
+      # ============================================================
+      # 7. Organize artifacts (per-OS)
+      #    重点: Windows DML 路径要把 ORT 编译时**自动下载的同一个**
+      #    DirectML.dll 复制到 artifact 旁边,保证版本严格匹配。
+      # ============================================================
+      - name: Organize artifacts (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $cfg = "${{ inputs.build_type }}"
+          $outDir = "build\$cfg\$cfg"
+          if (-not (Test-Path $outDir)) { $outDir = "build\$cfg" }
+
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+
+          # 主 onnxruntime.dll + 所有 onnxruntime_providers_*.dll
+          Get-ChildItem -Path $outDir -Filter "onnxruntime*.dll" |
+            ForEach-Object { Copy-Item $_.FullName "artifacts\" -Force }
+
+          # 1.25 link 阶段会把 DirectML.dll 复制到 build dir,直接用这份
+          # (与 onnxruntime.dll 链接的 import lib 来自同一份 NuGet)
+          $dml = Get-ChildItem -Path "build" -Recurse -Filter "DirectML.dll" -ErrorAction SilentlyContinue |
+                 Sort-Object Length -Descending | Select-Object -First 1
+          if ($dml) {
+            Copy-Item $dml.FullName "artifacts\" -Force
+            $dmlVer = (Get-Item "artifacts\DirectML.dll").VersionInfo.FileVersion
+            Write-Host "✅ Bundled DirectML.dll v$dmlVer from $($dml.FullName)"
+          } elseif ("${{ matrix.ep }}" -eq "dml") {
+            Write-Host "::error::DML build but DirectML.dll missing"
+            exit 1
+          }
+
+          # PDB (RelWithDebInfo only)
+          if ("${{ inputs.build_type }}" -eq "RelWithDebInfo") {
+            Get-ChildItem -Path $outDir -Filter "onnxruntime*.pdb" -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_.FullName "artifacts\" -Force }
+          }
+
+          # version.txt 含 DirectML 版本
+          $dmlInfo = if (Test-Path "artifacts\DirectML.dll") {
+            "DirectML.dll: " + (Get-Item "artifacts\DirectML.dll").VersionInfo.FileVersion
+          } else { "DirectML.dll: (none — CPU build)" }
+
+          @"
+          ORT Version: $env:ORT_VERSION
+          Platform:    Windows
+          Arch:        ${{ matrix.arch }}
+          EP:          ${{ matrix.ep }}
+          $dmlInfo
+          Runner:      ${{ matrix.runner }}
+          Build Type:  ${{ inputs.build_type }}
+          "@ | Out-File "artifacts\version.txt" -Encoding utf8
+
+          Write-Host ">>> Artifacts:"
+          Get-ChildItem artifacts | Format-Table Name, Length -AutoSize
+
+      - name: Organize artifacts (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp "build/${{ inputs.build_type }}/libonnxruntime.dylib" artifacts/
+          # 1.25 起 CoreML EP 拆为独立 dylib
+          if [ -f "build/${{ inputs.build_type }}/libonnxruntime_providers_coreml.dylib" ]; then
+            cp "build/${{ inputs.build_type }}/libonnxruntime_providers_coreml.dylib" artifacts/
+          fi
+          cat > artifacts/version.txt <<EOF
+          ORT Version: $ORT_VERSION
+          Platform:    macOS
+          Arch:        ${{ matrix.arch }}
+          EP:          ${{ matrix.ep }} (CoreML EP, framework comes with system)
+          MinOS:       ${{ matrix.deploy_target }}
+          Runner:      ${{ matrix.runner }}
+          Build Type:  ${{ inputs.build_type }}
+          EOF
+          ls -lh artifacts/
+
+      - name: Organize artifacts (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp "build/${{ inputs.build_type }}/libonnxruntime.so" artifacts/
+          # 若有 providers shared
+          if [ -f "build/${{ inputs.build_type }}/libonnxruntime_providers_shared.so" ]; then
+            cp "build/${{ inputs.build_type }}/libonnxruntime_providers_shared.so" artifacts/
+          fi
+          cat > artifacts/version.txt <<EOF
+          ORT Version: $ORT_VERSION
+          Platform:    Linux
+          Arch:        ${{ matrix.arch }}
+          EP:          ${{ matrix.ep }} (CPU only — GPU EP needs separate workflow)
+          glibc:       $(ldd --version | head -1)
+          Runner:      ${{ matrix.runner }}
+          Build Type:  ${{ inputs.build_type }}
+          EOF
+          ls -lh artifacts/
+
+      # ============================================================
+      # 8. Smoke test: ctypes/dlopen 加载 + 调 OrtGetApiBase
+      # ============================================================
+      - name: Smoke load test (Windows)
+        if: matrix.platform == 'windows' && matrix.arch != 'arm64'
+        shell: pwsh
+        run: |
+          # arm64 上 runner 是 ARM,但 Python 可能也是 ARM,直接 ctypes load 即可。
+          # 我们仍跳过 arm64 是因为如果 Python 装的是 x64,会架构不匹配,这里偷懒只测 x64/x86。
+          $dll = "artifacts\onnxruntime.dll"
+          python -c "import ctypes; lib = ctypes.CDLL(r'$dll'); fn = lib.OrtGetApiBase; fn.restype = ctypes.c_void_p; print('OrtGetApiBase =', hex(fn()))"
+
+      - name: Smoke load test (macOS / Linux)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "macos" ]; then
+            FILE="artifacts/libonnxruntime.dylib"
+          else
+            FILE="artifacts/libonnxruntime.so"
+          fi
+          python3 - <<EOF
+          import ctypes, os, sys
+          lib_path = "$FILE"
+          print(f"Loading: {lib_path} ({os.path.getsize(lib_path):,} bytes)")
+          try:
+              lib = ctypes.CDLL(lib_path)
+          except OSError as e:
+              print(f"::error::CDLL load failed: {e}")
+              sys.exit(1)
+          fn = lib.OrtGetApiBase
+          fn.restype = ctypes.c_void_p
+          ptr = fn()
+          if not ptr:
+              print("::error::OrtGetApiBase returned NULL"); sys.exit(1)
+          print(f"✅ OrtGetApiBase = {hex(ptr)}")
+          EOF
+
+      # ============================================================
+      # 9. Upload
+      # ============================================================
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifacts/
+          retention-days: 90
