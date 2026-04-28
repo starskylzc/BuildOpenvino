@@ -71,17 +71,20 @@ jobs:
       - name: Show CPU info
         shell: bash
         run: |
+          # ARM /proc/cpuinfo 没 'model name' 字段,grep 不匹配 + pipefail 会 fail step。
+          # 全部加 || true 避免 grep 0 match 把 step kill。
           if [ "${{ runner.os }}" = "Linux" ]; then
-            cat /proc/cpuinfo | grep -E "model name|Model|Hardware|cpu cores|cpu MHz" | head -8
-            echo ""
-            echo "Memory:"
-            free -h | head -2
+            (cat /proc/cpuinfo | grep -E "model name|Model|Hardware|CPU implementer|CPU part|cpu cores|cpu MHz|Features" | head -10) || true
+            echo "---"
+            (lscpu | head -20) || true
+            echo "---"
+            free -h | head -2 || true
           elif [ "${{ runner.os }}" = "macOS" ]; then
-            sysctl -n machdep.cpu.brand_string
-            sysctl -n machdep.cpu.core_count
-            sysctl -n hw.memsize | awk '{printf "RAM: %.1f GB\n", $1/1024/1024/1024}'
+            sysctl -n machdep.cpu.brand_string || true
+            sysctl -n machdep.cpu.core_count || true
+            sysctl -n hw.memsize | awk '{printf "RAM: %.1f GB\n", $1/1024/1024/1024}' || true
           else
-            wmic cpu get name,numberofcores,maxclockspeed /value 2>&1 || echo "(wmic on win-2022)"
+            wmic cpu get name,numberofcores,maxclockspeed /value 2>&1 || true
           fi
 
       - name: Run benchmark
