@@ -143,7 +143,7 @@ jobs:
         if: matrix.platform != 'linux'
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       # ============================================================
       # 2. macOS Xcode 选择
@@ -568,9 +568,9 @@ jobs:
               set -ex
               git config --global --add safe.directory "*" || true
 
-              # manylinux_2_28 已预装 gcc/g++/cmake/ninja/python (cp311 在 /opt/python/cp311-cp311)
-              /opt/python/cp311-cp311/bin/pip install "cmake>=3.28,<4" "numpy<2" psutil
-              export PATH="/opt/python/cp311-cp311/bin:$PATH"
+              # manylinux_2_28 已预装 gcc/g++/cmake/ninja/python (用 cp310 跟其它平台统一 Python 3.10)
+              /opt/python/cp310-cp310/bin/pip install "cmake>=3.28,<4" "numpy<2" psutil
+              export PATH="/opt/python/cp310-cp310/bin:$PATH"
               python3 --version
               gcc --version
               cmake --version

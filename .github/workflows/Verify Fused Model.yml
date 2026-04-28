@@ -46,11 +46,11 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          WIN_X64='{"name":"win-x64","runner":"windows-2022","python":"3.11"}'
-          MAC_X64='{"name":"osx-x64","runner":"macos-15-intel","python":"3.11"}'
-          MAC_ARM64='{"name":"osx-arm64","runner":"macos-14","python":"3.11"}'
-          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","python":"3.11"}'
-          LINUX_ARM64='{"name":"linux-arm64","runner":"ubuntu-24.04-arm","python":"3.11"}'
+          WIN_X64='{"name":"win-x64","runner":"windows-2022","python":"3.10"}'
+          MAC_X64='{"name":"osx-x64","runner":"macos-15-intel","python":"3.10"}'
+          MAC_ARM64='{"name":"osx-arm64","runner":"macos-14","python":"3.10"}'
+          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","python":"3.10"}'
+          LINUX_ARM64='{"name":"linux-arm64","runner":"ubuntu-24.04-arm","python":"3.10"}'
 
           case "${{ inputs.target_set }}" in
             windows-only) echo "matrix={\"include\":[$WIN_X64]}" >> $GITHUB_OUTPUT ;;
