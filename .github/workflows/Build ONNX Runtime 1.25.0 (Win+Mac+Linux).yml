@@ -177,7 +177,17 @@ jobs:
         shell: pwsh
         run: |
           pip install "cmake>=3.28,<4" "numpy<2" setuptools wheel
-          cmake --version
+          # Win ARM64 runner 默认 CMake 4.3, ORT 1.25 + pytorch_cpuinfo 在 4.x 下崩。
+          # 显式找 pip 装的 cmake 路径 (3.31.x),写到 GITHUB_ENV 给 build step 用。
+          $pipCmake = python -c "import sysconfig, os; p=os.path.join(sysconfig.get_path('scripts'),'cmake.exe'); print(p if os.path.exists(p) else '')"
+          if ($pipCmake) {
+            "PIP_CMAKE_PATH=$pipCmake" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host ">>> pip cmake: $pipCmake"
+            & $pipCmake --version
+          } else {
+            Write-Host "::warning::pip cmake not found, build.py 会用系统 cmake"
+            cmake --version
+          }
 
       - name: Setup MSBuild (Windows)
         if: matrix.platform == 'windows'
@@ -265,6 +275,12 @@ jobs:
             "--compile_no_warning_as_error",
             "--cmake_generator", "Visual Studio 17 2022"
           )
+          # Win ARM64 (windows-11-arm runner) 系统 CMake 4.3 破坏 pytorch_cpuinfo,
+          # 显式让 build.py 用 pip 装的 cmake (< 4)。
+          if ($env:PIP_CMAKE_PATH) {
+            $allArgs += @("--cmake_path", $env:PIP_CMAKE_PATH)
+            Write-Host ">>> 使用 pip cmake: $env:PIP_CMAKE_PATH"
+          }
           $allArgs += $epFlags
           $allArgs += $archFlags
           $allArgs += @("--cmake_extra_defines",
@@ -385,14 +401,38 @@ jobs:
               python3 -m pip install --upgrade pip
               python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
 
-              # 显式装 migraphx-dev (rocm/dev-ubuntu-22.04:*-complete 没自动带 cmake config)
-              apt-get install -y migraphx migraphx-dev || apt-get install -y migraphx || true
+              # 试多种 migraphx 包名 (-complete 不一定带 dev headers)
+              apt-get install -y migraphx-dev || true
+              apt-get install -y migraphx || true
+              apt-get install -y libmigraphx-dev || true
+              apt-get install -y rocm-dev rocm-llvm rocm-runtime || true
 
-              # 验证 migraphx CMake config + lib 存在
-              find /opt/rocm -name "migraphxConfig.cmake" -o -name "migraphx-config.cmake" 2>/dev/null | head -5
-              ls /opt/rocm/lib/libmigraphx*.so 2>/dev/null | head -3 \
-                || (echo "::error::libmigraphx*.so 找不到,migraphx apt 装失败"; \
-                    apt list --installed 2>/dev/null | grep -i migraphx; exit 1)
+              # 检查 headers 是否真的装上了
+              echo ">>> 查 migraphx headers:"
+              find /opt/rocm -name "version.h" -path "*migraphx*" 2>/dev/null | head -5
+              find /opt/rocm -name "migraphx.h" 2>/dev/null | head -5
+              echo ">>> /opt/rocm/include/ 顶层目录:"
+              ls /opt/rocm/include/ 2>/dev/null | head -30
+
+              # 如果 migraphx headers 还不在,从 GitHub 下载并解压源码 headers
+              if [ ! -f /opt/rocm/include/migraphx/version.h ]; then
+                echo "::warning::migraphx headers 系统包没装好,从 GitHub 拉源码 headers"
+                cd /tmp
+                # ROCm 6.2.x 对应 MIGraphX rocm-6.2.4 tag (跟容器 ROCm 版本一致)
+                git clone --depth 1 --branch rocm-6.2.4 https://github.com/ROCm/AMDMIGraphX.git || \
+                  git clone --depth 1 https://github.com/ROCm/AMDMIGraphX.git
+                # 把 src/include 软链到 /opt/rocm/include
+                mkdir -p /opt/rocm/include
+                if [ -d AMDMIGraphX/src/include/migraphx ]; then
+                  cp -rn AMDMIGraphX/src/include/migraphx /opt/rocm/include/ || true
+                  echo ">>> 已 cp migraphx headers 到 /opt/rocm/include/migraphx"
+                fi
+                cd /work
+              fi
+
+              ls /opt/rocm/include/migraphx/version.h 2>/dev/null \
+                && echo "✅ migraphx/version.h found" \
+                || (echo "::error::migraphx headers 仍然缺失,跳过 ROCm build"; exit 0)
 
               python3 tools/ci_build/build.py \
                 --build_dir build \
@@ -407,7 +447,8 @@ jobs:
                 --allow_running_as_root \
                 --cmake_extra_defines \
                   onnxruntime_BUILD_UNIT_TESTS=OFF \
-                  onnxruntime_BUILD_BENCHMARKS=OFF
+                  onnxruntime_BUILD_BENCHMARKS=OFF \
+                  CMAKE_INCLUDE_PATH=/opt/rocm/include
             '
 
       # ---- Linux x64 OpenVINO (在 openvino/ubuntu22_dev:2025.4.1 容器内) ----
@@ -423,16 +464,23 @@ jobs:
             "${{ matrix.docker }}" \
             bash -c '
               set -ex
-              # git "dubious ownership" — root in container reading host-mounted /work
               git config --global --add safe.directory "*" || true
 
               apt-get update -y
+              # gcc 11+ 才有完整 <charconv>::from_chars (整数和浮点),
+              # OpenVINO container 默认 gcc 9,ORT 1.25 用了新的 from_chars overload 编不过。
               apt-get install -y --no-install-recommends \
                 build-essential ninja-build pkg-config \
+                gcc-11 g++-11 \
                 libssl-dev libcurl4-openssl-dev zlib1g-dev \
                 python3 python3-pip python3-dev \
                 protobuf-compiler libprotobuf-dev \
                 git ca-certificates
+              update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 \
+                --slave /usr/bin/g++ g++ /usr/bin/g++-11 \
+                --slave /usr/bin/gcov gcov /usr/bin/gcov-11
+              update-alternatives --auto gcc
+              gcc --version
               python3 -m pip install --upgrade pip
               python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
 
