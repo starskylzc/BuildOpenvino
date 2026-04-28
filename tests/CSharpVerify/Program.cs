@@ -117,7 +117,34 @@ string inpName = sess.InputMetadata.Keys.First();
 var inpTensor = new DenseTensor<float>(input, [1, 3, ModelSize, ModelSize]);
 var inputs = new[] { NamedOnnxValue.CreateFromTensor(inpName, inpTensor) };
 using var results = sess.Run(inputs);
-var outMap = results.ToDictionary(r => r.Name, r => r.AsTensor<Float16>());
+
+// 输出 dtype 可能是 Float16 (obj_raw 必定 fp16) 或 float (face 头 ORT 有时反向出 fp32)
+// 统一转成 float[],下游一律按 float 处理。同时记录每个输出的 shape (face decode 不需,
+// 但 obj_raw 解码需要 anchors 数,从 metadata 拿)。
+var outMap = new Dictionary<string, float[]>();
+var outShapes = new Dictionary<string, int[]>();
+foreach (var r in results)
+{
+    var f16 = r.AsTensor<Float16>();
+    if (f16 != null)
+    {
+        var arr = f16.ToArray();
+        var floats = new float[arr.Length];
+        for (int i = 0; i < arr.Length; i++) floats[i] = (float)arr[i];
+        outMap[r.Name] = floats;
+        outShapes[r.Name] = f16.Dimensions.ToArray();
+        continue;
+    }
+    var f32 = r.AsTensor<float>();
+    if (f32 != null)
+    {
+        outMap[r.Name] = f32.ToArray();
+        outShapes[r.Name] = f32.Dimensions.ToArray();
+        continue;
+    }
+    Console.Error.WriteLine($"::error::Unsupported tensor type for output '{r.Name}'");
+    return 1;
+}
 
 Console.WriteLine($"  Outputs: {string.Join(", ", outMap.Keys)}");
 
@@ -165,21 +192,21 @@ for (int si = 0; si < strides.Length; si++)
     int stride = strides[si];
     int hw = ModelSize / stride;
     int K = hw * hw * NumAnchors;
-    var s = outMap[faceScoreNames[si]].ToArray();
-    var b = outMap[faceBboxNames[si]].ToArray();
+    var s = outMap[faceScoreNames[si]];
+    var b = outMap[faceBboxNames[si]];
 
     for (int i = 0; i < K; i++)
     {
-        float score = (float)s[i];
+        float score = s[i];
         if (score < FaceScoreThr) continue;
         int row = i / NumAnchors / hw;
         int col = (i / NumAnchors) % hw;
         float cx = col * stride;
         float cy = row * stride;
-        float dx1 = (float)b[i * 4 + 0] * stride;
-        float dy1 = (float)b[i * 4 + 1] * stride;
-        float dx2 = (float)b[i * 4 + 2] * stride;
-        float dy2 = (float)b[i * 4 + 3] * stride;
+        float dx1 = b[i * 4 + 0] * stride;
+        float dy1 = b[i * 4 + 1] * stride;
+        float dx2 = b[i * 4 + 2] * stride;
+        float dy2 = b[i * 4 + 3] * stride;
         faceCands.Add(new Det(cx - dx1, cy - dy1, cx + dx2, cy + dy2, score, -1));
     }
 }
@@ -189,28 +216,28 @@ Console.WriteLine($"  Face cands: {faceCands.Count}, after NMS: {faceFinal.Count
 
 // ── Obj decode (obj_raw [N,8400,6]) ──
 Console.WriteLine($"\n--- Obj decode ---");
-var objRawTensor = outMap["obj_raw"];
-int anchors = objRawTensor.Dimensions[1];
-var objArr = objRawTensor.ToArray();
+var objArr = outMap["obj_raw"];
+var objShape = outShapes["obj_raw"];
+int anchors = objShape[1];
 var objCands = new List<Det>();
 for (int i = 0; i < anchors; i++)
 {
-    float scorePhone = (float)objArr[i * 6 + 4];
-    float scoreLens = (float)objArr[i * 6 + 5];
+    float scorePhone = objArr[i * 6 + 4];
+    float scoreLens = objArr[i * 6 + 5];
     float maxS = Math.Max(scorePhone, scoreLens);
     if (maxS < ObjConfThr) continue;
     int cls = scoreLens >= scorePhone ? 1 : 0;
-    float cx = (float)objArr[i * 6 + 0];
-    float cy = (float)objArr[i * 6 + 1];
-    float w = (float)objArr[i * 6 + 2];
-    float h = (float)objArr[i * 6 + 3];
+    float cx = objArr[i * 6 + 0];
+    float cy = objArr[i * 6 + 1];
+    float w = objArr[i * 6 + 2];
+    float h = objArr[i * 6 + 3];
     objCands.Add(new Det(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, maxS, cls));
 }
 var phoneFinal = Nms(objCands.Where(d => d.Cls == 0).ToList(), ObjNmsIou).Select(MapBack).ToList();
 var lensFinal = Nms(objCands.Where(d => d.Cls == 1).ToList(), ObjNmsIou).Select(MapBack).ToList();
 float phoneMax = phoneFinal.Count > 0 ? phoneFinal.Max(d => d.Score) : 0f;
 float lensMax = lensFinal.Count > 0 ? lensFinal.Max(d => d.Score) : 0f;
-Console.WriteLine($"  Obj raw shape: [{string.Join(",", objRawTensor.Dimensions.ToArray())}]");
+Console.WriteLine($"  Obj raw shape: [{string.Join(",", objShape)}]");
 Console.WriteLine($"  Phone: cands={objCands.Count(d => d.Cls == 0)}, NMS: {phoneFinal.Count}, max: {phoneMax:F4}");
 Console.WriteLine($"  Lens : cands={objCands.Count(d => d.Cls == 1)}, NMS: {lensFinal.Count}, max: {lensMax:F4}");
 
