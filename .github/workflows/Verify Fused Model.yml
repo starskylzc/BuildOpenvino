@@ -33,7 +33,9 @@ on:
           - linux-only
 
 env:
-  ORT_VERSION: "1.25.0"
+  # PyPI 还没发 1.25.0 (最新 1.23.2),用 1.23.2 验证模型 forward compat 即可。
+  # 真"我们 build 的 1.25.0" 的验证由 Verify Built Artifacts (CSharp) workflow 做。
+  ORT_VERSION: "1.23.2"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:

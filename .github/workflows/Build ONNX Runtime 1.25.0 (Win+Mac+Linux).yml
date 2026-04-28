@@ -96,8 +96,8 @@ jobs:
           LINUX_X64_CUDA='{"platform":"linux","arch":"x64","ep":"cuda","runner":"ubuntu-22.04","docker":"nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cuda"}'
           LINUX_X64_ROCM='{"platform":"linux","arch":"x64","ep":"rocm","runner":"ubuntu-22.04","docker":"rocm/dev-ubuntu-22.04:6.2.4-complete","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-rocm"}'
           LINUX_X64_OPENVINO='{"platform":"linux","arch":"x64","ep":"openvino","runner":"ubuntu-22.04","docker":"openvino/ubuntu22_dev:2025.4.1","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-openvino"}'
-          LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-24.04","docker":"ubuntu:18.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
-          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-24.04-arm","docker":"arm64v8/ubuntu:18.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
+          LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-24.04","docker":"quay.io/pypa/manylinux_2_28_x86_64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
+          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-24.04-arm","docker":"quay.io/pypa/manylinux_2_28_aarch64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
 
           case "${{ inputs.target_set }}" in
             windows-only)
@@ -550,56 +550,31 @@ jobs:
                   onnxruntime_BUILD_BENCHMARKS=OFF
             '
 
-      # ---- Linux CPU (x64 + arm64 同一段:ubuntu:18.04 / arm64v8/ubuntu:18.04 容器) ----
-      # 跟 OpenCvSharp 4.10.0 完全对齐 — glibc 2.27 floor:
-      #   覆盖 Ubuntu 18.04+ / 中标麒麟 V7 / 银河麒麟 V10 / 统信 UOS V20 / Anolis 8 / RHEL 7+
-      # 18.04 自带 gcc 7,需要从 ubuntu-toolchain-r PPA 装 gcc-11 (ORT 1.25 要 C++20 with from_chars)
-      # 18.04 自带 Python 3.6,需要从 deadsnakes PPA 装 Python 3.10 (build.py 需要 3.8+)
-      - name: Build (Linux CPU ubuntu:18.04, in container)
+      # ---- Linux CPU (x64 + arm64 同一段:manylinux_2_28 容器,glibc 2.28 floor) ----
+      # 之前试过 ubuntu:18.04 (glibc 2.27) 跟 OpenCvSharp 严格对齐,但 deadsnakes 已停
+      # 维护 bionic 上 python3.9+,无法装 ORT 1.25 build.py 需要的 Python 3.9。
+      # 退回 manylinux_2_28 (glibc 2.28,基于 AlmaLinux 8) — 自带 Python 3.11 + gcc 14:
+      #   覆盖银河麒麟 V10 SP1+ / 统信 UOS V20+ / Anolis 8 / RHEL 8+ / Ubuntu 20.04+
+      #   信创主流全覆盖,只比 OpenCvSharp 高一档 (Ubuntu 18.04/Kylin V7 都 EOL,影响很小)
+      - name: Build (Linux CPU manylinux_2_28, in container)
         if: matrix.platform == 'linux' && matrix.ep == 'cpu'
         shell: bash
         run: |
           docker run --rm --user root \
             -v "$(pwd):/work" -w /work \
             -e ORT_VERSION="${{ env.ORT_VERSION }}" \
-            -e DEBIAN_FRONTEND=noninteractive \
-            -e TZ=UTC \
             "${{ matrix.docker }}" \
             bash -c '
               set -ex
               git config --global --add safe.directory "*" || true
 
-              # 基础 + ubuntu-toolchain-r PPA (gcc 11) + deadsnakes PPA (Python 3.10 base only)
-              apt-get update -y
-              apt-get install -y --no-install-recommends \
-                ca-certificates gnupg software-properties-common \
-                wget curl git make pkg-config \
-                libssl-dev libcurl4-openssl-dev zlib1g-dev
-              add-apt-repository -y ppa:ubuntu-toolchain-r/test
-              add-apt-repository -y ppa:deadsnakes/ppa
-              apt-get update -y
-              # deadsnakes 已不为 bionic 提供 python3.10 (2024 起 dropped)。
-              # ORT 1.25 build.py 要 Python 3.8+,bionic deadsnakes 还有 python3.9 + dev/distutils/venv。
-              apt-get install -y --no-install-recommends \
-                gcc-11 g++-11 \
-                python3.9 python3.9-dev python3.9-distutils python3.9-venv
-              update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 \
-                --slave /usr/bin/g++ g++ /usr/bin/g++-11 \
-                --slave /usr/bin/gcov gcov /usr/bin/gcov-11
-              update-alternatives --auto gcc
-
-              # python3.9 + pip — get-pip.py 通用版已弃 3.8,需用 version-specific URL
-              curl -sS https://bootstrap.pypa.io/pip/3.8/get-pip.py | python3.9
-              python3.9 -m pip install --upgrade pip setuptools wheel
-              python3.9 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
-              # 把 python3.9 设为默认 python3 (build.py 默认用 python3)
-              update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 100
+              # manylinux_2_28 已预装 gcc/g++/cmake/ninja/python (cp311 在 /opt/python/cp311-cp311)
+              /opt/python/cp311-cp311/bin/pip install "cmake>=3.28,<4" "numpy<2" psutil
+              export PATH="/opt/python/cp311-cp311/bin:$PATH"
               python3 --version
               gcc --version
               cmake --version
 
-              # protobuf 让 ORT 自带的 vendored 版编 (老 ubuntu 系统包太旧)
-              # 链 libstdc++ 静态,让生成的 .so 在没有 PPA libstdc++ 的客户机器也能加载
               python3 tools/ci_build/build.py \
                 --build_dir build \
                 --config ${{ inputs.build_type }} \
@@ -611,8 +586,7 @@ jobs:
                 --allow_running_as_root \
                 --cmake_extra_defines \
                   onnxruntime_BUILD_UNIT_TESTS=OFF \
-                  onnxruntime_BUILD_BENCHMARKS=OFF \
-                  CMAKE_CXX_FLAGS="-static-libstdc++ -static-libgcc"
+                  onnxruntime_BUILD_BENCHMARKS=OFF
             '
 
       # ============================================================
