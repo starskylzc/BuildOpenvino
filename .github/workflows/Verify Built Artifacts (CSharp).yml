@@ -143,7 +143,7 @@ jobs:
             ARTIFACT_NAME="${{ matrix.ort_artifact }}"
             FOUND=""
             for ID in $(gh run list -R ${{ github.repository }} \
-                --workflow="Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)" \
+                --workflow="Build ORT 1.25.0 Desktop (Win + Mac, GPU/iGPU/CPU)" \
                 --status=success --branch=main --limit=30 \
                 --json databaseId --jq '.[].databaseId'); do
               if gh api "repos/${{ github.repository }}/actions/runs/$ID/artifacts" \
