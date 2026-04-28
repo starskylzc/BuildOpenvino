@@ -3,14 +3,13 @@
 CI-only — 客户端 production 不需要这个,只是为了 GitHub Actions 上传 artifact 时
 能直接看到 OpenCvSharp 画框的可视化结果 (.bgr 二进制看不出来)。
 
+用 Pillow (无 numpy 依赖,所有平台都有 wheel)。
 用法: python bgr_to_png.py <input.bgr> <output.png>
-格式跟 png_to_bgr.py 一致 (4B W + 4B H + 1B C + W*H*C bytes BGR)
 """
 import struct
 import sys
 from pathlib import Path
-import numpy as np
-import cv2
+from PIL import Image
 
 if len(sys.argv) < 3:
     print("Usage: bgr_to_png.py <input.bgr> <output.png>")
@@ -26,6 +25,11 @@ with src.open("rb") as f:
     raw = f.read()
     assert len(raw) == w * h * c, f"size mismatch: hdr says {w}x{h}x{c}={w*h*c}, got {len(raw)}"
 
-img = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, c)
-cv2.imwrite(str(dst), img)
+# raw 是 BGR,Pillow 需要 RGB
+buf = bytearray(raw)
+for i in range(0, len(buf), 3):
+    buf[i], buf[i + 2] = buf[i + 2], buf[i]
+
+img = Image.frombytes("RGB", (w, h), bytes(buf))
+img.save(dst, "PNG")
 print(f"Wrote {dst} ({w}x{h})")

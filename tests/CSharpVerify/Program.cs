@@ -111,6 +111,10 @@ unsafe
 // ── ORT 推理 ──
 var sessOpts = new SessionOptions();
 sessOpts.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR;
+// ORT 1.25 内部 NhwcTransformer 把 opset-11 MaxPool 转成 com.ms.internal.nhwc.MaxPool,
+// 但 NHWC kernel 只注册了 opset >=12,linux-arm64 上触发 NotImplemented。
+// 用 ORT_ENABLE_BASIC 跳掉这个 transformer (不会丢精度,只是少做些重写优化)。
+sessOpts.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_BASIC;
 using var sess = new InferenceSession(modelPath, sessOpts);
 
 string inpName = sess.InputMetadata.Keys.First();

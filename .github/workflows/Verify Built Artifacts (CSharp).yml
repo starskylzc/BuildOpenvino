@@ -117,11 +117,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install opencv-python-headless (CI 端 PNG↔BGR 转换用,不进 production)
+      - name: Install Pillow (CI 端 PNG↔BGR 转换用,无 numpy 依赖,全平台有 wheel)
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "opencv-python-headless" "numpy<2"
+          python -m pip install "Pillow>=10.4"
 
       - name: Resolve ORT run ID (find run containing matrix.ort_artifact)
         id: ort_run
