@@ -540,7 +540,13 @@ jobs:
                 --slave /usr/bin/g++ g++ /usr/bin/g++-11 \
                 --slave /usr/bin/gcov gcov /usr/bin/gcov-11
               update-alternatives --auto gcc
+              # update-alternatives 改的是 /usr/bin/gcc,但 cmake/build.py 走 /usr/bin/cc
+              # (默认还指向 gcc-9)。直接 export CC/CXX 更可靠,确保 ORT 用 gcc-11 编。
+              export CC=/usr/bin/gcc-11
+              export CXX=/usr/bin/g++-11
               gcc --version
+              g++ --version
+              echo "CC=$CC, CXX=$CXX"
               python3 -m pip install --upgrade pip
               python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
 
@@ -956,7 +962,9 @@ jobs:
       # 8. Smoke load test
       # ============================================================
       - name: Smoke load (Windows x64)
-        if: matrix.platform == 'windows' && matrix.arch != 'arm64'
+        # 只在 x64 跑:GHA 默认 Python 是 x64,加载 win-x86 dll 会 [WinError 193]
+        # win-x86 验证由 CSharpVerify (self-contained x86 publish) 负责
+        if: matrix.platform == 'windows' && matrix.arch == 'x64'
         shell: pwsh
         run: |
           $dll = "artifacts\onnxruntime.dll"

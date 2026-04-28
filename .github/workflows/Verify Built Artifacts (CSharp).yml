@@ -204,6 +204,7 @@ jobs:
           MODEL=$(realpath ../merged_no_topk_fp16.onnx)
           IMG=$(realpath ../test.png)
           OUT="$(pwd)/annotated-${{ matrix.name }}.png"
+          PUB="$(pwd)/publish"
 
           # Linux/Mac: ./publish/CSharpVerify
           # Windows:   ./publish/CSharpVerify.exe
@@ -213,6 +214,16 @@ jobs:
             EXE_NAME="CSharpVerify.exe"
           fi
           chmod +x "publish/$EXE_NAME" 2>/dev/null || true
+
+          # framework-dependent .NET 不会自动搜 publish/ 目录找 native dylib/so
+          # (apphost 是 launcher,真正的 dotnet host 在 ~/.dotnet/...,dlopen 默认搜 host 目录)。
+          # 显式把 publish/ 加到所有平台的 native lib 搜索路径,Linux/Mac 必需,Windows 走 PATH。
+          export DYLD_LIBRARY_PATH="$PUB:${DYLD_LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="$PUB:${LD_LIBRARY_PATH:-}"
+          export PATH="$PUB:$PATH"
+          echo ">>> DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH"
+          echo ">>> LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
           "./publish/$EXE_NAME" "$MODEL" "$IMG" "$OUT"
           ls -la "$OUT"
 
