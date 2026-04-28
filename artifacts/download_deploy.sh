@@ -36,7 +36,7 @@ fi
 echo ">>> Artifact: $ARTIFACT_NAME"
 
 rm -rf "$DEPLOY_DIR"
-gh run download "$STAGE_RUN" -R "$REPO" -n "$ARTIFACT_NAME" -D "$DEPLOY_DIR"
+gh run download "$VERIFY_RUN" -R "$REPO" -n "$ARTIFACT_NAME" -D "$DEPLOY_DIR"
 
 echo ""
 echo ">>> Downloaded:"
