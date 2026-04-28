@@ -1,46 +1,40 @@
-name: Build ORT 1.25.0 (Win + Mac + Linux, DML/CoreML/CPU)
+name: Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)
 
 # 目的：
-#   一个 workflow 一次性产出 Windows + macOS + Linux 三平台的 ORT v1.25.0 native 二进制。
-#   每个平台自动启用对应的 GPU/加速 EP + CPU EP，**不需要客户端再装匹配 DirectML/CoreML**。
+#   一个 workflow 一次性产出三平台桌面端 ORT v1.25.0 native 二进制。
+#   覆盖 GPU + iGPU + CPU,不含服务器场景 (Ascend/海光DCU/Instinct 等服务器加速卡不做)。
 #
-# 平台 / EP 组合：
-#   ┌────────────────┬───────┬─────────┬──────────────────┬─────────────────┐
-#   │ Target         │ Arch  │ EP      │ Runner           │ Min OS          │
-#   ├────────────────┼───────┼─────────┼──────────────────┼─────────────────┤
-#   │ Windows DML    │ x64   │ DML+CPU │ windows-2022     │ Win 10 1903     │
-#   │ Windows DML    │ arm64 │ DML+CPU │ windows-11-arm   │ Win 10 1903 ARM │
-#   │ macOS CoreML   │ x64   │ CoreML  │ macos-15-intel   │ 10.15           │
-#   │ macOS CoreML   │ arm64 │ CoreML  │ macos-14 (Xc15.2)│ 11.0            │
-#   │ Linux CPU      │ x64   │ CPU     │ ubuntu-22.04     │ glibc 2.35      │
-#   │ Linux CPU      │ arm64 │ CPU     │ ubuntu-22.04-arm │ glibc 2.35      │
-#   └────────────────┴───────┴─────────┴──────────────────┴─────────────────┘
+# 平台 / EP 完整覆盖矩阵：
+#   ┌─────────────────────────┬──────────────┬──────────────────┬──────────────┬───────────┐
+#   │ Target                  │ OS Floor     │ GPU 覆盖         │ EP           │ glibc     │
+#   ├─────────────────────────┼──────────────┼──────────────────┼──────────────┼───────────┤
+#   │ win-x64-dml             │ Win 10 1903  │ NV/AMD/Intel/iGPU│ DML + CPU    │ —         │
+#   │ win-arm64-dml           │ Win 10 1903  │ Snapdragon Adreno│ DML + CPU    │ —         │
+#   │ osx-x64-coreml          │ macOS 10.15  │ AMD Pro/Intel iGPU│ CoreML + CPU│ —         │
+#   │ osx-arm64-coreml        │ macOS 11.0   │ Apple GPU + ANE  │ CoreML + CPU │ —         │
+#   │ linux-x64-cuda          │ Ubuntu 22.04 │ NVIDIA dGPU      │ CUDA + CPU   │ 2.35      │
+#   │ linux-x64-rocm          │ Ubuntu 22.04 │ AMD Radeon dGPU  │ ROCm + CPU   │ 2.35      │
+#   │ linux-x64-openvino      │ Ubuntu 20.04 │ Intel iGPU/Arc   │ OpenVINO+CPU │ 2.31      │
+#   │ linux-x64-cpu           │ Kylin/UOS V20│ —                │ CPU          │ 2.28      │
+#   │ linux-arm64-cpu         │ Ubuntu 22.04 │ —                │ CPU          │ 2.35      │
+#   └─────────────────────────┴──────────────┴──────────────────┴──────────────┴───────────┘
 #
-# 已删除 Windows x86 (32-bit) 档:
-#   - DirectML / CUDA / OpenVINO 都没 32-bit 版,只能 CPU EP,比 x64 慢 30%~50%
-#   - Win 11 不支持 32-bit,Win 10 32-bit 消费版 2025-10 EOL
-#   - 实际用户 < 1%,且体验比 x64 build 还差,反向激励
+# Linux glibc 策略:
+#   - linux-x64-cpu 用 manylinux_2_28 (glibc 2.28),覆盖银河麒麟 V10 SP1+/统信 UOS V20+
+#   - GPU 加速档 (cuda/rocm/openvino) 用更新的 glibc,因为有 GPU 的桌面机大概率是新系统
+#   - linux-arm64-cpu 用 ubuntu-22.04-arm runner (glibc 2.35),覆盖飞腾/鲲鹏桌面
 #
 # DirectML.dll "自动版本匹配" 策略：
-#   1. ORT 1.25 构建时 CMake 通过 FetchContent 从 NuGet 拉一个**钉死版本**的
-#      Microsoft.AI.DirectML 包,把 DirectML.dll 解压到 build/_deps/...。
-#   2. 链接阶段 onnxruntime.dll 引用这个 DirectML.dll 的 import lib。
-#   3. 我们 build 完后扫描整个 build/ 目录,把这个**同一个**DirectML.dll
-#      复制到 artifact,跟 onnxruntime.dll 同级。客户端 ship 时直接连同发布,
-#      绝对不会出现客户机器系统 DirectML.dll 版本低 / 不匹配的问题。
-#   4. version.txt 里记录 DirectML.dll 的精确版本 (从二进制 file version 提取)。
+#   ORT 编译时自动从 NuGet 拉取 DirectML.dll,跟 onnxruntime.dll 同源 ship。
+#   绝对不会出现客户端 DML 版本不匹配。
 #
-# 兼容性 patch：
-#   仅 macOS 需要 (chrono operator<< → strftime, 见 1.18.1 历史 workflow)。
-#   Windows / Linux 不受 std::to_chars 编译错误影响,跳过。
+# CUDA / cuDNN 自带:
+#   linux-x64-cuda artifact 内附带 CUDA 12 cudart + cuBLAS + cuDNN 9 runtime .so,
+#   客户端不需要自己装 CUDA Toolkit。
 #
-# CoreML EP 说明：
-#   CoreML EP 在 ORT 1.25 起拆为独立 dylib (libonnxruntime_providers_coreml.dylib),
-#   会一起打包到 macOS artifact 里。
-#
-# 不包含：
-#   - Windows CUDA EP (NVIDIA 专用,需要单独 workflow + cuDNN 大依赖)
-#   - Linux GPU EP   (NVIDIA/AMD/Intel 各厂商 EP 装一套要 ~2 GB 依赖,后续单独处理)
+# ROCm 自带:
+#   linux-x64-rocm artifact 内附带 ROCm 6.2 关键 runtime .so,
+#   客户端只需要 AMD 驱动 + amdgpu kmod,不需要装完整 ROCm Toolkit。
 
 on:
   workflow_dispatch:
@@ -63,6 +57,8 @@ on:
           - windows-only
           - macos-only
           - linux-only
+          - linux-cpu-only      # 信创最稳的兜底,只要这一档
+          - linux-gpu-only      # 不含 cpu/arm64,仅 GPU 加速档
 
 jobs:
   prepare:
@@ -72,19 +68,24 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          # platform: linux/windows/macos     用于条件 step 分流
-          # arch:    x64/arm64/x86_64         ORT build.py / cmake 用的 arch 名 (注意 macOS 用 x86_64)
-          # ep:      dml/coreml/cpu           启用哪个加速 EP
-          # deploy_target:  10.15/11.0/<空>   仅 macOS 用,minos
-          # xcode_version:  15.2/<空>         仅 macOS arm64 用,绕开 to_chars
-          # artifact_name:  上传产物名
+          # arch:    x64/arm64/x86_64       ORT build.py / cmake 用的 arch 名 (注意 macOS 用 x86_64)
+          # ep:      dml/coreml/cuda/rocm/openvino/cpu
+          # runner:  GHA 主机
+          # docker:  容器 image (空表示直接在 runner 上跑)
+          # deploy_target / xcode_version: 仅 macOS 用
+          # artifact_name: 上传产物名
 
-          WIN_X64_DML='{"platform":"windows","arch":"x64","ep":"dml","runner":"windows-2022","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x64-dml"}'
-          WIN_ARM64_DML='{"platform":"windows","arch":"arm64","ep":"dml","runner":"windows-11-arm","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-arm64-dml"}'
-          MAC_X64_COREML='{"platform":"macos","arch":"x86_64","ep":"coreml","runner":"macos-15-intel","deploy_target":"10.15","xcode_version":"","artifact_name":"onnxruntime-1.25.0-osx-x64-coreml"}'
-          MAC_ARM64_COREML='{"platform":"macos","arch":"arm64","ep":"coreml","runner":"macos-14","deploy_target":"11.0","xcode_version":"15.2","artifact_name":"onnxruntime-1.25.0-osx-arm64-coreml"}'
-          LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
-          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-22.04-arm","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
+          WIN_X64_DML='{"platform":"windows","arch":"x64","ep":"dml","runner":"windows-2022","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x64-dml"}'
+          WIN_ARM64_DML='{"platform":"windows","arch":"arm64","ep":"dml","runner":"windows-11-arm","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-arm64-dml"}'
+          MAC_X64_COREML='{"platform":"macos","arch":"x86_64","ep":"coreml","runner":"macos-15-intel","docker":"","deploy_target":"10.15","xcode_version":"","artifact_name":"onnxruntime-1.25.0-osx-x64-coreml"}'
+          MAC_ARM64_COREML='{"platform":"macos","arch":"arm64","ep":"coreml","runner":"macos-14","docker":"","deploy_target":"11.0","xcode_version":"15.2","artifact_name":"onnxruntime-1.25.0-osx-arm64-coreml"}'
+
+          # Linux 各档 (用 docker 字段控制容器)
+          LINUX_X64_CUDA='{"platform":"linux","arch":"x64","ep":"cuda","runner":"ubuntu-22.04","docker":"nvidia/cuda:12.6.0-cudnn-devel-ubuntu22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cuda"}'
+          LINUX_X64_ROCM='{"platform":"linux","arch":"x64","ep":"rocm","runner":"ubuntu-22.04","docker":"rocm/dev-ubuntu-22.04:6.2.4-complete","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-rocm"}'
+          LINUX_X64_OPENVINO='{"platform":"linux","arch":"x64","ep":"openvino","runner":"ubuntu-22.04","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-openvino"}'
+          LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-22.04","docker":"quay.io/pypa/manylinux_2_28_x86_64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
+          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-22.04-arm","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
 
           case "${{ inputs.target_set }}" in
             windows-only)
@@ -92,9 +93,13 @@ jobs:
             macos-only)
               echo "matrix={\"include\":[$MAC_X64_COREML,$MAC_ARM64_COREML]}" >> $GITHUB_OUTPUT ;;
             linux-only)
+              echo "matrix={\"include\":[$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+            linux-cpu-only)
               echo "matrix={\"include\":[$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+            linux-gpu-only)
+              echo "matrix={\"include\":[$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO]}" >> $GITHUB_OUTPUT ;;
             *)
-              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML,$MAC_X64_COREML,$MAC_ARM64_COREML,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML,$MAC_X64_COREML,$MAC_ARM64_COREML,$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
           esac
 
   build:
@@ -109,7 +114,7 @@ jobs:
 
     steps:
       # ============================================================
-      # 1. 通用 checkout
+      # 1. Checkout (所有平台共用)
       # ============================================================
       - name: Checkout ONNX Runtime ${{ env.ORT_VERSION }}
         uses: actions/checkout@v4.2.2
@@ -119,20 +124,20 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Setup Python
+      - name: Setup Python (non-linux only)
+        if: matrix.platform != 'linux'
         uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.11'
 
       # ============================================================
-      # 2. macOS arm64: 锁 Xcode 15.2 (SDK 14.2,无 std::to_chars 问题)
+      # 2. macOS Xcode 选择
       # ============================================================
-      - name: Select Xcode Version (macOS only)
+      - name: Select Xcode (macOS only)
         if: matrix.platform == 'macos' && matrix.xcode_version != ''
         shell: bash
         run: |
           sudo xcode-select --switch /Applications/Xcode_${{ matrix.xcode_version }}.app/Contents/Developer
-          echo "Switched to Xcode ${{ matrix.xcode_version }}"
           xcodebuild -version
           xcrun --show-sdk-version
 
@@ -140,12 +145,11 @@ jobs:
         if: matrix.platform == 'macos' && matrix.xcode_version == ''
         shell: bash
         run: |
-          echo "Using default Xcode on this runner"
           xcodebuild -version
           xcrun --show-sdk-version
 
       # ============================================================
-      # 3. 装依赖 (per-OS)
+      # 3. 安装依赖 (per-platform)
       # ============================================================
       - name: Install deps (Windows)
         if: matrix.platform == 'windows'
@@ -165,34 +169,51 @@ jobs:
           pip install "cmake>=3.28,<4" "numpy<2"
           if ! command -v ninja &>/dev/null; then brew install ninja; fi
           cmake --version
-          ninja --version
 
-      - name: Install deps (Linux)
-        if: matrix.platform == 'linux'
+      - name: Install deps (Linux openvino - on host)
+        if: matrix.platform == 'linux' && matrix.ep == 'openvino'
         shell: bash
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential libssl-dev ninja-build \
-            libcurl4-openssl-dev zlib1g-dev pkg-config protobuf-compiler libprotobuf-dev
-          pip install "cmake>=3.28,<4" "numpy<2"
-          cmake --version
-          ninja --version
+          sudo apt-get install -y build-essential ninja-build pkg-config \
+            libssl-dev libcurl4-openssl-dev zlib1g-dev \
+            python3-pip python3-dev gnupg lsb-release wget curl \
+            protobuf-compiler libprotobuf-dev
+          pip3 install "cmake>=3.28,<4" "numpy<2"
+
+          # OpenVINO 2024.6 (LTS) APT 源安装
+          wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+            | sudo gpg --dearmor -o /usr/share/keyrings/intel-sw-products.gpg
+          echo "deb [signed-by=/usr/share/keyrings/intel-sw-products.gpg] https://apt.repos.intel.com/openvino/2024 ubuntu22 main" \
+            | sudo tee /etc/apt/sources.list.d/intel-openvino-2024.list
+          sudo apt-get update -y
+          sudo apt-get install -y openvino-2024.6.0
+          # OpenVINO 装到 /opt/intel/openvino_2024
+          ls /opt/intel/openvino_2024 || (echo "::error::OpenVINO install failed"; exit 1)
+          echo "OPENVINO_ROOT=/opt/intel/openvino_2024" >> $GITHUB_ENV
+
+      - name: Install deps (Linux arm64 cpu - on host)
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64' && matrix.ep == 'cpu'
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential ninja-build pkg-config \
+            libssl-dev libcurl4-openssl-dev zlib1g-dev \
+            python3-pip python3-dev \
+            protobuf-compiler libprotobuf-dev
+          pip3 install "cmake>=3.28,<4" "numpy<2"
 
       # ============================================================
-      # 4. macOS-only: patch chrono operator<< → strftime
-      #    避开 Xcode 16.x libc++ <format> → std::to_chars 链。
-      #    arm64 用 Xcode 15.2 不受影响,但 patch 等价无害。
+      # 4. macOS-only: chrono operator<< → strftime patch
+      #    避开 Xcode 16.x libc++ <format> → std::to_chars (macOS 13.4+) 链。
       # ============================================================
       - name: Patch chrono stream (macOS only)
         if: matrix.platform == 'macos'
         shell: bash
         run: |
-          echo "=== [1/3] Patch ostream_sink.cc ==="
           F1="onnxruntime/core/common/logging/sinks/ostream_sink.cc"
           if [ ! -f "$F1" ]; then
-            echo "::error::$F1 not found in ORT v1.25.0 (path may have changed)"
-            find onnxruntime -name "ostream_sink*" -type f
-            exit 1
+            echo "::error::$F1 not found in ORT v1.25.0"; find onnxruntime -name "ostream_sink*" -type f; exit 1
           fi
           cat > "$F1" << 'PATCH_EOF'
           // Copyright (c) Microsoft Corporation. All rights reserved.
@@ -204,10 +225,7 @@ jobs:
           #include <iomanip>
           #include <iostream>
           #include <sstream>
-
-          namespace onnxruntime {
-          namespace logging {
-
+          namespace onnxruntime { namespace logging {
           #ifndef ORT_MINIMAL_BUILD
           struct Color {
             constexpr static const char* kWarn = "\033[0;93m";
@@ -216,7 +234,6 @@ jobs:
             constexpr static const char* kEnd = "\033[m";
           };
           #endif
-
           void OStreamSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id,
                                      const Capture& message) {
             auto time_t_val = std::chrono::system_clock::to_time_t(timestamp);
@@ -242,17 +259,12 @@ jobs:
             (*stream_) << msg.str();
             if (flush_) stream_->flush();
           }
-
-          }  // namespace logging
-          }  // namespace onnxruntime
+          }}  // namespace
           PATCH_EOF
 
-          echo "=== [2/3] Patch apple_log_sink.mm ==="
           F2="onnxruntime/core/platform/apple/logging/apple_log_sink.mm"
           if [ ! -f "$F2" ]; then
-            echo "::error::$F2 not found in ORT v1.25.0"
-            find onnxruntime -name "apple_log_sink*" -type f
-            exit 1
+            echo "::error::$F2 not found"; find onnxruntime -name "apple_log_sink*" -type f; exit 1
           fi
           cat > "$F2" << 'PATCH_EOF'
           // Copyright (c) Microsoft Corporation. All rights reserved.
@@ -263,10 +275,7 @@ jobs:
           #include <ctime>
           #include <iomanip>
           #include <sstream>
-
-          namespace onnxruntime {
-          namespace logging {
-
+          namespace onnxruntime { namespace logging {
           void AppleLogSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id,
                                       const Capture& message) {
             auto time_t_val = std::chrono::system_clock::to_time_t(timestamp);
@@ -281,41 +290,34 @@ jobs:
                 << message.Location().ToString() << "] " << message.Message();
             NSLog(@"%s", msg.str().c_str());
           }
-
-          }  // namespace logging
-          }  // namespace onnxruntime
+          }}  // namespace
           PATCH_EOF
 
-          echo "=== [3/3] Scan for other chrono operator<< usage ==="
+          # 扫描其它可能要 patch 的文件
           SUSPECTS=$(grep -rl "timestamp_ns::operator<<\|using date::operator<<" \
-            --include='*.cc' --include='*.cpp' --include='*.mm' \
-            onnxruntime/ 2>/dev/null \
-            | grep -v "ostream_sink.cc" \
-            | grep -v "apple_log_sink.mm" \
-            | grep -v "syslog_sink.cc" \
-            || true)
+            --include='*.cc' --include='*.cpp' --include='*.mm' onnxruntime/ 2>/dev/null \
+            | grep -v "ostream_sink.cc" | grep -v "apple_log_sink.mm" | grep -v "syslog_sink.cc" || true)
           if [ -n "$SUSPECTS" ]; then
-            echo "::warning::Found additional chrono/date operator<< files (may need patch):"
+            echo "::warning::Found additional chrono/date operator<< files:"
             echo "$SUSPECTS"
           fi
 
       # ============================================================
-      # 5. Build (per-OS)
+      # 5. Build (per-platform/per-EP)
       # ============================================================
-      - name: Build (Windows)
+
+      # ---- Windows ----
+      - name: Build (Windows DML/CPU)
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           $epFlags = @()
           switch ("${{ matrix.ep }}") {
             "dml" { $epFlags += "--use_dml" }
-            "cpu" { } # CPU 默认,不加 flag
+            "cpu" { } # CPU 默认
           }
           $archFlags = @()
-          switch ("${{ matrix.arch }}") {
-            "arm64" { $archFlags += "--arm64" }
-            # x64 默认,不加 flag
-          }
+          if ("${{ matrix.arch }}" -eq "arm64") { $archFlags += "--arm64" }
 
           $allArgs = @(
             "tools/ci_build/build.py",
@@ -330,20 +332,17 @@ jobs:
           )
           $allArgs += $epFlags
           $allArgs += $archFlags
-          $allArgs += @(
-            "--cmake_extra_defines",
-            "onnxruntime_BUILD_UNIT_TESTS=OFF",
-            "onnxruntime_BUILD_BENCHMARKS=OFF"
-          )
-          Write-Host ">>> python $($allArgs -join ' ')"
+          $allArgs += @("--cmake_extra_defines",
+                         "onnxruntime_BUILD_UNIT_TESTS=OFF",
+                         "onnxruntime_BUILD_BENCHMARKS=OFF")
           python @allArgs
           if ($LASTEXITCODE -ne 0) { throw "Build failed code=$LASTEXITCODE" }
 
-      - name: Build (macOS)
+      # ---- macOS ----
+      - name: Build (macOS CoreML)
         if: matrix.platform == 'macos'
         shell: bash
         run: |
-          echo ">>> Building ORT $ORT_VERSION for ${{ matrix.arch }} (minos ${{ matrix.deploy_target }})"
           python3 tools/ci_build/build.py \
             --build_dir build \
             --config ${{ inputs.build_type }} \
@@ -362,11 +361,137 @@ jobs:
               onnxruntime_BUILD_UNIT_TESTS=OFF \
               onnxruntime_BUILD_BENCHMARKS=OFF
 
-      - name: Build (Linux)
-        if: matrix.platform == 'linux'
+      # ---- Linux x64 CUDA (in nvidia/cuda container) ----
+      - name: Build (Linux x64 CUDA, in container)
+        if: matrix.platform == 'linux' && matrix.ep == 'cuda'
         shell: bash
         run: |
-          echo ">>> Building ORT $ORT_VERSION for Linux ${{ matrix.arch }} (CPU EP)"
+          docker run --rm \
+            -v "$(pwd):/work" -w /work \
+            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
+            "${{ matrix.docker }}" \
+            bash -c '
+              set -ex
+              apt-get update -y
+              apt-get install -y --no-install-recommends \
+                build-essential ninja-build pkg-config \
+                libssl-dev libcurl4-openssl-dev zlib1g-dev \
+                python3 python3-pip python3-dev \
+                protobuf-compiler libprotobuf-dev \
+                git ca-certificates
+              pip3 install --break-system-packages "cmake>=3.28,<4" "numpy<2"
+
+              python3 tools/ci_build/build.py \
+                --build_dir build \
+                --config ${{ inputs.build_type }} \
+                --use_cuda \
+                --cuda_home /usr/local/cuda \
+                --cudnn_home /usr/lib/x86_64-linux-gnu \
+                --parallel \
+                --build_shared_lib \
+                --skip_tests \
+                --skip_submodule_sync \
+                --compile_no_warning_as_error \
+                --allow_running_as_root \
+                --cmake_extra_defines \
+                  onnxruntime_BUILD_UNIT_TESTS=OFF \
+                  onnxruntime_BUILD_BENCHMARKS=OFF
+            '
+
+      # ---- Linux x64 ROCm (in rocm/dev container) ----
+      - name: Build (Linux x64 ROCm, in container)
+        if: matrix.platform == 'linux' && matrix.ep == 'rocm'
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$(pwd):/work" -w /work \
+            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
+            "${{ matrix.docker }}" \
+            bash -c '
+              set -ex
+              apt-get update -y
+              apt-get install -y --no-install-recommends \
+                build-essential ninja-build pkg-config \
+                libssl-dev libcurl4-openssl-dev zlib1g-dev \
+                python3 python3-pip python3-dev \
+                protobuf-compiler libprotobuf-dev \
+                git ca-certificates
+              pip3 install --break-system-packages "cmake>=3.28,<4" "numpy<2"
+
+              # ROCm 已预装在 /opt/rocm
+              ls /opt/rocm/ | head -10
+
+              python3 tools/ci_build/build.py \
+                --build_dir build \
+                --config ${{ inputs.build_type }} \
+                --use_rocm \
+                --rocm_home /opt/rocm \
+                --parallel \
+                --build_shared_lib \
+                --skip_tests \
+                --skip_submodule_sync \
+                --compile_no_warning_as_error \
+                --allow_running_as_root \
+                --cmake_extra_defines \
+                  onnxruntime_BUILD_UNIT_TESTS=OFF \
+                  onnxruntime_BUILD_BENCHMARKS=OFF
+            '
+
+      # ---- Linux x64 OpenVINO (on host, OV via apt) ----
+      - name: Build (Linux x64 OpenVINO)
+        if: matrix.platform == 'linux' && matrix.ep == 'openvino'
+        shell: bash
+        run: |
+          source /opt/intel/openvino_2024/setupvars.sh
+          python3 tools/ci_build/build.py \
+            --build_dir build \
+            --config ${{ inputs.build_type }} \
+            --use_openvino CPU \
+            --parallel \
+            --build_shared_lib \
+            --skip_tests \
+            --skip_submodule_sync \
+            --compile_no_warning_as_error \
+            --cmake_extra_defines \
+              onnxruntime_BUILD_UNIT_TESTS=OFF \
+              onnxruntime_BUILD_BENCHMARKS=OFF
+
+      # ---- Linux x64 CPU (manylinux_2_28 container, glibc 2.28 floor) ----
+      - name: Build (Linux x64 CPU manylinux_2_28, in container)
+        if: matrix.platform == 'linux' && matrix.arch == 'x64' && matrix.ep == 'cpu'
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$(pwd):/work" -w /work \
+            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
+            "${{ matrix.docker }}" \
+            bash -c '
+              set -ex
+              # manylinux_2_28 (RHEL/AlmaLinux 8) + glibc 2.28
+              # 已经预装 gcc/g++/cmake/ninja/python
+              /opt/python/cp311-cp311/bin/pip install "cmake>=3.28,<4" "numpy<2"
+              export PATH="/opt/python/cp311-cp311/bin:$PATH"
+
+              # protobuf 让 ORT 自带的 vendored 版编 (manylinux 容器没系统 libprotobuf)
+              python3 tools/ci_build/build.py \
+                --build_dir build \
+                --config ${{ inputs.build_type }} \
+                --parallel \
+                --build_shared_lib \
+                --skip_tests \
+                --skip_submodule_sync \
+                --compile_no_warning_as_error \
+                --allow_running_as_root \
+                --cmake_extra_defines \
+                  onnxruntime_BUILD_UNIT_TESTS=OFF \
+                  onnxruntime_BUILD_BENCHMARKS=OFF
+            '
+
+      # ---- Linux arm64 CPU (on ubuntu-22.04-arm runner) ----
+      - name: Build (Linux arm64 CPU)
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64' && matrix.ep == 'cpu'
+        shell: bash
+        run: |
           python3 tools/ci_build/build.py \
             --build_dir build \
             --config ${{ inputs.build_type }} \
@@ -381,9 +506,9 @@ jobs:
               onnxruntime_BUILD_BENCHMARKS=OFF
 
       # ============================================================
-      # 6. Verify (per-OS)
+      # 6. Verify (per-platform)
       # ============================================================
-      - name: Verify - artifact exists (Windows)
+      - name: Verify - Windows
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
@@ -392,63 +517,45 @@ jobs:
           if (-not (Test-Path $outDir)) { $outDir = "build\$cfg" }
           $main = Get-ChildItem -Path $outDir -Filter "onnxruntime.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $main) {
-            Write-Host "::error::onnxruntime.dll not found under $outDir"
+            Write-Host "::error::onnxruntime.dll not found"
             Get-ChildItem -Path $outDir -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
             exit 1
           }
           Write-Host "✅ onnxruntime.dll: $($main.FullName) ($($main.Length) bytes)"
 
-          # DML build: 必须有 DirectML.dll. 1.25 的 cmake 通常会复制到 build dir,
-          # 没有的话从 _deps 里找
           if ("${{ matrix.ep }}" -eq "dml") {
-            $dmlList = Get-ChildItem -Path "build" -Recurse -Filter "DirectML.dll" -ErrorAction SilentlyContinue
-            if (-not $dmlList) {
-              Write-Host "::error::DirectML.dll not found anywhere under build/ — DML EP needs it!"
-              exit 1
-            }
-            Write-Host ">>> DirectML.dll candidates:"
-            $dmlList | ForEach-Object { Write-Host "   $($_.FullName) ($($_.Length) bytes)" }
+            $dml = Get-ChildItem -Path "build" -Recurse -Filter "DirectML.dll" -ErrorAction SilentlyContinue
+            if (-not $dml) { Write-Host "::error::DirectML.dll missing"; exit 1 }
+            Write-Host "✅ DirectML.dll candidates:"
+            $dml | ForEach-Object { Write-Host "   $($_.FullName) ($($_.Length) bytes)" }
           }
 
-      - name: Verify - artifact exists (macOS)
+      - name: Verify - macOS
         if: matrix.platform == 'macos'
         shell: bash
         run: |
           FILE="build/${{ inputs.build_type }}/libonnxruntime.dylib"
-          if [ ! -f "$FILE" ]; then
-            echo "::error::Build failed: $FILE not found"
-            ls -la build/${{ inputs.build_type }}/ || true
-            exit 1
-          fi
+          [ -f "$FILE" ] || (echo "::error::missing $FILE"; ls -la build/${{ inputs.build_type }}/; exit 1)
           ls -lh "$FILE"
-          echo "✅ Build succeeded: libonnxruntime.dylib"
 
-          # arch 校验
           lipo -info "$FILE" | grep -q "${{ matrix.arch }}" \
-            || (echo "::error::arch mismatch" && exit 1)
+            || (echo "::error::arch mismatch"; exit 1)
 
-          # minos 校验
           MINOS=$(otool -l "$FILE" | awk '
             $1=="cmd" && $2=="LC_BUILD_VERSION" { in_blk=1 }
-            in_blk && $1=="minos" { print $2; exit }
-          ')
+            in_blk && $1=="minos" { print $2; exit }')
           if [ -z "$MINOS" ]; then
             MINOS=$(otool -l "$FILE" | awk '
               $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX" { in_blk=1 }
-              in_blk && $1=="version" { print $2; exit }
-            ')
+              in_blk && $1=="version" { print $2; exit }')
           fi
-          if [ "$MINOS" != "${{ matrix.deploy_target }}" ]; then
-            echo "::error::minos mismatch got=$MINOS expected=${{ matrix.deploy_target }}"
-            exit 1
-          fi
+          [ "$MINOS" = "${{ matrix.deploy_target }}" ] \
+            || (echo "::error::minos mismatch got=$MINOS expected=${{ matrix.deploy_target }}"; exit 1)
           echo "✅ arch + minos OK"
 
-          # 关键: 扫 dylib 是否漏 std::to_chars 浮点符号
-          # macOS 13.4 才有的符号若链入,运行在 10.15/11 会 dyld 找不到符号崩溃
+          # to_chars 浮点符号扫描
           LEAKED=$(nm -u "$FILE" 2>/dev/null \
-            | grep -E "to_chars.*[^io]+(d|f|e)$|__ZNKSt6chrono" \
-            || true)
+            | grep -E "to_chars.*[^io]+(d|f|e)$|__ZNKSt6chrono" || true)
           if [ -n "$LEAKED" ]; then
             echo "::error::FP std::to_chars symbol leaked (will crash on macOS < 13.4):"
             echo "$LEAKED"
@@ -456,27 +563,43 @@ jobs:
           fi
           echo "✅ no FP to_chars symbols leaked"
 
-      - name: Verify - artifact exists (Linux)
+      - name: Verify - Linux
         if: matrix.platform == 'linux'
         shell: bash
         run: |
           FILE="build/${{ inputs.build_type }}/libonnxruntime.so"
-          if [ ! -f "$FILE" ]; then
-            echo "::error::Build failed: $FILE not found"
-            ls -la build/${{ inputs.build_type }}/ || true
-            exit 1
-          fi
+          [ -f "$FILE" ] || (echo "::error::missing $FILE"; ls -la build/${{ inputs.build_type }}/; exit 1)
           ls -lh "$FILE"
-          echo "✅ Build succeeded: libonnxruntime.so"
-          echo ">>> ldd:"
-          ldd "$FILE" || true
-          echo ">>> file:"
-          file "$FILE"
+
+          # glibc 版本检查
+          MAX_GLIBC=$(objdump -T "$FILE" 2>/dev/null \
+            | grep -oE "GLIBC_[0-9]+\.[0-9]+" \
+            | sort -u | sort -t_ -k2 -V | tail -1 || echo "GLIBC_unknown")
+          echo ">>> Highest GLIBC dependency in libonnxruntime.so: $MAX_GLIBC"
+
+          # 列出依赖
+          echo ">>> Direct DT_NEEDED:"
+          readelf -d "$FILE" | grep NEEDED || true
+
+          # ep 特定检查
+          if [ "${{ matrix.ep }}" = "cuda" ]; then
+            CUDA_PROV="build/${{ inputs.build_type }}/libonnxruntime_providers_cuda.so"
+            [ -f "$CUDA_PROV" ] || (echo "::error::CUDA provider missing"; exit 1)
+            echo "✅ CUDA EP: $(ls -lh $CUDA_PROV)"
+          fi
+          if [ "${{ matrix.ep }}" = "rocm" ]; then
+            ROCM_PROV="build/${{ inputs.build_type }}/libonnxruntime_providers_rocm.so"
+            [ -f "$ROCM_PROV" ] || (echo "::error::ROCm provider missing"; exit 1)
+            echo "✅ ROCm EP: $(ls -lh $ROCM_PROV)"
+          fi
+          if [ "${{ matrix.ep }}" = "openvino" ]; then
+            OV_PROV="build/${{ inputs.build_type }}/libonnxruntime_providers_openvino.so"
+            [ -f "$OV_PROV" ] || (echo "::error::OpenVINO provider missing"; exit 1)
+            echo "✅ OpenVINO EP: $(ls -lh $OV_PROV)"
+          fi
 
       # ============================================================
-      # 7. Organize artifacts (per-OS)
-      #    重点: Windows DML 路径要把 ORT 编译时**自动下载的同一个**
-      #    DirectML.dll 复制到 artifact 旁边,保证版本严格匹配。
+      # 7. Organize artifacts (per-platform)
       # ============================================================
       - name: Organize artifacts (Windows)
         if: matrix.platform == 'windows'
@@ -485,36 +608,28 @@ jobs:
           $cfg = "${{ inputs.build_type }}"
           $outDir = "build\$cfg\$cfg"
           if (-not (Test-Path $outDir)) { $outDir = "build\$cfg" }
-
           New-Item -ItemType Directory -Force artifacts | Out-Null
 
-          # 主 onnxruntime.dll + 所有 onnxruntime_providers_*.dll
           Get-ChildItem -Path $outDir -Filter "onnxruntime*.dll" |
             ForEach-Object { Copy-Item $_.FullName "artifacts\" -Force }
 
-          # 1.25 link 阶段会把 DirectML.dll 复制到 build dir,直接用这份
-          # (与 onnxruntime.dll 链接的 import lib 来自同一份 NuGet)
+          # DirectML.dll: 从 build 目录里捞出来,跟 onnxruntime.dll 同源 ship
           $dml = Get-ChildItem -Path "build" -Recurse -Filter "DirectML.dll" -ErrorAction SilentlyContinue |
                  Sort-Object Length -Descending | Select-Object -First 1
+          $dmlInfo = "DirectML.dll: (none — CPU build)"
           if ($dml) {
             Copy-Item $dml.FullName "artifacts\" -Force
             $dmlVer = (Get-Item "artifacts\DirectML.dll").VersionInfo.FileVersion
+            $dmlInfo = "DirectML.dll: $dmlVer"
             Write-Host "✅ Bundled DirectML.dll v$dmlVer from $($dml.FullName)"
           } elseif ("${{ matrix.ep }}" -eq "dml") {
-            Write-Host "::error::DML build but DirectML.dll missing"
-            exit 1
+            Write-Host "::error::DML build but DirectML.dll missing"; exit 1
           }
 
-          # PDB (RelWithDebInfo only)
           if ("${{ inputs.build_type }}" -eq "RelWithDebInfo") {
             Get-ChildItem -Path $outDir -Filter "onnxruntime*.pdb" -ErrorAction SilentlyContinue |
               ForEach-Object { Copy-Item $_.FullName "artifacts\" -Force }
           }
-
-          # version.txt 含 DirectML 版本
-          $dmlInfo = if (Test-Path "artifacts\DirectML.dll") {
-            "DirectML.dll: " + (Get-Item "artifacts\DirectML.dll").VersionInfo.FileVersion
-          } else { "DirectML.dll: (none — CPU build)" }
 
           @"
           ORT Version: $env:ORT_VERSION
@@ -526,7 +641,6 @@ jobs:
           Build Type:  ${{ inputs.build_type }}
           "@ | Out-File "artifacts\version.txt" -Encoding utf8
 
-          Write-Host ">>> Artifacts:"
           Get-ChildItem artifacts | Format-Table Name, Length -AutoSize
 
       - name: Organize artifacts (macOS)
@@ -535,7 +649,6 @@ jobs:
         run: |
           mkdir -p artifacts
           cp "build/${{ inputs.build_type }}/libonnxruntime.dylib" artifacts/
-          # 1.25 起 CoreML EP 拆为独立 dylib
           if [ -f "build/${{ inputs.build_type }}/libonnxruntime_providers_coreml.dylib" ]; then
             cp "build/${{ inputs.build_type }}/libonnxruntime_providers_coreml.dylib" artifacts/
           fi
@@ -543,7 +656,7 @@ jobs:
           ORT Version: $ORT_VERSION
           Platform:    macOS
           Arch:        ${{ matrix.arch }}
-          EP:          ${{ matrix.ep }} (CoreML EP, framework comes with system)
+          EP:          ${{ matrix.ep }}
           MinOS:       ${{ matrix.deploy_target }}
           Runner:      ${{ matrix.runner }}
           Build Type:  ${{ inputs.build_type }}
@@ -556,35 +669,73 @@ jobs:
         run: |
           mkdir -p artifacts
           cp "build/${{ inputs.build_type }}/libonnxruntime.so" artifacts/
-          # 若有 providers shared
-          if [ -f "build/${{ inputs.build_type }}/libonnxruntime_providers_shared.so" ]; then
-            cp "build/${{ inputs.build_type }}/libonnxruntime_providers_shared.so" artifacts/
+
+          # 所有 providers shared/specific .so
+          for f in build/${{ inputs.build_type }}/libonnxruntime_providers_*.so; do
+            [ -f "$f" ] && cp "$f" artifacts/
+          done
+
+          # GPU EP 档:把 runtime 依赖 .so 也带上 (cuDNN/cublas/openvino runtime/rocm runtime)
+          # 让客户端不需要再装完整 SDK,只需要硬件驱动。
+          if [ "${{ matrix.ep }}" = "cuda" ]; then
+            # cuDNN 9 + cuBLAS 12 关键 runtime libs
+            for lib in libcudart.so.12 libcublas.so.12 libcublasLt.so.12 libcudnn.so.9 \
+                       libcudnn_ops.so.9 libcudnn_engines_precompiled.so.9 libcudnn_heuristic.so.9; do
+              docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+                bash -c "find /usr/local/cuda /usr/lib/x86_64-linux-gnu -name '$lib*' 2>/dev/null | head -1 | xargs -I{} cp {} /work/artifacts/" \
+                2>/dev/null || true
+            done
+            ls artifacts/ | grep -E "cudart|cublas|cudnn" || echo "  (cuDNN/cuBLAS 没找到全,客户端可能要装)"
           fi
+          if [ "${{ matrix.ep }}" = "rocm" ]; then
+            # ROCm 关键 runtime libs (~80 MB)
+            for lib in libhsa-runtime64.so.1 libamdhip64.so.6 libroctracer64.so.4 \
+                       libMIOpen.so.1 librocblas.so.4; do
+              docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+                bash -c "find /opt/rocm/lib -name '$lib*' 2>/dev/null | head -1 | xargs -I{} cp {} /work/artifacts/" \
+                2>/dev/null || true
+            done
+            ls artifacts/ | grep -E "hsa|amdhip|MIOpen|rocblas" || echo "  (ROCm runtime 没找到全)"
+          fi
+          if [ "${{ matrix.ep }}" = "openvino" ]; then
+            # OpenVINO 关键 runtime libs
+            cp /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino.so* artifacts/ 2>/dev/null || true
+            cp /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino_intel_*_plugin.so artifacts/ 2>/dev/null || true
+            cp /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino_*frontend.so artifacts/ 2>/dev/null || true
+            ls artifacts/ | grep openvino || echo "  (openvino runtime 没找到)"
+          fi
+
+          # glibc floor 信息
+          GLIBC_FLOOR=$(objdump -T artifacts/libonnxruntime.so 2>/dev/null \
+            | grep -oE "GLIBC_[0-9]+\.[0-9]+" \
+            | sort -u | sort -t_ -k2 -V | tail -1 || echo "unknown")
+
           cat > artifacts/version.txt <<EOF
           ORT Version: $ORT_VERSION
           Platform:    Linux
           Arch:        ${{ matrix.arch }}
-          EP:          ${{ matrix.ep }} (CPU only — GPU EP needs separate workflow)
-          glibc:       $(ldd --version | head -1)
+          EP:          ${{ matrix.ep }}
+          glibc Floor: $GLIBC_FLOOR
+          Container:   ${{ matrix.docker }}
           Runner:      ${{ matrix.runner }}
           Build Type:  ${{ inputs.build_type }}
           EOF
+
+          echo ">>> Final artifacts:"
           ls -lh artifacts/
 
       # ============================================================
-      # 8. Smoke test: ctypes/dlopen 加载 + 调 OrtGetApiBase
+      # 8. Smoke load test
       # ============================================================
-      - name: Smoke load test (Windows)
+      - name: Smoke load (Windows x64)
         if: matrix.platform == 'windows' && matrix.arch != 'arm64'
         shell: pwsh
         run: |
-          # arm64 上 runner 是 ARM,但 Python 可能也是 ARM,直接 ctypes load 即可。
-          # 跳过 arm64 是因为 Python 若装的是 x64,会架构不匹配。这里只测 x64。
           $dll = "artifacts\onnxruntime.dll"
           python -c "import ctypes; lib = ctypes.CDLL(r'$dll'); fn = lib.OrtGetApiBase; fn.restype = ctypes.c_void_p; print('OrtGetApiBase =', hex(fn()))"
 
-      - name: Smoke load test (macOS / Linux)
-        if: matrix.platform != 'windows'
+      - name: Smoke load (macOS / Linux native, non-container)
+        if: (matrix.platform == 'macos') || (matrix.platform == 'linux' && matrix.docker == '')
         shell: bash
         run: |
           if [ "${{ matrix.platform }}" = "macos" ]; then
@@ -592,22 +743,35 @@ jobs:
           else
             FILE="artifacts/libonnxruntime.so"
           fi
-          python3 - <<EOF
+          python3 -c "
           import ctypes, os, sys
-          lib_path = "$FILE"
-          print(f"Loading: {lib_path} ({os.path.getsize(lib_path):,} bytes)")
-          try:
-              lib = ctypes.CDLL(lib_path)
-          except OSError as e:
-              print(f"::error::CDLL load failed: {e}")
-              sys.exit(1)
-          fn = lib.OrtGetApiBase
-          fn.restype = ctypes.c_void_p
+          lib = ctypes.CDLL('$FILE')
+          fn = lib.OrtGetApiBase; fn.restype = ctypes.c_void_p
           ptr = fn()
-          if not ptr:
-              print("::error::OrtGetApiBase returned NULL"); sys.exit(1)
-          print(f"✅ OrtGetApiBase = {hex(ptr)}")
-          EOF
+          assert ptr, 'OrtGetApiBase returned NULL'
+          print(f'✅ OrtGetApiBase = {hex(ptr)}')
+          "
+
+      - name: Smoke load (Linux container)
+        if: matrix.platform == 'linux' && matrix.docker != ''
+        shell: bash
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+            bash -c '
+              # 容器里有 python 用容器的,没 python 用 ldd 兜底
+              if command -v python3 >/dev/null 2>&1; then
+                python3 -c "
+          import ctypes
+          lib = ctypes.CDLL(\"/work/artifacts/libonnxruntime.so\")
+          fn = lib.OrtGetApiBase; fn.restype = ctypes.c_void_p
+          assert fn(), \"OrtGetApiBase returned NULL\"
+          print(\"✅ OrtGetApiBase loaded\")
+          "
+              else
+                ldd /work/artifacts/libonnxruntime.so | head -20
+                echo "✅ ldd shows libonnxruntime.so resolves"
+              fi
+            '
 
       # ============================================================
       # 9. Upload
