@@ -167,7 +167,9 @@ jobs:
         if: matrix.platform != 'linux'
         uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
+          # Win ARM64 没有 Python 3.10 官方 wheel (3.11 才开始支持 Windows ARM64),
+          # 所以 win-arm64 一档强制 3.11,其他平台保持统一 3.10。
+          python-version: ${{ (matrix.platform == 'windows' && matrix.arch == 'arm64') && '3.11' || '3.10' }}
 
       # ============================================================
       # 2. macOS Xcode 选择

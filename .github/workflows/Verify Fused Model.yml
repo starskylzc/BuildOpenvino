@@ -97,5 +97,9 @@ jobs:
 
       - name: Run inference on test.png + assert detections
         shell: bash
+        env:
+          # Win Python 默认 stdout cp1252,中文 print 会 UnicodeEncodeError。
+          # 强制 UTF-8 输出,Mac/Linux 默认就是 UTF-8 不受影响。
+          PYTHONIOENCODING: utf-8
         run: |
           python tests/verify_fused_model.py
