@@ -61,6 +61,12 @@ on:
 env:
   OPENCV_VERSION: "4.10.0"
   OPENCVSHARP_REF: "352c778e2034a05b42d0b472a7930aef47147b14"
+  # 模块清单 — 精简版 (production 实际只用 摄像头帧 + Mat 处理,不读 PNG):
+  #   core    — Mat/Scalar/Point 基础
+  #   imgproc — Resize/CopyMakeBorder/CvtColor/Rectangle/PutText/GetTextSize
+  #   videoio — VideoCapture (摄像头读取,客户端 production 用)
+  # 故意 *不* 加 imgcodecs (PNG/JPEG decode):production 不读图片文件,
+  # 测试也用 raw BGR bytes (test.bgr) 构 Mat,跟 production 摄像头帧一致。
   BUILD_LIST: "core,imgproc,videoio"
   # ilammy/msvc-dev-cmd@v1 还在 Node 20,2026-06-02 后 GHA 默认 Node 24,
   # 提前对齐避免 deprecation warning 阻塞 "no warnings" 目标。

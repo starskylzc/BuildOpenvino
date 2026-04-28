@@ -112,6 +112,17 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Setup Python (用于 PNG ↔ BGR 转换 — OpenCvSharp 精简版没编 imgcodecs)
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install opencv-python-headless (CI 端 PNG↔BGR 转换用,不进 production)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "opencv-python-headless" "numpy<2"
+
       - name: Resolve ORT run ID (find run containing matrix.ort_artifact)
         id: ort_run
         shell: bash
@@ -227,36 +238,49 @@ jobs:
           echo ">>> Final $PUB contents:"
           ls -la "$PUB"
 
-      - name: Run C# verify (OpenCvSharp 读图+画框 + ORT 推理 + 存 annotated PNG)
+      - name: Generate test.bgr from test.png (CI-only,production 用摄像头帧)
+        shell: bash
+        run: |
+          cd tests
+          python png_to_bgr.py
+          ls -la test.bgr
+
+      - name: Run C# verify (raw BGR → OpenCvSharp imgproc → ORT 推理 → annotated.bgr)
         shell: bash
         run: |
           cd tests/CSharpVerify
-          # 用绝对路径,避免 cwd 不一致
           MODEL=$(realpath ../merged_no_topk_fp16.onnx)
-          IMG=$(realpath ../test.png)
-          OUT="$(pwd)/annotated-${{ matrix.name }}.png"
+          BGR=$(realpath ../test.bgr)
+          OUT="$(pwd)/annotated-${{ matrix.name }}.bgr"
           PUB="$(pwd)/publish"
 
-          # Linux/Mac: ./publish/CSharpVerify
-          # Windows:   ./publish/CSharpVerify.exe
-          # self-contained 跟 framework-dependent 都直接跑 exe (publish 输出已知)
           EXE_NAME="CSharpVerify"
           if [ "${{ runner.os }}" = "Windows" ]; then
             EXE_NAME="CSharpVerify.exe"
           fi
           chmod +x "publish/$EXE_NAME" 2>/dev/null || true
 
-          # framework-dependent .NET 不会自动搜 publish/ 目录找 native dylib/so
-          # (apphost 是 launcher,真正的 dotnet host 在 ~/.dotnet/...,dlopen 默认搜 host 目录)。
-          # 显式把 publish/ 加到所有平台的 native lib 搜索路径,Linux/Mac 必需,Windows 走 PATH。
+          # framework-dependent .NET 不会自动搜 publish/ 目录找 native lib;显式加上。
           export DYLD_LIBRARY_PATH="$PUB:${DYLD_LIBRARY_PATH:-}"
           export LD_LIBRARY_PATH="$PUB:${LD_LIBRARY_PATH:-}"
           export PATH="$PUB:$PATH"
-          echo ">>> DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH"
-          echo ">>> LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 
-          "./publish/$EXE_NAME" "$MODEL" "$IMG" "$OUT"
+          "./publish/$EXE_NAME" "$MODEL" "$BGR" "$OUT"
           ls -la "$OUT"
+
+      - name: Convert annotated.bgr → annotated.png (人肉眼确认 OpenCvSharp 画框正确)
+        if: always()
+        shell: bash
+        run: |
+          cd tests/CSharpVerify
+          BGR="annotated-${{ matrix.name }}.bgr"
+          PNG="annotated-${{ matrix.name }}.png"
+          if [ -f "$BGR" ]; then
+            python ../bgr_to_png.py "$BGR" "$PNG"
+            ls -la "$PNG"
+          else
+            echo "::warning::$BGR not found, skip PNG conversion"
+          fi
 
       - name: Upload annotated PNG (供肉眼确认 OpenCvSharp 画框 + ORT 推理一起工作)
         if: always()
