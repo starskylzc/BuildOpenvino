@@ -188,6 +188,64 @@ jobs:
           echo ">>> ORT official contents (单一 libonnxruntime.so + plugins):"
           ls -la downloads/ort
 
+      # ── linux-x64 only:bundle CUDA runtime + cuDNN + TensorRT 给 NVIDIA 客户机零配置 ──
+      # 客户机只需装 NVIDIA driver (libcuda.so.1 来自 driver),无需装 CUDA Toolkit / cuDNN / TensorRT。
+      # Source: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 + nvcr.io/nvidia/tensorrt 官方镜像。
+      - name: Bundle CUDA 12 + cuDNN 9 + TensorRT 10 runtime (linux-x64 only)
+        if: matrix.name == 'linux-x64'
+        shell: bash
+        run: |
+          echo ">>> 拉 CUDA 12 + cuDNN 9 runtime 镜像 (~3GB,首次 ~2min)"
+          docker pull nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+          # 提取 CUDA + cuDNN runtime libs
+          docker run --rm -v "$PWD/downloads/ort:/out" \
+            nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 \
+            bash -c '
+              set -e
+              # 用 -L 解 symlink,真正拷贝 .so 真身。.so.X.Y.Z 文件名是真身,.so.X 是 symlink。
+              # CUDA 12 runtime
+              for lib in libcudart.so libcublas.so libcublasLt.so libcurand.so libcufft.so; do
+                # 先找带版本号的真身 (libcudart.so.12.4.131 等)
+                real=$(find /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu -name "${lib}.[0-9]*" -type f 2>/dev/null | head -1)
+                [ -z "$real" ] && real=$(find /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu -name "${lib}*" 2>/dev/null | tail -1)
+                if [ -n "$real" ]; then
+                  cp -L "$real" /out/
+                  base=$(basename "$real")
+                  # 同时建 .so.X symlink (动态链接器找的是 SONAME,通常是 libcudart.so.12)
+                  major=$(echo "$base" | grep -oE "\.so\.[0-9]+" | head -1)
+                  if [ -n "$major" ] && [ ! -e "/out/${lib}${major}" ]; then
+                    ln -s "$base" "/out/${lib}${major}"
+                  fi
+                fi
+              done
+              # cuDNN 9 (libcudnn.so.9 + 子模块 libcudnn_*.so.9 都是 dlopen)
+              for f in /usr/lib/x86_64-linux-gnu/libcudnn*.so.9*; do
+                [ -f "$f" ] || continue
+                cp -L "$f" /out/
+              done
+              echo ">>> CUDA + cuDNN 拷贝完成"
+              ls -la /out/ | grep -E "libcud|libcub" | head -20
+            '
+
+          echo ""
+          echo ">>> 拉 TensorRT 10 runtime (用 PyPI nvidia-tensorrt-cu12 wheel,免 NGC 注册)"
+          # PyPI nvidia-tensorrt-cu12 内带 libnvinfer.so.10 + libnvonnxparser.so.10
+          python3 -m pip install --target /tmp/trt nvidia-tensorrt-cu12 2>/dev/null || true
+          if [ -d /tmp/trt ]; then
+            find /tmp/trt -name "libnvinfer.so.10" -exec cp -L {} downloads/ort/ \; 2>/dev/null || true
+            find /tmp/trt -name "libnvonnxparser.so.10" -exec cp -L {} downloads/ort/ \; 2>/dev/null || true
+            find /tmp/trt -name "libnvinfer_plugin.so.10" -exec cp -L {} downloads/ort/ \; 2>/dev/null || true
+          fi
+          # PyPI 没拉到也无所谓 — 客户没用 TensorRT EP 不影响
+          if ! ls downloads/ort/libnvinfer.so.10 2>/dev/null; then
+            echo "::warning::TensorRT 10 runtime 没 bundle 进 deploy (PyPI wheel 拉失败),客户用 TRT EP 需自装"
+          fi
+
+          echo ""
+          echo ">>> 最终 downloads/ort/ (linux-x64 含 CUDA bundle):"
+          ls -la downloads/ort/
+          du -sh downloads/ort/
+
       - name: Resolve OpenCvSharp run ID
         id: ocv_run
         shell: bash
@@ -256,6 +314,16 @@ jobs:
                 echo "::warning::matrix.ort_extra='$extra' 不在 downloads/ort/,跳过"
               fi
             done
+            # linux-x64:bundle CUDA + cuDNN + TensorRT runtime (上一步下载的)
+            # glob 所有 libcud*.so* / libcub*.so* / libnv*.so* / libcurand*.so* / libcufft*.so*,
+            # 让客户机零配置启用 NVIDIA dGPU
+            if [ "${{ matrix.name }}" = "linux-x64" ]; then
+              for so in downloads/ort/libcud*.so* downloads/ort/libcub*.so* \
+                        downloads/ort/libcurand*.so* downloads/ort/libcufft*.so* \
+                        downloads/ort/libnv*.so*; do
+                [ -e "$so" ] && cp -P "$so" "$dir/" 2>/dev/null || true
+              done
+            fi
             # OpenCvSharp 主库
             cp "downloads/ocv/${{ matrix.ocv_lib }}" "$dir/"
           }
