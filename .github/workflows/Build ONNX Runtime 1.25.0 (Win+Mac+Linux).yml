@@ -9,24 +9,28 @@ name: Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)
 #   │ Target                  │ OS Floor     │ GPU 覆盖         │ EP           │ glibc     │
 #   ├─────────────────────────┼──────────────┼──────────────────┼──────────────┼───────────┤
 #   │ win-x64-dml             │ Win 10 1903  │ NV/AMD/Intel/iGPU│ DML + CPU    │ —         │
+#   │ win-x86-cpu             │ Win 10 1903  │ —                │ CPU          │ —         │
 #   │ win-arm64-dml           │ Win 10 1903  │ Snapdragon Adreno│ DML + CPU    │ —         │
 #   │ osx-x64-coreml          │ macOS 10.15  │ AMD Pro/Intel iGPU│ CoreML + CPU│ —         │
 #   │ osx-arm64-coreml        │ macOS 11.0   │ Apple GPU + ANE  │ CoreML + CPU │ —         │
 #   │ linux-x64-cuda          │ Ubuntu 22.04 │ NVIDIA dGPU      │ CUDA + CPU   │ 2.35      │
 #   │ linux-x64-rocm          │ Ubuntu 22.04 │ AMD Radeon dGPU  │ ROCm + CPU   │ 2.35      │
 #   │ linux-x64-openvino      │ ov2025.4.1   │ Intel iGPU/Arc   │ OpenVINO+CPU │ 2.35      │
-#   │ linux-x64-cpu           │ manylinux_2_28│—                │ CPU          │ 2.28      │
-#   │ linux-arm64-cpu         │ manylinux_2_28│—                │ CPU          │ 2.28      │
+#   │ linux-x64-cpu           │ ubuntu:18.04 │ —                │ CPU          │ 2.27      │
+#   │ linux-arm64-cpu         │ ubuntu:18.04 │ —                │ CPU          │ 2.27      │
 #   └─────────────────────────┴──────────────┴──────────────────┴──────────────┴───────────┘
 #
+# 跟 OpenCvSharp 4.10.0 完全对齐 (10 档 archs):
+#   - Win x64/x86/arm64 + macOS x64/arm64 + Linux 5 EP variants
+#   - Linux CPU floor glibc 2.27 (ubuntu:18.04 docker)
+#   - actions/checkout@v6, actions/upload-artifact@v7, ubuntu-24.04-arm runner
+#
 # Linux glibc 策略:
-#   - CPU 档 (x64 + arm64) 都用 manylinux_2_28 (glibc 2.28),覆盖最广:
-#       银河麒麟 V10 SP1+ (x64/aarch64) / 统信 UOS V20 / Anolis 8 / RHEL 8
+#   - CPU 档 (x64 + arm64) 都用 ubuntu:18.04 (glibc 2.27),覆盖最广:
+#     Ubuntu 18.04+ / 中标麒麟 V7+ / 银河麒麟 V10 全系 / 统信 UOS V20+ / RHEL 7+
+#     需要 ubuntu-toolchain-r PPA 装 gcc-11,deadsnakes PPA 装 Python 3.10
 #   - GPU 加速档 (cuda/rocm/openvino) 用 Ubuntu 22.04 base (glibc 2.35),
-#     原因:CUDA SDK / ROCm SDK / OpenVINO 运行时本身就是针对 Ubuntu 22.04 编的,
-#     强行降到 manylinux_2_28 不可行 (运行时 .so 自身就引 glibc 2.35 符号)
-#   - 如果要在 V10 SP1 (glibc 2.28) 上跑 GPU 加速,客户必须升到 V10 SP3+
-#     或者用 linux-x64-cpu 走 CPU 兜底 (推理慢约 3-10x 但兼容性最广)
+#     SDK 本身针对 Ubuntu 22.04 编,降版本不可行
 #
 # DirectML.dll "自动版本匹配" 策略：
 #   ORT 编译时自动从 NuGet 拉取 DirectML.dll,跟 onnxruntime.dll 同源 ship。
@@ -80,20 +84,24 @@ jobs:
           # artifact_name: 上传产物名
 
           WIN_X64_DML='{"platform":"windows","arch":"x64","ep":"dml","runner":"windows-2022","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x64-dml"}'
+          WIN_X86_CPU='{"platform":"windows","arch":"x86","ep":"cpu","runner":"windows-2022","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x86-cpu"}'
           WIN_ARM64_DML='{"platform":"windows","arch":"arm64","ep":"dml","runner":"windows-11-arm","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-arm64-dml"}'
           MAC_X64_COREML='{"platform":"macos","arch":"x86_64","ep":"coreml","runner":"macos-15-intel","docker":"","deploy_target":"10.15","xcode_version":"","artifact_name":"onnxruntime-1.25.0-osx-x64-coreml"}'
           MAC_ARM64_COREML='{"platform":"macos","arch":"arm64","ep":"coreml","runner":"macos-14","docker":"","deploy_target":"11.0","xcode_version":"15.2","artifact_name":"onnxruntime-1.25.0-osx-arm64-coreml"}'
 
           # Linux 各档 (用 docker 字段控制容器)
+          # ★ CPU 档跟 OpenCvSharp 4.10.0 完全对齐:ubuntu:18.04 / arm64v8/ubuntu:18.04 (glibc 2.27)
+          #   覆盖 Ubuntu 18.04+ / 中标麒麟 V7 / 银河麒麟 V10 全系 / 统信 UOS V20 / Anolis 8 / RHEL 7+
+          # ★ arm64 runner 升 ubuntu-24.04-arm,跟 OpenCvSharp 一致
           LINUX_X64_CUDA='{"platform":"linux","arch":"x64","ep":"cuda","runner":"ubuntu-22.04","docker":"nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cuda"}'
           LINUX_X64_ROCM='{"platform":"linux","arch":"x64","ep":"rocm","runner":"ubuntu-22.04","docker":"rocm/dev-ubuntu-22.04:6.2.4-complete","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-rocm"}'
           LINUX_X64_OPENVINO='{"platform":"linux","arch":"x64","ep":"openvino","runner":"ubuntu-22.04","docker":"openvino/ubuntu22_dev:2025.4.1","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-openvino"}'
-          LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-22.04","docker":"quay.io/pypa/manylinux_2_28_x86_64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
-          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-22.04-arm","docker":"quay.io/pypa/manylinux_2_28_aarch64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
+          LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-24.04","docker":"ubuntu:18.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
+          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-24.04-arm","docker":"arm64v8/ubuntu:18.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
 
           case "${{ inputs.target_set }}" in
             windows-only)
-              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML]}" >> $GITHUB_OUTPUT ;;
+              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_X86_CPU,$WIN_ARM64_DML]}" >> $GITHUB_OUTPUT ;;
             macos-only)
               echo "matrix={\"include\":[$MAC_X64_COREML,$MAC_ARM64_COREML]}" >> $GITHUB_OUTPUT ;;
             linux-only)
@@ -103,7 +111,7 @@ jobs:
             linux-gpu-only)
               echo "matrix={\"include\":[$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO]}" >> $GITHUB_OUTPUT ;;
             *)
-              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML,$MAC_X64_COREML,$MAC_ARM64_COREML,$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_X86_CPU,$WIN_ARM64_DML,$MAC_X64_COREML,$MAC_ARM64_COREML,$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
           esac
 
   build:
@@ -124,7 +132,7 @@ jobs:
       # 1. Checkout (所有平台共用)
       # ============================================================
       - name: Checkout ONNX Runtime ${{ env.ORT_VERSION }}
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: microsoft/onnxruntime
           ref: ${{ env.ORT_VERSION }}
@@ -176,17 +184,38 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          pip install "cmake>=3.28,<4" "numpy<2" setuptools wheel
-          # Win ARM64 runner 默认 CMake 4.3, ORT 1.25 + pytorch_cpuinfo 在 4.x 下崩。
-          # 显式找 pip 装的 cmake 路径 (3.31.x),写到 GITHUB_ENV 给 build step 用。
+          pip install "cmake>=3.28,<4" "numpy<2" psutil setuptools wheel
+
+          # ── 1) pip cmake 路径 (Win ARM64 runner 默认 CMake 4.3 破坏 pytorch_cpuinfo) ──
           $pipCmake = python -c "import sysconfig, os; p=os.path.join(sysconfig.get_path('scripts'),'cmake.exe'); print(p if os.path.exists(p) else '')"
-          if ($pipCmake) {
+          $pipCmake = ($pipCmake | Out-String).Trim()
+          if ($pipCmake -and (Test-Path $pipCmake)) {
             "PIP_CMAKE_PATH=$pipCmake" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             Write-Host ">>> pip cmake: $pipCmake"
             & $pipCmake --version
           } else {
             Write-Host "::warning::pip cmake not found, build.py 会用系统 cmake"
             cmake --version
+          }
+
+          # ── 2) Win ARM64: Strawberry Perl 自带的 patch.exe 在 ARM64 上 assertion fail (line 354 hunk) ──
+          # 用 Git 的 patch.exe (在 C:\Program Files\Git\usr\bin\) 替代。
+          # 把 Git\usr\bin 加到 PATH 最前面,确保 cmake FetchContent 调用 patch 时优先找到 Git 那个。
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            $gitPatchDir = "C:\Program Files\Git\usr\bin"
+            if (Test-Path "$gitPatchDir\patch.exe") {
+              "PATH=$gitPatchDir;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              Write-Host ">>> 优先使用 Git patch.exe ($gitPatchDir\patch.exe)"
+              & "$gitPatchDir\patch.exe" --version | Select-Object -First 1
+            } else {
+              Write-Host "::warning::Git patch.exe not found at $gitPatchDir, may hit Strawberry patch.exe assertion bug"
+            }
+            # 同时把 Strawberry Perl 的 patch.exe 改名禁用 (双保险)
+            $strawberryPatch = "C:\Strawberry\c\bin\patch.exe"
+            if (Test-Path $strawberryPatch) {
+              Move-Item $strawberryPatch "$strawberryPatch.disabled" -Force
+              Write-Host ">>> 已禁用 Strawberry patch.exe (rename → .disabled)"
+            }
           }
 
       - name: Setup MSBuild (Windows)
@@ -262,7 +291,11 @@ jobs:
             "cpu" { } # CPU 默认
           }
           $archFlags = @()
-          if ("${{ matrix.arch }}" -eq "arm64") { $archFlags += "--arm64" }
+          switch ("${{ matrix.arch }}") {
+            "x86"   { $archFlags += "--x86" }
+            "arm64" { $archFlags += "--arm64" }
+            # x64 默认,不加 flag
+          }
 
           $allArgs = @(
             "tools/ci_build/build.py",
@@ -517,27 +550,58 @@ jobs:
                   onnxruntime_BUILD_BENCHMARKS=OFF
             '
 
-      # ---- Linux x64 CPU (manylinux_2_28 container, glibc 2.28 floor) ----
-      - name: Build (Linux x64 CPU manylinux_2_28, in container)
-        if: matrix.platform == 'linux' && matrix.arch == 'x64' && matrix.ep == 'cpu'
+      # ---- Linux CPU (x64 + arm64 同一段:ubuntu:18.04 / arm64v8/ubuntu:18.04 容器) ----
+      # 跟 OpenCvSharp 4.10.0 完全对齐 — glibc 2.27 floor:
+      #   覆盖 Ubuntu 18.04+ / 中标麒麟 V7 / 银河麒麟 V10 / 统信 UOS V20 / Anolis 8 / RHEL 7+
+      # 18.04 自带 gcc 7,需要从 ubuntu-toolchain-r PPA 装 gcc-11 (ORT 1.25 要 C++20 with from_chars)
+      # 18.04 自带 Python 3.6,需要从 deadsnakes PPA 装 Python 3.10 (build.py 需要 3.8+)
+      - name: Build (Linux CPU ubuntu:18.04, in container)
+        if: matrix.platform == 'linux' && matrix.ep == 'cpu'
         shell: bash
         run: |
           docker run --rm --user root \
             -v "$(pwd):/work" -w /work \
             -e ORT_VERSION="${{ env.ORT_VERSION }}" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e TZ=UTC \
             "${{ matrix.docker }}" \
             bash -c '
               set -ex
-              # manylinux_2_28 (RHEL/AlmaLinux 8) + glibc 2.28
-              # 已经预装 gcc/g++/cmake/ninja/python
-              /opt/python/cp311-cp311/bin/pip install "cmake>=3.28,<4" "numpy<2"
-              export PATH="/opt/python/cp311-cp311/bin:$PATH"
+              git config --global --add safe.directory "*" || true
 
-              # protobuf 让 ORT 自带的 vendored 版编 (manylinux 容器没系统 libprotobuf)
+              # 基础 + ubuntu-toolchain-r PPA (gcc 11) + deadsnakes PPA (Python 3.10)
+              apt-get update -y
+              apt-get install -y --no-install-recommends \
+                ca-certificates gnupg software-properties-common \
+                wget curl git make pkg-config \
+                libssl-dev libcurl4-openssl-dev zlib1g-dev
+              add-apt-repository -y ppa:ubuntu-toolchain-r/test
+              add-apt-repository -y ppa:deadsnakes/ppa
+              apt-get update -y
+              apt-get install -y --no-install-recommends \
+                gcc-11 g++-11 \
+                python3.10 python3.10-dev python3.10-distutils python3.10-venv
+              update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 \
+                --slave /usr/bin/g++ g++ /usr/bin/g++-11 \
+                --slave /usr/bin/gcov gcov /usr/bin/gcov-11
+              update-alternatives --auto gcc
+
+              # python3.10 + pip
+              curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
+              python3.10 -m pip install --upgrade pip setuptools wheel
+              python3.10 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
+              # 把 python3.10 设为默认 python3 (build.py 默认用 python3)
+              update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 100
+              python3 --version
+              gcc --version
+              cmake --version
+
+              # protobuf 让 ORT 自带的 vendored 版编 (老 ubuntu 系统包太旧)
+              # 链 libstdc++ 静态,让生成的 .so 在没有 PPA libstdc++ 的客户机器也能加载
               python3 tools/ci_build/build.py \
                 --build_dir build \
                 --config ${{ inputs.build_type }} \
-                --parallel \
+                --parallel 2 \
                 --build_shared_lib \
                 --skip_tests \
                 --skip_submodule_sync \
@@ -545,36 +609,8 @@ jobs:
                 --allow_running_as_root \
                 --cmake_extra_defines \
                   onnxruntime_BUILD_UNIT_TESTS=OFF \
-                  onnxruntime_BUILD_BENCHMARKS=OFF
-            '
-
-      # ---- Linux arm64 CPU (manylinux_2_28_aarch64 container,glibc 2.28 floor) ----
-      # 与 x64 cpu 对齐,覆盖银河麒麟 V10 SP1 ARM / 飞腾 D2000 桌面 / 鲲鹏桌面
-      - name: Build (Linux arm64 CPU manylinux_2_28_aarch64, in container)
-        if: matrix.platform == 'linux' && matrix.arch == 'arm64' && matrix.ep == 'cpu'
-        shell: bash
-        run: |
-          docker run --rm --user root \
-            -v "$(pwd):/work" -w /work \
-            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
-            "${{ matrix.docker }}" \
-            bash -c '
-              set -ex
-              /opt/python/cp311-cp311/bin/pip install "cmake>=3.28,<4" "numpy<2"
-              export PATH="/opt/python/cp311-cp311/bin:$PATH"
-
-              python3 tools/ci_build/build.py \
-                --build_dir build \
-                --config ${{ inputs.build_type }} \
-                --parallel \
-                --build_shared_lib \
-                --skip_tests \
-                --skip_submodule_sync \
-                --compile_no_warning_as_error \
-                --allow_running_as_root \
-                --cmake_extra_defines \
-                  onnxruntime_BUILD_UNIT_TESTS=OFF \
-                  onnxruntime_BUILD_BENCHMARKS=OFF
+                  onnxruntime_BUILD_BENCHMARKS=OFF \
+                  CMAKE_CXX_FLAGS="-static-libstdc++ -static-libgcc"
             '
 
       # ============================================================
@@ -962,7 +998,7 @@ jobs:
       # 9. Upload
       # ============================================================
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}
           path: artifacts/
