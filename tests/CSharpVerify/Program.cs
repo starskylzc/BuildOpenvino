@@ -19,9 +19,38 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using OpenCvSharp;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+
+// ── 强制从 app 目录 (AppContext.BaseDirectory) 加载 native lib ──
+// 默认 .NET P/Invoke 在 macOS 上有时会优先搜 dotnet host 目录或系统路径,
+// 导致客户机加载错的 onnxruntime/OpenCvSharpExtern。统一注册 resolver 锁定 app 目录。
+// 这是 production 客户也应该用的模式,确保 ship 给客户的 deploy/<platform>/* 真被加载。
+NativeLibrary.SetDllImportResolver(typeof(OrtEnv).Assembly, AppDirResolver);
+NativeLibrary.SetDllImportResolver(typeof(Cv2).Assembly, AppDirResolver);
+
+static IntPtr AppDirResolver(string libraryName, Assembly asm, DllImportSearchPath? path)
+{
+    string baseDir = AppContext.BaseDirectory;
+    string ext = OperatingSystem.IsWindows() ? ".dll"
+               : OperatingSystem.IsMacOS()   ? ".dylib"
+               :                                ".so";
+    string prefix = OperatingSystem.IsWindows() ? "" : "lib";
+    // 试两种命名:libxxx.so + xxx.so (Windows 不带 lib 前缀)
+    foreach (var candidate in new[] { Path.Combine(baseDir, prefix + libraryName + ext),
+                                      Path.Combine(baseDir, libraryName + ext) })
+    {
+        if (File.Exists(candidate))
+        {
+            Console.WriteLine($"  [resolver] {libraryName} → {candidate}");
+            return NativeLibrary.Load(candidate);
+        }
+    }
+    return IntPtr.Zero;  // fallback to default search
+}
 
 const float FaceScoreThr = 0.5f;
 const float FaceNmsIou = 0.4f;

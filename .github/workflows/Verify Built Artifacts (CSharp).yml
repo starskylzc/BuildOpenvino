@@ -66,17 +66,25 @@ jobs:
           # ort_extra:        附加 .so/.dll 列表 (空格分隔),staging 时一并 copy
           # ocv_artifact:     OpenCvSharp CI artifact 名
           # ocv_lib:          OpenCvSharp 主库文件名
+          # ort_extra 列各平台真正需要的附加 native lib (空格分隔):
+          #   Win DML:    DirectML.dll (DML 是 plugin 形式 dlopen)
+          #   Win x86:    啥都不要,纯 CPU EP
+          #   Mac CoreML: 啥都不要,CoreML EP 静态链接进主库
+          #   Linux x64-gpu: providers_shared + cuda + tensorrt (GPU plugin pattern)
+          #   Linux aarch64: providers_shared (即使 CPU only 也保留,ORT 启动时会 lazy load)
+          # 注:onnxruntime_providers_shared.dll/so 在 Win/Mac DML/CoreML 不需要 (上次 verify 全 ✅ 证实),
+          # Linux 保留是因为 Linux GPU EP 是真 plugin pattern。
           WIN_X64='{"name":"win-x64-dml","runner":"windows-2022","rid":"win-x64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-win-x64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-x64","ocv_lib":"OpenCvSharpExtern.dll"}'
           WIN_X86='{"name":"win-x86-cpu","runner":"windows-2022","rid":"win-x86","publish_self_contained":true,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-win-x86-cpu","ort_lib":"onnxruntime.dll","ort_extra":"","ocv_artifact":"win-x86","ocv_lib":"OpenCvSharpExtern.dll"}'
           WIN_ARM64='{"name":"win-arm64-dml","runner":"windows-11-arm","rid":"win-arm64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-win-arm64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-arm64","ocv_lib":"OpenCvSharpExtern.dll"}'
-          MAC_X64='{"name":"mac-x64-coreml","runner":"macos-15-intel","rid":"osx-x64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-osx-x64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-x64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
-          MAC_ARM64='{"name":"mac-arm64-coreml","runner":"macos-14","rid":"osx-arm64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-osx-arm64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-arm64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
+          MAC_X64='{"name":"mac-x64-coreml","runner":"macos-15-intel","rid":"osx-x64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-osx-x64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"","ocv_artifact":"osx-x64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
+          MAC_ARM64='{"name":"mac-arm64-coreml","runner":"macos-14","rid":"osx-arm64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-osx-arm64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"","ocv_artifact":"osx-arm64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
 
           # 官方 Linux:
           # - linux-x64 用 GPU 包 (CPU EP 内置 + CUDA12 + TensorRT plugin),客户机有 NVIDIA driver 自动启用 GPU
           # - linux-aarch64 只有 CPU 包 (官方没出 ARM GPU 版,行业现实 ARM+GPU 极少)
-          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"source":"official","ort_official_url":"https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-x64-gpu-1.25.0.tgz","ort_official_dir":"onnxruntime-linux-x64-gpu-1.25.0","ort_lib":"libonnxruntime.so.1.25.0","ort_extra":"libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so libonnxruntime_providers_tensorrt.so","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
-          LINUX_AARCH64='{"name":"linux-aarch64","runner":"ubuntu-24.04-arm","rid":"linux-arm64","publish_self_contained":false,"source":"official","ort_official_url":"https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-aarch64-1.25.0.tgz","ort_official_dir":"onnxruntime-linux-aarch64-1.25.0","ort_lib":"libonnxruntime.so.1.25.0","ort_extra":"libonnxruntime_providers_shared.so","ocv_artifact":"linux-aarch64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"source":"official","ort_official_url":"https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-x64-gpu-1.25.0.tgz","ort_official_dir":"onnxruntime-linux-x64-gpu-1.25.0","ort_lib":"libonnxruntime.so","ort_extra":"libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so libonnxruntime_providers_tensorrt.so","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          LINUX_AARCH64='{"name":"linux-aarch64","runner":"ubuntu-24.04-arm","rid":"linux-arm64","publish_self_contained":false,"source":"official","ort_official_url":"https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-aarch64-1.25.0.tgz","ort_official_dir":"onnxruntime-linux-aarch64-1.25.0","ort_lib":"libonnxruntime.so","ort_extra":"libonnxruntime_providers_shared.so","ocv_artifact":"linux-aarch64","ocv_lib":"libOpenCvSharpExtern.so"}'
 
           case "${{ inputs.target_set }}" in
             win-x64-dml)        echo "matrix={\"include\":[$WIN_X64]}" >> $GITHUB_OUTPUT ;;
@@ -168,16 +176,16 @@ jobs:
         run: |
           mkdir -p downloads/ort
           curl -sSL -o /tmp/ort-official.tgz "${{ matrix.ort_official_url }}"
-          echo ">>> Downloaded:" && ls -la /tmp/ort-official.tgz
           tar xzf /tmp/ort-official.tgz -C /tmp
-          # 把 lib/* 平铺到 downloads/ort/ (跟 self-build artifact 结构一致,后续 stage 同样逻辑)
-          cp /tmp/${{ matrix.ort_official_dir }}/lib/*.so* downloads/ort/ 2>/dev/null || true
-          # 把 .so.1.25.0 创建无版本号 symlink (libonnxruntime.so → libonnxruntime.so.1.25.0),
-          # .NET P/Invoke 默认找 libonnxruntime.so 不带版本号
-          if [ -f "downloads/ort/libonnxruntime.so.1.25.0" ] && [ ! -e "downloads/ort/libonnxruntime.so" ]; then
-            ln -sf libonnxruntime.so.1.25.0 downloads/ort/libonnxruntime.so
+          SRC=/tmp/${{ matrix.ort_official_dir }}/lib
+          # 1. 主库:只取 libonnxruntime.so.1.25.0 (是 real file),改名 libonnxruntime.so
+          #    丢掉原 tgz 里的 libonnxruntime.so / libonnxruntime.so.1 symlink (重复内容)
+          if [ -f "$SRC/libonnxruntime.so.1.25.0" ]; then
+            cp "$SRC/libonnxruntime.so.1.25.0" downloads/ort/libonnxruntime.so
           fi
-          echo ">>> ORT official contents:"
+          # 2. EP plugin (libonnxruntime_providers_*.so) — real files,直接 cp
+          cp "$SRC"/libonnxruntime_providers_*.so downloads/ort/ 2>/dev/null || true
+          echo ">>> ORT official contents (单一 libonnxruntime.so + plugins):"
           ls -la downloads/ort
 
       - name: Resolve OpenCvSharp run ID
@@ -229,7 +237,7 @@ jobs:
           fi
           ls -la publish/
 
-      - name: Stage native libs (separate clean dir for deploy artifact)
+      - name: Stage native libs (clean deploy + publish for verify)
         shell: bash
         run: |
           PUB=tests/CSharpVerify/publish
@@ -238,41 +246,23 @@ jobs:
 
           stage_to() {
             local dir=$1
-            # ORT 主库
-            if [ -f "downloads/ort/${{ matrix.ort_lib }}" ]; then
-              cp "downloads/ort/${{ matrix.ort_lib }}" "$dir/"
-            fi
-            # 没版本号 symlink (Linux .so)
-            if [ -e "downloads/ort/libonnxruntime.so" ]; then
-              cp -P "downloads/ort/libonnxruntime.so" "$dir/" 2>/dev/null || \
-                cp "downloads/ort/libonnxruntime.so" "$dir/"
-            fi
+            # ORT 主库 (单一文件,无版本号)
+            cp "downloads/ort/${{ matrix.ort_lib }}" "$dir/"
+            # 附加 native (DirectML.dll / providers_shared / cuda / tensorrt)
             for extra in ${{ matrix.ort_extra }}; do
               if [ -f "downloads/ort/$extra" ]; then
                 cp "downloads/ort/$extra" "$dir/"
+              else
+                echo "::warning::matrix.ort_extra='$extra' 不在 downloads/ort/,跳过"
               fi
             done
+            # OpenCvSharp 主库
             cp "downloads/ocv/${{ matrix.ocv_lib }}" "$dir/"
           }
-          # 1. publish/ — 给 C# verify 跑用
           stage_to "$PUB"
-          # 2. staged/ — 干净的 deploy artifact (没 C# 二进制)
           stage_to "$STAGED"
 
-          # 写一个 version.txt 标识来源
-          cat > "$STAGED/version.txt" <<EOF
-          ORT version: 1.25.0
-          ORT source : ${{ matrix.source }}
-          OpenCvSharp: 4.10.0
-          Platform   : ${{ matrix.name }}
-          .NET RID   : ${{ matrix.rid }}
-          Build at   : $(date -u +%Y-%m-%dT%H:%M:%SZ)
-          EOF
-
-          echo ">>> publish/ contents (含 C# 二进制):"
-          ls -la "$PUB"
-          echo ""
-          echo ">>> staged/ contents (deploy artifact 内容):"
+          echo ">>> staged/ (deploy artifact 内容):"
           ls -la "$STAGED"
 
       - name: Generate test.bgr from test.png
@@ -289,7 +279,6 @@ jobs:
           MODEL=$(realpath ../merged_no_topk_fp16.onnx)
           BGR=$(realpath ../test.bgr)
           OUT="$(pwd)/annotated-${{ matrix.name }}.bgr"
-          PUB="$(pwd)/publish"
 
           EXE_NAME="CSharpVerify"
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -297,9 +286,10 @@ jobs:
           fi
           chmod +x "publish/$EXE_NAME" 2>/dev/null || true
 
-          export DYLD_LIBRARY_PATH="$PUB:${DYLD_LIBRARY_PATH:-}"
-          export LD_LIBRARY_PATH="$PUB:${LD_LIBRARY_PATH:-}"
-          export PATH="$PUB:$PATH"
+          # 注:不设 DYLD_LIBRARY_PATH/LD_LIBRARY_PATH/PATH —
+          # Program.cs 用 NativeLibrary.SetDllImportResolver 强制从 AppContext.BaseDirectory 加载。
+          # 这跟客户 production 部署等价 (客户机不会装这些 env var)。
+          # 如果加载失败说明 resolver 没起效,真实 bug 浮现。
 
           "./publish/$EXE_NAME" "$MODEL" "$BGR" "$OUT"
           ls -la "$OUT"
