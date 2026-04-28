@@ -112,7 +112,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Resolve ORT run ID (latest success on main if not given)
+      - name: Resolve ORT run ID (find run containing matrix.ort_artifact)
         id: ort_run
         shell: bash
         env:
@@ -120,16 +120,32 @@ jobs:
         run: |
           if [ -n "${{ inputs.ort_run_id }}" ]; then
             echo "id=${{ inputs.ort_run_id }}" >> $GITHUB_OUTPUT
+            echo ">>> Using user-specified ORT run ${{ inputs.ort_run_id }}"
           else
-            ID=$(gh run list -R ${{ github.repository }} \
-              --workflow="Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)" \
-              --status=success --branch=main --limit=1 --json databaseId --jq '.[0].databaseId')
-            if [ -z "$ID" ]; then echo "::error::No success ORT run found"; exit 1; fi
-            echo "id=$ID" >> $GITHUB_OUTPUT
-            echo ">>> Using ORT run $ID"
+            # 重要:per-platform ORT runs 每个 run 只有 1 个平台的 artifact。
+            # 不能简单取 latest success — 必须找含 ${{ matrix.ort_artifact }} 的那个。
+            ARTIFACT_NAME="${{ matrix.ort_artifact }}"
+            echo ">>> Searching success runs for artifact: $ARTIFACT_NAME"
+            FOUND=""
+            for ID in $(gh run list -R ${{ github.repository }} \
+                --workflow="Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)" \
+                --status=success --branch=main --limit=30 \
+                --json databaseId --jq '.[].databaseId'); do
+              if gh api "repos/${{ github.repository }}/actions/runs/$ID/artifacts" \
+                  --jq '.artifacts[].name' 2>/dev/null | grep -qFx "$ARTIFACT_NAME"; then
+                FOUND=$ID
+                break
+              fi
+            done
+            if [ -z "$FOUND" ]; then
+              echo "::error::No success ORT run with artifact '$ARTIFACT_NAME' found in last 30 runs"
+              exit 1
+            fi
+            echo "id=$FOUND" >> $GITHUB_OUTPUT
+            echo ">>> Using ORT run $FOUND for artifact $ARTIFACT_NAME"
           fi
 
-      - name: Resolve OpenCvSharp run ID
+      - name: Resolve OpenCvSharp run ID (find run containing matrix.ocv_artifact)
         id: ocv_run
         shell: bash
         env:
@@ -137,13 +153,28 @@ jobs:
         run: |
           if [ -n "${{ inputs.opencv_run_id }}" ]; then
             echo "id=${{ inputs.opencv_run_id }}" >> $GITHUB_OUTPUT
+            echo ">>> Using user-specified OpenCvSharp run ${{ inputs.opencv_run_id }}"
           else
-            ID=$(gh run list -R ${{ github.repository }} \
-              --workflow="Build-Opencvsharp-AllPlatforms-4.10.0" \
-              --status=success --branch=main --limit=1 --json databaseId --jq '.[0].databaseId')
-            if [ -z "$ID" ]; then echo "::error::No success OpenCvSharp run found"; exit 1; fi
-            echo "id=$ID" >> $GITHUB_OUTPUT
-            echo ">>> Using OpenCvSharp run $ID"
+            # OpenCvSharp 用 boolean inputs,1 个 run 通常含全 7 archs;但保险起见也按 artifact 名找
+            ARTIFACT_NAME="${{ matrix.ocv_artifact }}"
+            echo ">>> Searching success runs for artifact: $ARTIFACT_NAME"
+            FOUND=""
+            for ID in $(gh run list -R ${{ github.repository }} \
+                --workflow="Build-Opencvsharp-AllPlatforms-4.10.0" \
+                --status=success --branch=main --limit=10 \
+                --json databaseId --jq '.[].databaseId'); do
+              if gh api "repos/${{ github.repository }}/actions/runs/$ID/artifacts" \
+                  --jq '.artifacts[].name' 2>/dev/null | grep -qFx "$ARTIFACT_NAME"; then
+                FOUND=$ID
+                break
+              fi
+            done
+            if [ -z "$FOUND" ]; then
+              echo "::error::No success OpenCvSharp run with artifact '$ARTIFACT_NAME' found"
+              exit 1
+            fi
+            echo "id=$FOUND" >> $GITHUB_OUTPUT
+            echo ">>> Using OpenCvSharp run $FOUND for artifact $ARTIFACT_NAME"
           fi
 
       - name: Download ORT artifact

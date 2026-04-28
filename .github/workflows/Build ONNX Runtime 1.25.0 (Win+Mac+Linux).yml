@@ -490,9 +490,17 @@ jobs:
                 cd /work
               fi
 
-              ls /opt/rocm/include/migraphx/version.h 2>/dev/null \
-                && echo "✅ migraphx/version.h found" \
-                || (echo "::error::migraphx headers 仍然缺失,跳过 ROCm build"; exit 0)
+              # 注意:`(... exit 0)` 是 subshell,不能 kill 父脚本。
+              # 用 `{ ... ; }` 才在当前 shell 执行,exit 才生效。
+              # 而且 migraphx headers 缺失我们要 fail 而不是装作成功 — 否则
+              # build.py 仍会跑,在后面用更难懂的 cc 报错失败。
+              if [ ! -f /opt/rocm/include/migraphx/version.h ]; then
+                echo "::error::migraphx/version.h 仍然缺失,无法 build ROCm/MIGraphX provider"
+                echo ">>> /opt/rocm/include/migraphx/ 内容:"
+                ls -la /opt/rocm/include/migraphx/ 2>/dev/null || echo "  (目录不存在)"
+                exit 1
+              fi
+              echo "✅ migraphx/version.h found at /opt/rocm/include/migraphx/version.h"
 
               python3 tools/ci_build/build.py \
                 --build_dir build \
