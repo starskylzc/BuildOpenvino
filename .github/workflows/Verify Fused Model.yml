@@ -22,11 +22,18 @@ on:
   workflow_dispatch:
     inputs:
       target_set:
-        description: 'Which platforms to verify'
+        description: 'Which platforms to verify (推荐:每次只跑一个)'
         required: true
         default: 'all'
         type: choice
         options:
+          # ── 单平台档 ──
+          - win-x64
+          - osx-x64
+          - osx-arm64
+          - linux-x64
+          - linux-arm64
+          # ── 聚合档 ──
           - all
           - windows-only
           - macos-only
@@ -53,6 +60,13 @@ jobs:
           LINUX_ARM64='{"name":"linux-arm64","runner":"ubuntu-24.04-arm","python":"3.10"}'
 
           case "${{ inputs.target_set }}" in
+            # ── 单平台档 ──
+            win-x64)      echo "matrix={\"include\":[$WIN_X64]}" >> $GITHUB_OUTPUT ;;
+            osx-x64)      echo "matrix={\"include\":[$MAC_X64]}" >> $GITHUB_OUTPUT ;;
+            osx-arm64)    echo "matrix={\"include\":[$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
+            linux-x64)    echo "matrix={\"include\":[$LINUX_X64]}" >> $GITHUB_OUTPUT ;;
+            linux-arm64)  echo "matrix={\"include\":[$LINUX_ARM64]}" >> $GITHUB_OUTPUT ;;
+            # ── 聚合档 ──
             windows-only) echo "matrix={\"include\":[$WIN_X64]}" >> $GITHUB_OUTPUT ;;
             macos-only)   echo "matrix={\"include\":[$MAC_X64,$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
             linux-only)   echo "matrix={\"include\":[$LINUX_X64,$LINUX_ARM64]}" >> $GITHUB_OUTPUT ;;

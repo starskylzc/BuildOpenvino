@@ -56,11 +56,23 @@ on:
           - Release
           - RelWithDebInfo
       target_set:
-        description: 'Which platforms to build'
+        description: 'Which platforms to build (推荐:每次只跑一个,不影响其他平台)'
         required: true
         default: 'all'
         type: choice
         options:
+          # ── 单平台档 (推荐:一个失败不影响其他) ──
+          - win-x64-dml
+          - win-x86-cpu
+          - win-arm64-dml
+          - mac-x64-coreml
+          - mac-arm64-coreml
+          - linux-x64-cuda
+          - linux-x64-rocm
+          - linux-x64-openvino
+          - linux-x64-cpu
+          - linux-arm64-cpu
+          # ── 聚合档 (一次跑多个,慎用) ──
           - all
           - windows-only
           - macos-only
@@ -100,6 +112,18 @@ jobs:
           LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-24.04-arm","docker":"quay.io/pypa/manylinux_2_28_aarch64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
 
           case "${{ inputs.target_set }}" in
+            # ── 单平台档 ──
+            win-x64-dml)        echo "matrix={\"include\":[$WIN_X64_DML]}" >> $GITHUB_OUTPUT ;;
+            win-x86-cpu)        echo "matrix={\"include\":[$WIN_X86_CPU]}" >> $GITHUB_OUTPUT ;;
+            win-arm64-dml)      echo "matrix={\"include\":[$WIN_ARM64_DML]}" >> $GITHUB_OUTPUT ;;
+            mac-x64-coreml)     echo "matrix={\"include\":[$MAC_X64_COREML]}" >> $GITHUB_OUTPUT ;;
+            mac-arm64-coreml)   echo "matrix={\"include\":[$MAC_ARM64_COREML]}" >> $GITHUB_OUTPUT ;;
+            linux-x64-cuda)     echo "matrix={\"include\":[$LINUX_X64_CUDA]}" >> $GITHUB_OUTPUT ;;
+            linux-x64-rocm)     echo "matrix={\"include\":[$LINUX_X64_ROCM]}" >> $GITHUB_OUTPUT ;;
+            linux-x64-openvino) echo "matrix={\"include\":[$LINUX_X64_OPENVINO]}" >> $GITHUB_OUTPUT ;;
+            linux-x64-cpu)      echo "matrix={\"include\":[$LINUX_X64_CPU]}" >> $GITHUB_OUTPUT ;;
+            linux-arm64-cpu)    echo "matrix={\"include\":[$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+            # ── 聚合档 ──
             windows-only)
               echo "matrix={\"include\":[$WIN_X64_DML,$WIN_X86_CPU,$WIN_ARM64_DML]}" >> $GITHUB_OUTPUT ;;
             macos-only)
