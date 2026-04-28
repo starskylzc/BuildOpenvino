@@ -10,12 +10,16 @@ name: Build ORT 1.25.0 (Win + Mac + Linux, DML/CoreML/CPU)
 #   ├────────────────┼───────┼─────────┼──────────────────┼─────────────────┤
 #   │ Windows DML    │ x64   │ DML+CPU │ windows-2022     │ Win 10 1903     │
 #   │ Windows DML    │ arm64 │ DML+CPU │ windows-11-arm   │ Win 10 1903 ARM │
-#   │ Windows CPU    │ x86   │ CPU     │ windows-2022     │ Win 10 1903     │
 #   │ macOS CoreML   │ x64   │ CoreML  │ macos-15-intel   │ 10.15           │
 #   │ macOS CoreML   │ arm64 │ CoreML  │ macos-14 (Xc15.2)│ 11.0            │
 #   │ Linux CPU      │ x64   │ CPU     │ ubuntu-22.04     │ glibc 2.35      │
 #   │ Linux CPU      │ arm64 │ CPU     │ ubuntu-22.04-arm │ glibc 2.35      │
 #   └────────────────┴───────┴─────────┴──────────────────┴─────────────────┘
+#
+# 已删除 Windows x86 (32-bit) 档:
+#   - DirectML / CUDA / OpenVINO 都没 32-bit 版,只能 CPU EP,比 x64 慢 30%~50%
+#   - Win 11 不支持 32-bit,Win 10 32-bit 消费版 2025-10 EOL
+#   - 实际用户 < 1%,且体验比 x64 build 还差,反向激励
 #
 # DirectML.dll "自动版本匹配" 策略：
 #   1. ORT 1.25 构建时 CMake 通过 FetchContent 从 NuGet 拉一个**钉死版本**的
@@ -69,7 +73,7 @@ jobs:
       - id: set-matrix
         run: |
           # platform: linux/windows/macos     用于条件 step 分流
-          # arch:    x64/x86/arm64/x86_64     ORT build.py / cmake 用的 arch 名 (注意 macOS 用 x86_64)
+          # arch:    x64/arm64/x86_64         ORT build.py / cmake 用的 arch 名 (注意 macOS 用 x86_64)
           # ep:      dml/coreml/cpu           启用哪个加速 EP
           # deploy_target:  10.15/11.0/<空>   仅 macOS 用,minos
           # xcode_version:  15.2/<空>         仅 macOS arm64 用,绕开 to_chars
@@ -77,7 +81,6 @@ jobs:
 
           WIN_X64_DML='{"platform":"windows","arch":"x64","ep":"dml","runner":"windows-2022","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x64-dml"}'
           WIN_ARM64_DML='{"platform":"windows","arch":"arm64","ep":"dml","runner":"windows-11-arm","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-arm64-dml"}'
-          WIN_X86_CPU='{"platform":"windows","arch":"x86","ep":"cpu","runner":"windows-2022","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x86-cpu"}'
           MAC_X64_COREML='{"platform":"macos","arch":"x86_64","ep":"coreml","runner":"macos-15-intel","deploy_target":"10.15","xcode_version":"","artifact_name":"onnxruntime-1.25.0-osx-x64-coreml"}'
           MAC_ARM64_COREML='{"platform":"macos","arch":"arm64","ep":"coreml","runner":"macos-14","deploy_target":"11.0","xcode_version":"15.2","artifact_name":"onnxruntime-1.25.0-osx-arm64-coreml"}'
           LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
@@ -85,13 +88,13 @@ jobs:
 
           case "${{ inputs.target_set }}" in
             windows-only)
-              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML,$WIN_X86_CPU]}" >> $GITHUB_OUTPUT ;;
+              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML]}" >> $GITHUB_OUTPUT ;;
             macos-only)
               echo "matrix={\"include\":[$MAC_X64_COREML,$MAC_ARM64_COREML]}" >> $GITHUB_OUTPUT ;;
             linux-only)
               echo "matrix={\"include\":[$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
             *)
-              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML,$WIN_X86_CPU,$MAC_X64_COREML,$MAC_ARM64_COREML,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_ARM64_DML,$MAC_X64_COREML,$MAC_ARM64_COREML,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
           esac
 
   build:
@@ -310,8 +313,8 @@ jobs:
           }
           $archFlags = @()
           switch ("${{ matrix.arch }}") {
-            "x86"   { $archFlags += "--x86" }
             "arm64" { $archFlags += "--arm64" }
+            # x64 默认,不加 flag
           }
 
           $allArgs = @(
@@ -576,7 +579,7 @@ jobs:
         shell: pwsh
         run: |
           # arm64 上 runner 是 ARM,但 Python 可能也是 ARM,直接 ctypes load 即可。
-          # 我们仍跳过 arm64 是因为如果 Python 装的是 x64,会架构不匹配,这里偷懒只测 x64/x86。
+          # 跳过 arm64 是因为 Python 若装的是 x64,会架构不匹配。这里只测 x64。
           $dll = "artifacts\onnxruntime.dll"
           python -c "import ctypes; lib = ctypes.CDLL(r'$dll'); fn = lib.OrtGetApiBase; fn.restype = ctypes.c_void_p; print('OrtGetApiBase =', hex(fn()))"
 
