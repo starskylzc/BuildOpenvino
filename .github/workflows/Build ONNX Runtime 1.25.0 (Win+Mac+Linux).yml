@@ -588,8 +588,8 @@ jobs:
                 --slave /usr/bin/gcov gcov /usr/bin/gcov-11
               update-alternatives --auto gcc
 
-              # python3.8 + pip
-              curl -sS https://bootstrap.pypa.io/get-pip.py | python3.8
+              # python3.8 + pip — get-pip.py 通用版已弃 3.8,需用 version-specific URL
+              curl -sS https://bootstrap.pypa.io/pip/3.8/get-pip.py | python3.8
               python3.8 -m pip install --upgrade pip setuptools wheel
               python3.8 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
               # 把 python3.8 设为默认 python3 (build.py 默认用 python3)
