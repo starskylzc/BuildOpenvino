@@ -14,15 +14,19 @@ name: Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)
 #   │ osx-arm64-coreml        │ macOS 11.0   │ Apple GPU + ANE  │ CoreML + CPU │ —         │
 #   │ linux-x64-cuda          │ Ubuntu 22.04 │ NVIDIA dGPU      │ CUDA + CPU   │ 2.35      │
 #   │ linux-x64-rocm          │ Ubuntu 22.04 │ AMD Radeon dGPU  │ ROCm + CPU   │ 2.35      │
-#   │ linux-x64-openvino      │ Ubuntu 20.04 │ Intel iGPU/Arc   │ OpenVINO+CPU │ 2.31      │
-#   │ linux-x64-cpu           │ Kylin/UOS V20│ —                │ CPU          │ 2.28      │
-#   │ linux-arm64-cpu         │ Ubuntu 22.04 │ —                │ CPU          │ 2.35      │
+#   │ linux-x64-openvino      │ Ubuntu 22.04 │ Intel iGPU/Arc   │ OpenVINO+CPU │ 2.35      │
+#   │ linux-x64-cpu           │ manylinux_2_28│—                │ CPU          │ 2.28      │
+#   │ linux-arm64-cpu         │ manylinux_2_28│—                │ CPU          │ 2.28      │
 #   └─────────────────────────┴──────────────┴──────────────────┴──────────────┴───────────┘
 #
 # Linux glibc 策略:
-#   - linux-x64-cpu 用 manylinux_2_28 (glibc 2.28),覆盖银河麒麟 V10 SP1+/统信 UOS V20+
-#   - GPU 加速档 (cuda/rocm/openvino) 用更新的 glibc,因为有 GPU 的桌面机大概率是新系统
-#   - linux-arm64-cpu 用 ubuntu-22.04-arm runner (glibc 2.35),覆盖飞腾/鲲鹏桌面
+#   - CPU 档 (x64 + arm64) 都用 manylinux_2_28 (glibc 2.28),覆盖最广:
+#       银河麒麟 V10 SP1+ (x64/aarch64) / 统信 UOS V20 / Anolis 8 / RHEL 8
+#   - GPU 加速档 (cuda/rocm/openvino) 用 Ubuntu 22.04 base (glibc 2.35),
+#     原因:CUDA SDK / ROCm SDK / OpenVINO 运行时本身就是针对 Ubuntu 22.04 编的,
+#     强行降到 manylinux_2_28 不可行 (运行时 .so 自身就引 glibc 2.35 符号)
+#   - 如果要在 V10 SP1 (glibc 2.28) 上跑 GPU 加速,客户必须升到 V10 SP3+
+#     或者用 linux-x64-cpu 走 CPU 兜底 (推理慢约 3-10x 但兼容性最广)
 #
 # DirectML.dll "自动版本匹配" 策略：
 #   ORT 编译时自动从 NuGet 拉取 DirectML.dll,跟 onnxruntime.dll 同源 ship。
@@ -85,7 +89,7 @@ jobs:
           LINUX_X64_ROCM='{"platform":"linux","arch":"x64","ep":"rocm","runner":"ubuntu-22.04","docker":"rocm/dev-ubuntu-22.04:6.2.4-complete","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-rocm"}'
           LINUX_X64_OPENVINO='{"platform":"linux","arch":"x64","ep":"openvino","runner":"ubuntu-22.04","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-openvino"}'
           LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-22.04","docker":"quay.io/pypa/manylinux_2_28_x86_64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
-          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-22.04-arm","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
+          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-22.04-arm","docker":"quay.io/pypa/manylinux_2_28_aarch64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
 
           case "${{ inputs.target_set }}" in
             windows-only)
@@ -141,12 +145,26 @@ jobs:
           xcodebuild -version
           xcrun --show-sdk-version
 
-      - name: Show default Xcode (macOS only, when not pinned)
+      - name: Show default Xcode + assert chrono guard precondition (macOS x64)
         if: matrix.platform == 'macos' && matrix.xcode_version == ''
         shell: bash
         run: |
           xcodebuild -version
           xcrun --show-sdk-version
+          SDK_VER=$(xcrun --show-sdk-version)
+          echo ">>> Default Xcode SDK version: $SDK_VER"
+
+          # 2 重保护:
+          #   (a) deploy_target=10.15 < 13.3 → ORT_USE_CXX20_STD_CHRONO #undef
+          #   (b) 即使 SDK 升到 14.4+ (Xcode 15.4+),deploy < 13.3 也兜底 undef
+          # 任何一个生效都安全。这里把 deploy_target 显式 echo 出来便于排查。
+          echo ">>> Deploy target: ${{ matrix.deploy_target }} (< 13.3 satisfies #undef)"
+
+          # 同时检查 ORT 1.25 logging.cc 的 guard 还在
+          F="onnxruntime/core/common/logging/logging.cc"
+          if [ -f "$F" ]; then
+            grep -n "ORT_USE_CXX20_STD_CHRONO" "$F" | head -3
+          fi
 
       # ============================================================
       # 3. 安装依赖 (per-platform)
@@ -192,16 +210,9 @@ jobs:
           ls /opt/intel/openvino_2024 || (echo "::error::OpenVINO install failed"; exit 1)
           echo "OPENVINO_ROOT=/opt/intel/openvino_2024" >> $GITHUB_ENV
 
-      - name: Install deps (Linux arm64 cpu - on host)
-        if: matrix.platform == 'linux' && matrix.arch == 'arm64' && matrix.ep == 'cpu'
-        shell: bash
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y build-essential ninja-build pkg-config \
-            libssl-dev libcurl4-openssl-dev zlib1g-dev \
-            python3-pip python3-dev \
-            protobuf-compiler libprotobuf-dev
-          pip3 install "cmake>=3.28,<4" "numpy<2"
+      # arm64 cpu 改用 manylinux_2_28_aarch64 容器 (glibc 2.28),
+      # 覆盖银河麒麟 V10 SP1 ARM / 统信 UOS V20 ARM,无需在 host 装 deps。
+      # (容器内已有 gcc/g++/Python/CMake)
 
       # ============================================================
       # 4. macOS-only: 校验 ORT 1.25 的内置 chrono guard 是否生效
@@ -425,23 +436,34 @@ jobs:
                   onnxruntime_BUILD_BENCHMARKS=OFF
             '
 
-      # ---- Linux arm64 CPU (on ubuntu-22.04-arm runner) ----
-      - name: Build (Linux arm64 CPU)
+      # ---- Linux arm64 CPU (manylinux_2_28_aarch64 container,glibc 2.28 floor) ----
+      # 与 x64 cpu 对齐,覆盖银河麒麟 V10 SP1 ARM / 飞腾 D2000 桌面 / 鲲鹏桌面
+      - name: Build (Linux arm64 CPU manylinux_2_28_aarch64, in container)
         if: matrix.platform == 'linux' && matrix.arch == 'arm64' && matrix.ep == 'cpu'
         shell: bash
         run: |
-          python3 tools/ci_build/build.py \
-            --build_dir build \
-            --config ${{ inputs.build_type }} \
-            --parallel \
-            --build_shared_lib \
-            --skip_tests \
-            --skip_submodule_sync \
-            --compile_no_warning_as_error \
-            --allow_running_as_root \
-            --cmake_extra_defines \
-              onnxruntime_BUILD_UNIT_TESTS=OFF \
-              onnxruntime_BUILD_BENCHMARKS=OFF
+          docker run --rm \
+            -v "$(pwd):/work" -w /work \
+            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
+            "${{ matrix.docker }}" \
+            bash -c '
+              set -ex
+              /opt/python/cp311-cp311/bin/pip install "cmake>=3.28,<4" "numpy<2"
+              export PATH="/opt/python/cp311-cp311/bin:$PATH"
+
+              python3 tools/ci_build/build.py \
+                --build_dir build \
+                --config ${{ inputs.build_type }} \
+                --parallel \
+                --build_shared_lib \
+                --skip_tests \
+                --skip_submodule_sync \
+                --compile_no_warning_as_error \
+                --allow_running_as_root \
+                --cmake_extra_defines \
+                  onnxruntime_BUILD_UNIT_TESTS=OFF \
+                  onnxruntime_BUILD_BENCHMARKS=OFF
+            '
 
       # ============================================================
       # 6. Verify (per-platform)
@@ -726,34 +748,44 @@ jobs:
               '
           fi
 
-          # glibc floor 信息
-          GLIBC_FLOOR=$(objdump -T artifacts/libonnxruntime.so 2>/dev/null \
-            | grep -oE "GLIBC_[0-9]+\.[0-9]+" \
-            | sort -u | sort -t_ -k2 -V | tail -1 || echo "unknown")
+          # 自动扫描所有 artifact .so 的最高 GLIBC 依赖版本 (取联合上界)
+          GLIBC_FLOOR=$(for f in artifacts/*.so*; do
+              [ -f "$f" ] && objdump -T "$f" 2>/dev/null \
+                | grep -oE "GLIBC_[0-9]+\.[0-9]+";
+            done | sort -u | sort -t_ -k2 -V | tail -1 || echo "unknown")
 
-          # 客户端硬性要求 (.so 不打包的部分)
+          # 客户端硬性要求 (.so 不打包的部分) + 兼容 OS 列表
           if [ "${{ matrix.ep }}" = "cuda" ]; then
             CLIENT_REQUIRES="NVIDIA driver >= 525 (libcuda.so) — 不在 artifact 里"
+            OS_COMPAT="Ubuntu 22.04+ / Kylin V10 SP3+ / 任何 glibc>=2.35 + NVIDIA driver"
           elif [ "${{ matrix.ep }}" = "rocm" ]; then
             CLIENT_REQUIRES="amdgpu kernel module + libdrm_amdgpu — 不在 artifact 里"
+            OS_COMPAT="Ubuntu 22.04+ / 任何 glibc>=2.35 + amdgpu driver"
           elif [ "${{ matrix.ep }}" = "openvino" ]; then
             CLIENT_REQUIRES="(可选) Intel GPU 驱动 (i915/Xe kmod) 用于 GPU 推理"
+            OS_COMPAT="Ubuntu 22.04+ / Kylin V10 SP3+ / 任何 glibc>=2.35"
           else
-            CLIENT_REQUIRES="无 (CPU only)"
+            CLIENT_REQUIRES="无 (CPU only,零外部依赖)"
+            if [ "${{ matrix.arch }}" = "x64" ]; then
+              OS_COMPAT="银河麒麟 V10 SP1+ x64 / 统信 UOS V20 / Anolis 8 / RHEL 8 / Ubuntu 20.04+ (任何 glibc>=2.28)"
+            else
+              OS_COMPAT="银河麒麟 V10 SP1+ aarch64 / 飞腾桌面 / 鲲鹏桌面 (任何 aarch64 glibc>=2.28)"
+            fi
           fi
 
           cat > artifacts/version.txt <<EOF
-          ORT Version:    $ORT_VERSION
-          Platform:       Linux
-          Arch:           ${{ matrix.arch }}
-          EP:             ${{ matrix.ep }}
-          glibc Floor:    $GLIBC_FLOOR
-          Container:      ${{ matrix.docker }}
-          Runner:         ${{ matrix.runner }}
-          Build Type:     ${{ inputs.build_type }}
+          ORT Version:     $ORT_VERSION
+          Platform:        Linux
+          Arch:            ${{ matrix.arch }}
+          EP:              ${{ matrix.ep }}
+          glibc Floor:     $GLIBC_FLOOR
+          OS Compatibility: $OS_COMPAT
+          Container:       ${{ matrix.docker }}
+          Runner:          ${{ matrix.runner }}
+          Build Type:      ${{ inputs.build_type }}
 
-          Bundled libs:   $(ls artifacts/*.so* 2>/dev/null | wc -l) files
-          Total size:     $(du -sh artifacts/ | awk '{print $1}')
+          Bundled libs:    $(ls artifacts/*.so* 2>/dev/null | wc -l) files
+          Total size:      $(du -sh artifacts/ | awk '{print $1}')
           Client requires: $CLIENT_REQUIRES
           EOF
 
