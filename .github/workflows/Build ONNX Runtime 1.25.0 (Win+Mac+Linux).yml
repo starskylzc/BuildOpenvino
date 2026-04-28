@@ -397,9 +397,24 @@ jobs:
           Get-ChildItem -Path $outDir -Filter "onnxruntime*.dll" |
             ForEach-Object { Copy-Item $_.FullName "artifacts\" -Force }
 
-          # DirectML.dll: 从 build 目录里捞出来,跟 onnxruntime.dll 同源 ship
+          # DirectML.dll: 从 build 目录里捞出来,跟 onnxruntime.dll 同源 ship。
+          # ⚠️ Microsoft.AI.DirectML NuGet 包里有 8 个变体 (x64-win 17MB / arm64-win 17MB /
+          # x64-xbox-scarlett-* 44MB 等)。必须按 *桌面 win* 架构路径过滤,不能按 size 选最大的!
+          # 之前误抓 Xbox Scarlett 版本 44MB,实际桌面 win 应该是 ~17MB。
+          $dmlArch = if ('${{ matrix.arch }}' -eq 'arm64') { 'arm64-win' }
+                     elseif ('${{ matrix.arch }}' -eq 'x86') { 'x86-win' }
+                     else { 'x64-win' }
+          Write-Host ">>> DirectML 期望路径片段: bin/$dmlArch/"
           $dml = Get-ChildItem -Path "build" -Recurse -Filter "DirectML.dll" -ErrorAction SilentlyContinue |
-                 Sort-Object Length -Descending | Select-Object -First 1
+                 Where-Object { $_.FullName -match "[\\/]bin[\\/]$dmlArch[\\/]" } |
+                 Select-Object -First 1
+          # 兜底:如果找不到匹配 arch 的,也不能傻选 Xbox 那个,选第一个 *-win/ 路径的
+          if (-not $dml) {
+            Write-Host "::warning::没找到 bin/$dmlArch/ DirectML.dll,降级到第一个 *-win/ 变体 (跳过 xbox)"
+            $dml = Get-ChildItem -Path "build" -Recurse -Filter "DirectML.dll" -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -match "[\\/]bin[\\/][^\\/]+-win[\\/]" -and $_.FullName -notmatch "xbox" } |
+                   Select-Object -First 1
+          }
           $dmlInfo = "DirectML.dll: (none — CPU build)"
           if ($dml) {
             Copy-Item $dml.FullName "artifacts\" -Force
