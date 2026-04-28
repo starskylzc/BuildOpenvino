@@ -152,6 +152,9 @@ def main():
     # ORT session — 用 CPU EP 跨平台一致
     opts = ort.SessionOptions()
     opts.log_severity_level = 3
+    # ORT_ENABLE_BASIC 跳过 NhwcTransformer (linux-arm64 PyPI wheel 的 NHWC MaxPool
+    # opset 11 kernel 缺,默认 ORT_ENABLE_ALL 会触发 NotImplemented 报错)
+    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
     sess = ort.InferenceSession(MODEL, opts, providers=["CPUExecutionProvider"])
     print(f"  Active EP: {sess.get_providers()}")
 
