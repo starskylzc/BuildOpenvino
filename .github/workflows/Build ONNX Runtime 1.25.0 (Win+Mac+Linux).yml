@@ -575,6 +575,17 @@ jobs:
               source "$OV_ROOT/setupvars.sh"
               echo "INTEL_OPENVINO_DIR=$INTEL_OPENVINO_DIR"
 
+              # ORT 1.25 OpenVINO provider 用了 std::from_chars 但漏了 #include <charconv>,
+              # gcc-11 编译时报 "from_chars is not a member of std"。给所有用 from_chars 的
+              # OpenVINO source 头部插入 #include <charconv>。
+              for f in onnxruntime/core/providers/openvino/exceptions.h \
+                       onnxruntime/core/providers/openvino/backend_manager.cc; do
+                if [ -f "$f" ] && ! grep -q "^#include <charconv>" "$f"; then
+                  echo ">>> patching $f to include <charconv>"
+                  sed -i "1i#include <charconv>" "$f"
+                fi
+              done
+
               # --parallel 2 限并行避免 OOM (GHA 7GB 内存,OpenVINO build 单文件峰值~3GB)
               python3 tools/ci_build/build.py \
                 --build_dir build \
