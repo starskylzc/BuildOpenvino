@@ -1,48 +1,32 @@
-name: Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)
+name: Build ORT 1.25.0 Desktop (Win + Mac, GPU/iGPU/CPU)
 
 # 目的：
-#   一个 workflow 一次性产出三平台桌面端 ORT v1.25.0 native 二进制。
-#   覆盖 GPU + iGPU + CPU,不含服务器场景 (Ascend/海光DCU/Instinct 等服务器加速卡不做)。
+#   一个 workflow 一次性产出 Windows + macOS 桌面端 ORT v1.25.0 native 二进制。
+#   覆盖 GPU + iGPU + CPU,不含服务器场景。
 #
-# 平台 / EP 完整覆盖矩阵：
-#   ┌─────────────────────────┬──────────────┬──────────────────┬──────────────┬───────────┐
-#   │ Target                  │ OS Floor     │ GPU 覆盖         │ EP           │ glibc     │
-#   ├─────────────────────────┼──────────────┼──────────────────┼──────────────┼───────────┤
-#   │ win-x64-dml             │ Win 10 1903  │ NV/AMD/Intel/iGPU│ DML + CPU    │ —         │
-#   │ win-x86-cpu             │ Win 10 1903  │ —                │ CPU          │ —         │
-#   │ win-arm64-dml           │ Win 10 1903  │ Snapdragon Adreno│ DML + CPU    │ —         │
-#   │ osx-x64-coreml          │ macOS 10.15  │ AMD Pro/Intel iGPU│ CoreML + CPU│ —         │
-#   │ osx-arm64-coreml        │ macOS 11.0   │ Apple GPU + ANE  │ CoreML + CPU │ —         │
-#   │ linux-x64-cuda          │ Ubuntu 22.04 │ NVIDIA dGPU      │ CUDA + CPU   │ 2.35      │
-#   │ linux-x64-rocm          │ Ubuntu 22.04 │ AMD Radeon dGPU  │ ROCm + CPU   │ 2.35      │
-#   │ linux-x64-openvino      │ ov2025.4.1   │ Intel iGPU/Arc   │ OpenVINO+CPU │ 2.35      │
-#   │ linux-x64-cpu           │ ubuntu:18.04 │ —                │ CPU          │ 2.27      │
-#   │ linux-arm64-cpu         │ ubuntu:18.04 │ —                │ CPU          │ 2.27      │
-#   └─────────────────────────┴──────────────┴──────────────────┴──────────────┴───────────┘
+# 平台 / EP 覆盖矩阵 (5 档 self-build):
+#   ┌─────────────────────────┬──────────────┬──────────────────┬──────────────┐
+#   │ Target                  │ OS Floor     │ GPU 覆盖         │ EP           │
+#   ├─────────────────────────┼──────────────┼──────────────────┼──────────────┤
+#   │ win-x64-dml             │ Win 10 1903  │ NV/AMD/Intel/iGPU│ DML + CPU    │
+#   │ win-x86-cpu             │ Win 10 1903  │ —                │ CPU          │
+#   │ win-arm64-dml           │ Win 10 1903  │ Snapdragon Adreno│ DML + CPU    │
+#   │ osx-x64-coreml          │ macOS 10.15  │ AMD Pro/Intel iGPU│ CoreML + CPU│
+#   │ osx-arm64-coreml        │ macOS 11.0   │ Apple GPU + ANE  │ CoreML + CPU │
+#   └─────────────────────────┴──────────────┴──────────────────┴──────────────┘
 #
-# 跟 OpenCvSharp 4.10.0 完全对齐 (10 档 archs):
-#   - Win x64/x86/arm64 + macOS x64/arm64 + Linux 5 EP variants
-#   - Linux CPU floor glibc 2.27 (ubuntu:18.04 docker)
-#   - actions/checkout@v6, actions/upload-artifact@v7, ubuntu-24.04-arm runner
+# Linux 不在 self-build 范围:
+#   linux-x64 / linux-aarch64 / linux-x64-gpu(CUDA+TRT) / OpenVINO / ROCm 等
+#   全部直接使用官方 onnxruntime v1.25.0 release tgz
+#   (https://github.com/microsoft/onnxruntime/releases/tag/v1.25.0)。
+#   官方 release glibc 2.27,信创全适配,比我们自建 manylinux_2_28 还宽。
 #
-# Linux glibc 策略:
-#   - CPU 档 (x64 + arm64) 都用 ubuntu:18.04 (glibc 2.27),覆盖最广:
-#     Ubuntu 18.04+ / 中标麒麟 V7+ / 银河麒麟 V10 全系 / 统信 UOS V20+ / RHEL 7+
-#     最终用 manylinux_2_28 (glibc 2.28),内置 cp311-cp311 跟全平台统一 Python 3.11
-#   - GPU 加速档 (cuda/rocm/openvino) 用 Ubuntu 22.04 base (glibc 2.35),
-#     SDK 本身针对 Ubuntu 22.04 编,降版本不可行
+# Tooling:
+#   - actions/checkout@v6, actions/upload-artifact@v7
 #
 # DirectML.dll "自动版本匹配" 策略：
 #   ORT 编译时自动从 NuGet 拉取 DirectML.dll,跟 onnxruntime.dll 同源 ship。
 #   绝对不会出现客户端 DML 版本不匹配。
-#
-# CUDA / cuDNN 自带:
-#   linux-x64-cuda artifact 内附带 CUDA 12 cudart + cuBLAS + cuDNN 9 runtime .so,
-#   客户端不需要自己装 CUDA Toolkit。
-#
-# ROCm 自带:
-#   linux-x64-rocm artifact 内附带 ROCm 6.2 关键 runtime .so,
-#   客户端只需要 AMD 驱动 + amdgpu kmod,不需要装完整 ROCm Toolkit。
 
 on:
   workflow_dispatch:
@@ -85,10 +69,10 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          # arch:    x64/arm64/x86_64       ORT build.py / cmake 用的 arch 名 (注意 macOS 用 x86_64)
-          # ep:      dml/coreml/cuda/rocm/openvino/cpu
+          # arch:    x64/x86/arm64/x86_64   ORT build.py / cmake 用的 arch 名 (注意 macOS 用 x86_64)
+          # ep:      dml/coreml/cpu
           # runner:  GHA 主机
-          # docker:  容器 image (空表示直接在 runner 上跑)
+          # docker:  保留字段 (Win/Mac 不用容器,固定空串;字段保留是为了矩阵结构稳定)
           # deploy_target / xcode_version: 仅 macOS 用
           # artifact_name: 上传产物名
 
@@ -138,13 +122,12 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Setup Python (non-linux only)
-        if: matrix.platform != 'linux'
+      - name: Setup Python
         uses: actions/setup-python@v6
         with:
-          # 全平台统一 Python 3.11 — 所有 archs 都支持 (包含 Windows ARM64)。
+          # 全平台统一 Python 3.11 — Win x64/x86/arm64 + macOS x64/arm64 都支持。
           # 3.10 在 Win ARM64 没官方 wheel,3.11 是 Win ARM64 首个支持版本,所以
-          # 取 3.11 作为最低公共分母,Win/Mac/Linux/manylinux 一致。
+          # 取 3.11 作为最低公共分母,Win/Mac 一致。
           python-version: '3.11'
 
       # ============================================================
@@ -231,15 +214,6 @@ jobs:
           pip install "cmake>=3.28,<4" "numpy<2"
           if ! command -v ninja &>/dev/null; then brew install ninja; fi
           cmake --version
-
-      # OpenVINO 走 Intel 官方 dev Docker 镜像 (openvino/ubuntu22_dev:2025.4.1):
-      #   - OpenVINO 预装 /opt/intel/openvino_2025
-      #   - 包含 setupvars.sh / OpenVINOConfig.cmake / 全部 plugin
-      #   - 跨发布版本路径稳定,不需要 host 上装 deps
-
-      # arm64 cpu 改用 manylinux_2_28_aarch64 容器 (glibc 2.28),
-      # 覆盖银河麒麟 V10 SP1 ARM / 统信 UOS V20 ARM,无需在 host 装 deps。
-      # (容器内已有 gcc/g++/Python/CMake)
 
       # ============================================================
       # 4. macOS-only: 校验 ORT 1.25 的内置 chrono guard 是否生效
@@ -347,291 +321,6 @@ jobs:
               onnxruntime_BUILD_UNIT_TESTS=OFF \
               onnxruntime_BUILD_BENCHMARKS=OFF
 
-      # ---- Linux x64 CUDA (in nvidia/cuda container) ----
-      - name: Build (Linux x64 CUDA, in container)
-        if: matrix.platform == 'linux' && matrix.ep == 'cuda'
-        shell: bash
-        run: |
-          docker run --rm --user root \
-            -v "$(pwd):/work" -w /work \
-            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
-            "${{ matrix.docker }}" \
-            bash -c '
-              set -ex
-              apt-get update -y
-              apt-get install -y --no-install-recommends \
-                build-essential ninja-build pkg-config \
-                libssl-dev libcurl4-openssl-dev zlib1g-dev \
-                python3 python3-pip python3-dev \
-                protobuf-compiler libprotobuf-dev \
-                git ca-certificates
-              # Ubuntu 22.04 内置 pip 22.0,先升 pip 再安装 (旧 pip 不识别 --break-system-packages,
-              # Ubuntu 22.04 也没启用 PEP 668,所以不需要这个标志)
-              python3 -m pip install --upgrade pip
-              # psutil:让 ORT build.py 自动估算 nvcc 并发 (没装会警告并限到单线程)
-              python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
-
-              # GHA 标准 runner 7 GB 内存,并行度限 2 防 OOM (CUDA 编译单线程峰值 3~4 GB)
-              # 用 --parallel 2 (而不是 --parallel 默认无限),既快又不会 OOM kill
-              python3 tools/ci_build/build.py \
-                --build_dir build \
-                --config ${{ inputs.build_type }} \
-                --use_cuda \
-                --cuda_home /usr/local/cuda \
-                --cudnn_home /usr/lib/x86_64-linux-gnu \
-                --parallel 2 \
-                --nvcc_threads 1 \
-                --build_shared_lib \
-                --skip_tests \
-                --skip_submodule_sync \
-                --compile_no_warning_as_error \
-                --allow_running_as_root \
-                --cmake_extra_defines \
-                  onnxruntime_BUILD_UNIT_TESTS=OFF \
-                  onnxruntime_BUILD_BENCHMARKS=OFF
-            '
-
-      # ---- Linux x64 ROCm/MIGraphX (in rocm/dev container) ----
-      # ORT 1.25 起完全删除了 --use_rocm 标志 (issue #26801),
-      # AMD GPU 加速必须通过 --use_migraphx 路径 (MIGraphX 是 AMD 的 ML 框架,基于 ROCm)。
-      # rocm/dev-ubuntu-22.04:*-complete 容器自带 MIGraphX,无需额外装。
-      - name: Free disk space (Linux ROCm — 镜像 ~25 GB)
-        if: matrix.platform == 'linux' && matrix.ep == 'rocm'
-        shell: bash
-        run: |
-          # GHA 标准 runner 默认 14 GB 空闲, ROCm complete 镜像 25+ GB 装不下
-          echo ">>> Disk before:"
-          df -h /
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
-          sudo docker image prune -af || true
-          sudo apt-get clean
-          echo ">>> Disk after:"
-          df -h /
-
-      - name: Build (Linux x64 ROCm/MIGraphX, in container)
-        if: matrix.platform == 'linux' && matrix.ep == 'rocm'
-        shell: bash
-        run: |
-          docker run --rm --user root \
-            -v "$(pwd):/work" -w /work \
-            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
-            "${{ matrix.docker }}" \
-            bash -c '
-              set -ex
-              # git "dubious ownership" — 容器内 root 跑挂载的 host 目录,git 会拒
-              git config --global --add safe.directory "*" || true
-
-              apt-get update -y
-              apt-get install -y --no-install-recommends \
-                build-essential ninja-build pkg-config \
-                libssl-dev libcurl4-openssl-dev zlib1g-dev \
-                python3 python3-pip python3-dev \
-                protobuf-compiler libprotobuf-dev \
-                git ca-certificates
-              python3 -m pip install --upgrade pip
-              python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
-
-              # 试多种 migraphx 包名 (-complete 不一定带 dev headers)
-              apt-get install -y migraphx-dev || true
-              apt-get install -y migraphx || true
-              apt-get install -y libmigraphx-dev || true
-              apt-get install -y rocm-dev rocm-llvm rocm-runtime || true
-
-              # 检查 headers 是否真的装上了
-              echo ">>> 查 migraphx headers:"
-              find /opt/rocm -name "version.h" -path "*migraphx*" 2>/dev/null | head -5
-              find /opt/rocm -name "migraphx.h" 2>/dev/null | head -5
-              echo ">>> /opt/rocm/include/ 顶层目录:"
-              ls /opt/rocm/include/ 2>/dev/null | head -30
-
-              # 如果 migraphx headers 还不在,从 GitHub 下载并解压源码 headers
-              if [ ! -f /opt/rocm/include/migraphx/version.h ]; then
-                echo "::warning::migraphx headers 系统包没装好,从 GitHub 拉源码 headers"
-                cd /tmp
-                # ROCm 6.2.x 对应 MIGraphX rocm-6.2.4 tag (跟容器 ROCm 版本一致)
-                git clone --depth 1 --branch rocm-6.2.4 https://github.com/ROCm/AMDMIGraphX.git || \
-                  git clone --depth 1 https://github.com/ROCm/AMDMIGraphX.git
-                # 把 src/include 软链到 /opt/rocm/include
-                mkdir -p /opt/rocm/include
-                if [ -d AMDMIGraphX/src/include/migraphx ]; then
-                  cp -rn AMDMIGraphX/src/include/migraphx /opt/rocm/include/ || true
-                  echo ">>> 已 cp migraphx headers 到 /opt/rocm/include/migraphx"
-                fi
-                cd /work
-              fi
-
-              # 找 migraphx version 头文件 — ROCm 6.2.4 之后 (MIGraphX 2.10+) 把
-              # version.h 改成 version.hpp 或类似变种,ORT 1.25 source 仍 #include 老名字。
-              # 自动检测实际位置,如果不是 version.h 就建个 shim 让 ORT 能找到。
-              VERSION_PATH=""
-              if [ -f /opt/rocm/include/migraphx/version.h ]; then
-                VERSION_PATH="/opt/rocm/include/migraphx/version.h"
-                echo "✅ found version.h directly"
-              else
-                # 找替代名字 (version.hpp / version_2.h / 任何 migraphx 目录下的 version*)
-                CANDIDATE=$(find /opt/rocm/include/migraphx -maxdepth 1 -iname "version*" 2>/dev/null | head -1)
-                if [ -n "$CANDIDATE" ]; then
-                  echo "⚠️ version.h 不在,但找到 $CANDIDATE,建 shim"
-                  # 用 printf 一行避免 HEREDOC 缩进问题撞 YAML literal block
-                  REAL_NAME="${CANDIDATE##*/}"
-                  printf "#pragma once\n#include \"%s\"\n" "$REAL_NAME" \
-                    > /opt/rocm/include/migraphx/version.h
-                  VERSION_PATH="/opt/rocm/include/migraphx/version.h (shim → $REAL_NAME)"
-                fi
-              fi
-
-              if [ -z "$VERSION_PATH" ]; then
-                echo "::error::migraphx 任何 version 文件都不在,migraphx-dev 没装好"
-                echo ">>> /opt/rocm/include/migraphx/ 内容 (前 30 项):"
-                ls -la /opt/rocm/include/migraphx/ 2>/dev/null | head -30 || echo "  (目录不存在)"
-                exit 1
-              fi
-              echo "✅ migraphx version header at: $VERSION_PATH"
-
-              python3 tools/ci_build/build.py \
-                --build_dir build \
-                --config ${{ inputs.build_type }} \
-                --use_migraphx \
-                --migraphx_home /opt/rocm \
-                --parallel 2 \
-                --build_shared_lib \
-                --skip_tests \
-                --skip_submodule_sync \
-                --compile_no_warning_as_error \
-                --allow_running_as_root \
-                --cmake_extra_defines \
-                  onnxruntime_BUILD_UNIT_TESTS=OFF \
-                  onnxruntime_BUILD_BENCHMARKS=OFF \
-                  CMAKE_INCLUDE_PATH=/opt/rocm/include
-            '
-
-      # ---- Linux x64 OpenVINO (在 openvino/ubuntu22_dev:2025.4.1 容器内) ----
-      # 该镜像默认非 root user (uid 1000),sudo 需要密码。
-      # 加 --user root 直接以 root 身份运行容器,apt-get install 才能装系统包。
-      - name: Build (Linux x64 OpenVINO, in container)
-        if: matrix.platform == 'linux' && matrix.ep == 'openvino'
-        shell: bash
-        run: |
-          docker run --rm --user root \
-            -v "$(pwd):/work" -w /work \
-            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
-            "${{ matrix.docker }}" \
-            bash -c '
-              set -ex
-              git config --global --add safe.directory "*" || true
-
-              apt-get update -y
-              # gcc 11+ 才有完整 <charconv>::from_chars (整数和浮点),
-              # OpenVINO container 默认 gcc 9,ORT 1.25 用了新的 from_chars overload 编不过。
-              apt-get install -y --no-install-recommends \
-                build-essential ninja-build pkg-config \
-                gcc-11 g++-11 \
-                libssl-dev libcurl4-openssl-dev zlib1g-dev \
-                python3 python3-pip python3-dev \
-                protobuf-compiler libprotobuf-dev \
-                git ca-certificates
-              update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 \
-                --slave /usr/bin/g++ g++ /usr/bin/g++-11 \
-                --slave /usr/bin/gcov gcov /usr/bin/gcov-11
-              update-alternatives --auto gcc
-              # update-alternatives 改的是 /usr/bin/gcc,但 cmake/build.py 走 /usr/bin/cc
-              # (默认还指向 gcc-9)。直接 export CC/CXX 更可靠,确保 ORT 用 gcc-11 编。
-              export CC=/usr/bin/gcc-11
-              export CXX=/usr/bin/g++-11
-              gcc --version
-              g++ --version
-              echo "CC=$CC, CXX=$CXX"
-              python3 -m pip install --upgrade pip
-              python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
-
-              # 镜像里 OpenVINO 路径定位 (Intel 通常装 /opt/intel/openvino 或 /opt/intel/openvino_2025)
-              OV_ROOT=""
-              for cand in /opt/intel/openvino /opt/intel/openvino_2025 /opt/intel/openvino_2025.4 /opt/intel/openvino_2025.4.1; do
-                if [ -d "$cand" ] && [ -f "$cand/setupvars.sh" ]; then
-                  OV_ROOT="$cand"
-                  break
-                fi
-              done
-              if [ -z "$OV_ROOT" ]; then
-                echo "::error::OpenVINO 在容器内找不到"
-                ls -la /opt/intel/ 2>/dev/null
-                exit 1
-              fi
-              echo ">>> OpenVINO root: $OV_ROOT"
-              source "$OV_ROOT/setupvars.sh"
-              echo "INTEL_OPENVINO_DIR=$INTEL_OPENVINO_DIR"
-
-              # ORT 1.25 OpenVINO provider 用了 std::from_chars 但漏了 #include <charconv>,
-              # gcc-11 编译时报 "from_chars is not a member of std"。给所有用 from_chars 的
-              # OpenVINO source 头部插入 #include <charconv>。
-              for f in onnxruntime/core/providers/openvino/exceptions.h \
-                       onnxruntime/core/providers/openvino/backend_manager.cc; do
-                if [ -f "$f" ] && ! grep -q "^#include <charconv>" "$f"; then
-                  echo ">>> patching $f to include <charconv>"
-                  sed -i "1i#include <charconv>" "$f"
-                fi
-              done
-
-              # --parallel 2 限并行避免 OOM (GHA 7GB 内存,OpenVINO build 单文件峰值~3GB)
-              python3 tools/ci_build/build.py \
-                --build_dir build \
-                --config ${{ inputs.build_type }} \
-                --use_openvino CPU \
-                --parallel 2 \
-                --build_shared_lib \
-                --skip_tests \
-                --skip_submodule_sync \
-                --compile_no_warning_as_error \
-                --allow_running_as_root \
-                --cmake_extra_defines \
-                  onnxruntime_BUILD_UNIT_TESTS=OFF \
-                  onnxruntime_BUILD_BENCHMARKS=OFF
-            '
-
-      # ---- Linux CPU (x64 + arm64 同一段:manylinux_2_28 容器,glibc 2.28 floor) ----
-      # 之前试过 ubuntu:18.04 (glibc 2.27) 跟 OpenCvSharp 严格对齐,但 deadsnakes 已停
-      # 维护 bionic 上 python3.9+,无法装 ORT 1.25 build.py 需要的 Python 3.9。
-      # 退回 manylinux_2_28 (glibc 2.28,基于 AlmaLinux 8) — 自带 Python 3.11 + gcc 14:
-      #   覆盖银河麒麟 V10 SP1+ / 统信 UOS V20+ / Anolis 8 / RHEL 8+ / Ubuntu 20.04+
-      #   信创主流全覆盖,只比 OpenCvSharp 高一档 (Ubuntu 18.04/Kylin V7 都 EOL,影响很小)
-      - name: Build (Linux CPU manylinux_2_28, in container)
-        if: matrix.platform == 'linux' && matrix.ep == 'cpu'
-        shell: bash
-        run: |
-          docker run --rm --user root \
-            -v "$(pwd):/work" -w /work \
-            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
-            "${{ matrix.docker }}" \
-            bash -c '
-              set -ex
-              git config --global --add safe.directory "*" || true
-
-              # manylinux_2_28 已预装 gcc/g++/cmake/ninja/python (用 cp311 跟其它平台统一 Python 3.11)
-              /opt/python/cp311-cp311/bin/pip install "cmake>=3.28,<4" "numpy<2" psutil
-              export PATH="/opt/python/cp311-cp311/bin:$PATH"
-              python3 --version
-              gcc --version
-              cmake --version
-
-              python3 tools/ci_build/build.py \
-                --build_dir build \
-                --config ${{ inputs.build_type }} \
-                --parallel 2 \
-                --build_shared_lib \
-                --skip_tests \
-                --skip_submodule_sync \
-                --compile_no_warning_as_error \
-                --allow_running_as_root \
-                --cmake_extra_defines \
-                  onnxruntime_BUILD_UNIT_TESTS=OFF \
-                  onnxruntime_BUILD_BENCHMARKS=OFF
-            '
-
       # ============================================================
       # 6. Verify (per-platform)
       # ============================================================
@@ -689,42 +378,6 @@ jobs:
             exit 1
           fi
           echo "✅ no FP to_chars symbols leaked"
-
-      - name: Verify - Linux
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          FILE="build/${{ inputs.build_type }}/libonnxruntime.so"
-          [ -f "$FILE" ] || (echo "::error::missing $FILE"; ls -la build/${{ inputs.build_type }}/; exit 1)
-          ls -lh "$FILE"
-
-          # glibc 版本检查
-          MAX_GLIBC=$(objdump -T "$FILE" 2>/dev/null \
-            | grep -oE "GLIBC_[0-9]+\.[0-9]+" \
-            | sort -u | sort -t_ -k2 -V | tail -1 || echo "GLIBC_unknown")
-          echo ">>> Highest GLIBC dependency in libonnxruntime.so: $MAX_GLIBC"
-
-          # 列出依赖
-          echo ">>> Direct DT_NEEDED:"
-          readelf -d "$FILE" | grep NEEDED || true
-
-          # ep 特定检查
-          if [ "${{ matrix.ep }}" = "cuda" ]; then
-            CUDA_PROV="build/${{ inputs.build_type }}/libonnxruntime_providers_cuda.so"
-            [ -f "$CUDA_PROV" ] || (echo "::error::CUDA provider missing"; exit 1)
-            echo "✅ CUDA EP: $(ls -lh $CUDA_PROV)"
-          fi
-          if [ "${{ matrix.ep }}" = "rocm" ]; then
-            # ORT 1.25 通过 --use_migraphx 路径,产物是 libonnxruntime_providers_migraphx.so
-            MIGX_PROV="build/${{ inputs.build_type }}/libonnxruntime_providers_migraphx.so"
-            [ -f "$MIGX_PROV" ] || (echo "::error::MIGraphX provider missing"; exit 1)
-            echo "✅ MIGraphX (AMD/ROCm) EP: $(ls -lh $MIGX_PROV)"
-          fi
-          if [ "${{ matrix.ep }}" = "openvino" ]; then
-            OV_PROV="build/${{ inputs.build_type }}/libonnxruntime_providers_openvino.so"
-            [ -f "$OV_PROV" ] || (echo "::error::OpenVINO provider missing"; exit 1)
-            echo "✅ OpenVINO EP: $(ls -lh $OV_PROV)"
-          fi
 
       # ============================================================
       # 7. Organize artifacts (per-platform)
@@ -791,183 +444,6 @@ jobs:
           EOF
           ls -lh artifacts/
 
-      - name: Organize artifacts (Linux) — bundle transitive deps via ldd
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          cp "build/${{ inputs.build_type }}/libonnxruntime.so" artifacts/
-          for f in build/${{ inputs.build_type }}/libonnxruntime_providers_*.so; do
-            [ -f "$f" ] && cp "$f" artifacts/
-          done
-
-          # ──────────────────────────────────────────────────────────────
-          # 通用 ldd 传递依赖打包器:
-          #   - 入口: artifacts/ 里所有 .so
-          #   - 迭代 ldd,把所有非系统、非驱动的 .so 复制到 artifacts/
-          #   - 排除项 (客户机器必须自己提供的):
-          #       glibc 系列: libc/libm/libdl/libpthread/librt/libresolv/libutil/libcrypt/ld-linux*
-          #       内核/VDSO: linux-vdso/linux-gate
-          #       GCC runtime: libgcc_s/libstdc++ (用户系统都有)
-          #       GPU 内核驱动 / userland 接驱动:
-          #         NVIDIA: libcuda.so / libnvidia-* (随 NVIDIA driver 一起,不能我们 ship)
-          #         AMD:    libdrm_amdgpu / libdrm  (随 amdgpu driver)
-          #         Intel:  libze_loader / libze_intel_gpu (随 Intel GPU 用户态)
-          # ──────────────────────────────────────────────────────────────
-
-          BUNDLER=$(cat <<'BUNDLER_EOF'
-          set -e
-          ARTIFACTS_DIR="/work/artifacts"
-          SEEN=$(mktemp)
-          for f in "$ARTIFACTS_DIR"/*.so*; do
-            [ -e "$f" ] && echo "$(basename "$f")" >> "$SEEN"
-          done
-
-          should_skip() {
-            case "$1" in
-              ld-linux-*|libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*) return 0 ;;
-              librt.so.*|libresolv.so.*|libutil.so.*|libnsl.so.*|libcrypt.so.*) return 0 ;;
-              linux-vdso.so.*|linux-gate.so.*) return 0 ;;
-              libgcc_s.so.*|libstdc++.so.*) return 0 ;;
-              # 驱动相关 (客户必装,不打包)
-              libcuda.so.*|libnvidia-*) return 0 ;;
-              libdrm.so.*|libdrm_amdgpu.so.*|libdrm_radeon.so.*) return 0 ;;
-              libze_loader.so.*|libze_intel_gpu.so.*) return 0 ;;
-              # X11/系统 GUI
-              libX11.so.*|libxcb.so.*|libGL.so.*|libEGL.so.*|libGLX.so.*) return 0 ;;
-            esac
-            return 1
-          }
-
-          # 多轮迭代直到没新依赖
-          ROUND=0
-          while true; do
-            ROUND=$((ROUND + 1))
-            ADDED=0
-            for f in "$ARTIFACTS_DIR"/*.so*; do
-              [ -e "$f" ] || continue
-              ldd "$f" 2>/dev/null | awk '/=>/ {print $3}' | while read -r dep; do
-                [ -z "$dep" ] && continue
-                [ ! -f "$dep" ] && continue
-                base=$(basename "$dep")
-                should_skip "$base" && continue
-                if ! grep -qx "$base" "$SEEN"; then
-                  cp "$dep" "$ARTIFACTS_DIR/" && \
-                    echo "  [round $ROUND] +$base ($(stat -c %s "$dep") bytes)"
-                  echo "$base" >> "$SEEN"
-                fi
-              done
-            done
-            CUR=$(wc -l < "$SEEN")
-            [ "$CUR" -eq "${PREV:-0}" ] && break
-            PREV=$CUR
-          done
-
-          echo ">>> Bundled $(ls "$ARTIFACTS_DIR"/*.so* 2>/dev/null | wc -l) shared libraries"
-          BUNDLER_EOF
-          )
-
-          # 所有 Linux 档现在都有 docker (cuda/rocm/openvino/cpu/arm64-cpu),
-          # 统一在容器内跑 BUNDLER,LD_LIBRARY_PATH + ldd 路径都准
-          docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
-            bash -c "$BUNDLER"
-
-          # GPU EP 必须把 plugin / 运行时插件单独捞出来 (dlopen 不走 ldd)
-          if [ "${{ matrix.ep }}" = "cuda" ]; then
-            # cuDNN 的所有子模块 (graph/cnn/adv/heuristic/engines_*) 都是 dlopen 的
-            docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
-              bash -c '
-                for sub in libcudnn_graph libcudnn_cnn libcudnn_adv libcudnn_ops \
-                           libcudnn_heuristic libcudnn_engines_precompiled libcudnn_engines_runtime_compiled; do
-                  find /usr/local/cuda /usr/lib/x86_64-linux-gnu -name "${sub}.so*" 2>/dev/null \
-                    | head -3 | xargs -I{} cp -n {} /work/artifacts/ 2>/dev/null || true
-                done
-                # 必要的 stub: cuda.so (driver stub for link, NOT for runtime!)
-                # 不打包 libcuda.so, 客户端必须有 NVIDIA driver
-              '
-          fi
-          if [ "${{ matrix.ep }}" = "rocm" ]; then
-            docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
-              bash -c '
-                # MIGraphX + ROCm backend 都是 dlopen,显式抓取
-                for lib in libmigraphx.so libmigraphx_c.so libmigraphx_onnx.so \
-                           libamd_comgr.so libhipfft.so librocfft.so libroctx64.so \
-                           librocm_smi64.so librocrand.so libhipsparse.so libhipblas.so; do
-                  find /opt/rocm -name "${lib}*" 2>/dev/null | head -2 | xargs -I{} cp -n {} /work/artifacts/ 2>/dev/null || true
-                done
-              '
-          fi
-          if [ "${{ matrix.ep }}" = "openvino" ]; then
-            docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
-              bash -c '
-                # 容器内定位 OpenVINO 安装路径
-                OV_ROOT=""
-                for cand in /opt/intel/openvino /opt/intel/openvino_2025 /opt/intel/openvino_2025.4 /opt/intel/openvino_2025.4.1; do
-                  [ -d "$cand" ] && [ -f "$cand/setupvars.sh" ] && OV_ROOT="$cand" && break
-                done
-                if [ -z "$OV_ROOT" ]; then
-                  echo "::warning::OpenVINO 路径在容器内找不到,plugin 可能漏抓"
-                  exit 0
-                fi
-                LIB="$OV_ROOT/runtime/lib/intel64"
-                # OpenVINO plugins.xml + Intel plugins + frontend 都是 dlopen 的,ldd 抓不到
-                cp -n "$LIB/plugins.xml" /work/artifacts/ 2>/dev/null || true
-                cp -n "$LIB"/libopenvino_intel_*_plugin.so* /work/artifacts/ 2>/dev/null || true
-                cp -n "$LIB"/libopenvino_*_frontend.so* /work/artifacts/ 2>/dev/null || true
-                cp -n "$LIB"/libopenvino_auto_*plugin.so* /work/artifacts/ 2>/dev/null || true
-                cp -n "$LIB"/libopenvino_hetero_plugin.so* /work/artifacts/ 2>/dev/null || true
-                # TBB threading runtime
-                TBB="$OV_ROOT/runtime/3rdparty/tbb/lib"
-                [ -d "$TBB" ] && cp -n "$TBB"/libtbb.so* "$TBB"/libtbbmalloc.so* /work/artifacts/ 2>/dev/null || true
-              '
-          fi
-
-          # 自动扫描所有 artifact .so 的最高 GLIBC 依赖版本 (取联合上界)
-          GLIBC_FLOOR=$(for f in artifacts/*.so*; do
-              [ -f "$f" ] && objdump -T "$f" 2>/dev/null \
-                | grep -oE "GLIBC_[0-9]+\.[0-9]+";
-            done | sort -u | sort -t_ -k2 -V | tail -1 || echo "unknown")
-
-          # 客户端硬性要求 (.so 不打包的部分) + 兼容 OS 列表
-          if [ "${{ matrix.ep }}" = "cuda" ]; then
-            CLIENT_REQUIRES="NVIDIA driver >= 525 (libcuda.so) — 不在 artifact 里"
-            OS_COMPAT="Ubuntu 22.04+ / Kylin V10 SP3+ / 任何 glibc>=2.35 + NVIDIA driver"
-          elif [ "${{ matrix.ep }}" = "rocm" ]; then
-            CLIENT_REQUIRES="amdgpu kernel module + libdrm_amdgpu — 不在 artifact 里"
-            OS_COMPAT="Ubuntu 22.04+ / 任何 glibc>=2.35 + amdgpu driver"
-          elif [ "${{ matrix.ep }}" = "openvino" ]; then
-            CLIENT_REQUIRES="(可选) Intel GPU 驱动 (i915/Xe kmod) 用于 GPU 推理"
-            OS_COMPAT="Ubuntu 22.04+ / Kylin V10 SP3+ / 任何 glibc>=2.35"
-          else
-            CLIENT_REQUIRES="无 (CPU only,零外部依赖)"
-            if [ "${{ matrix.arch }}" = "x64" ]; then
-              OS_COMPAT="银河麒麟 V10 SP1+ x64 / 统信 UOS V20 / Anolis 8 / RHEL 8 / Ubuntu 20.04+ (任何 glibc>=2.28)"
-            else
-              OS_COMPAT="银河麒麟 V10 SP1+ aarch64 / 飞腾桌面 / 鲲鹏桌面 (任何 aarch64 glibc>=2.28)"
-            fi
-          fi
-
-          cat > artifacts/version.txt <<EOF
-          ORT Version:     $ORT_VERSION
-          Platform:        Linux
-          Arch:            ${{ matrix.arch }}
-          EP:              ${{ matrix.ep }}
-          glibc Floor:     $GLIBC_FLOOR
-          OS Compatibility: $OS_COMPAT
-          Container:       ${{ matrix.docker }}
-          Runner:          ${{ matrix.runner }}
-          Build Type:      ${{ inputs.build_type }}
-
-          Bundled libs:    $(ls artifacts/*.so* 2>/dev/null | wc -l) files
-          Total size:      $(du -sh artifacts/ | awk '{print $1}')
-          Client requires: $CLIENT_REQUIRES
-          EOF
-
-          echo ">>> Final artifacts:"
-          ls -lh artifacts/
-          echo ">>> Total size:"
-          du -sh artifacts/
-
       # ============================================================
       # 8. Smoke load test
       # ============================================================
@@ -993,27 +469,6 @@ jobs:
           assert ptr, 'OrtGetApiBase returned NULL'
           print(f'✅ OrtGetApiBase = {hex(ptr)}')
           "
-
-      - name: Smoke load (Linux container)
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
-            bash -c '
-              # 容器里有 python 用容器的,没 python 用 ldd 兜底
-              if command -v python3 >/dev/null 2>&1; then
-                python3 -c "
-          import ctypes
-          lib = ctypes.CDLL(\"/work/artifacts/libonnxruntime.so\")
-          fn = lib.OrtGetApiBase; fn.restype = ctypes.c_void_p
-          assert fn(), \"OrtGetApiBase returned NULL\"
-          print(\"✅ OrtGetApiBase loaded\")
-          "
-              else
-                ldd /work/artifacts/libonnxruntime.so | head -20
-                echo "✅ ldd shows libonnxruntime.so resolves"
-              fi
-            '
 
       # ============================================================
       # 9. Upload
