@@ -62,6 +62,9 @@ env:
   OPENCV_VERSION: "4.10.0"
   OPENCVSHARP_REF: "352c778e2034a05b42d0b472a7930aef47147b14"
   BUILD_LIST: "core,imgproc,videoio"
+  # ilammy/msvc-dev-cmd@v1 还在 Node 20,2026-06-02 后 GHA 默认 Node 24,
+  # 提前对齐避免 deprecation warning 阻塞 "no warnings" 目标。
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ============================================================

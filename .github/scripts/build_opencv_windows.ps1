@@ -126,6 +126,20 @@ Write-Host "==> Build OpenCV static (Windows $TargetArch)"
 $SRC_OPENCV = "$SRC_SLASH/opencv"
 $SRC_CONTRIB = "$SRC_SLASH/opencv_contrib/modules"
 $BUILD_OPENCV = "$B_DIR_SLASH/opencv"
+
+# ── ARM64 特殊处理 ──────────────────────────────────────
+# OpenCV 4.10 的 CPU dispatch 默认会编 SSE2/SSE3/AVX 路径并尝试 include emmintrin.h。
+# MSVC 14.44+ (2026 年 4 月起) 严格了 emmintrin.h 的架构检查,导致 ARM64 编译时
+# emmintrin.h fatal error C1189。
+# 修法:CPU_BASELINE=NEON,CPU_DISPATCH 留空,告诉 OpenCV 只编 NEON 路径,
+#       不要尝试任何 x86 SIMD dispatch。
+$CpuArgs = @()
+if ($TargetArch -eq "arm64") {
+  $CpuArgs += "-D CPU_BASELINE=NEON"
+  $CpuArgs += "-D CPU_DISPATCH="
+  Write-Host ">>> ARM64 build: CPU_BASELINE=NEON, no x86 SIMD dispatch"
+}
+
 cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D OPENCV_EXTRA_MODULES_PATH="$SRC_CONTRIB" `
@@ -150,7 +164,8 @@ cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Ninja" `
   -D WITH_JASPER=OFF `
   -D WITH_GPHOTO2=OFF `
   -D WITH_1394=OFF `
-  -D VIDEOIO_ENABLE_PLUGINS=OFF
+  -D VIDEOIO_ENABLE_PLUGINS=OFF `
+  $CpuArgs
 
 
 ninja -C "$BUILD_OPENCV"
