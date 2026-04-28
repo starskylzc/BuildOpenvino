@@ -121,7 +121,7 @@ jobs:
       # 1. Checkout (所有平台共用)
       # ============================================================
       - name: Checkout ONNX Runtime ${{ env.ORT_VERSION }}
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v5
         with:
           repository: microsoft/onnxruntime
           ref: ${{ env.ORT_VERSION }}
@@ -130,7 +130,7 @@ jobs:
 
       - name: Setup Python (non-linux only)
         if: matrix.platform != 'linux'
-        uses: actions/setup-python@v5.6.0
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -847,7 +847,7 @@ jobs:
       # 9. Upload
       # ============================================================
       - name: Upload artifact
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact_name }}
           path: artifacts/
