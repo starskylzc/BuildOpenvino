@@ -83,7 +83,7 @@ jobs:
           # 官方 Linux:
           # - linux-x64 用 GPU 包 (CPU EP 内置 + CUDA12 + TensorRT plugin),客户机有 NVIDIA driver 自动启用 GPU
           # - linux-aarch64 只有 CPU 包 (官方没出 ARM GPU 版,行业现实 ARM+GPU 极少)
-          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"source":"official","ort_official_url":"https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-x64-gpu-1.25.0.tgz","ort_official_dir":"onnxruntime-linux-x64-gpu-1.25.0","ort_lib":"libonnxruntime.so","ort_extra":"libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so libonnxruntime_providers_tensorrt.so","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"source":"official","ort_official_url":"https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-x64-gpu-1.25.0.tgz","ort_official_dir":"onnxruntime-linux-x64-gpu-1.25.0","ort_lib":"libonnxruntime.so","ort_extra":"libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
           LINUX_AARCH64='{"name":"linux-aarch64","runner":"ubuntu-24.04-arm","rid":"linux-arm64","publish_self_contained":false,"source":"official","ort_official_url":"https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-aarch64-1.25.0.tgz","ort_official_dir":"onnxruntime-linux-aarch64-1.25.0","ort_lib":"libonnxruntime.so","ort_extra":"libonnxruntime_providers_shared.so","ocv_artifact":"linux-aarch64","ocv_lib":"libOpenCvSharpExtern.so"}'
 
           case "${{ inputs.target_set }}" in
@@ -183,15 +183,24 @@ jobs:
           if [ -f "$SRC/libonnxruntime.so.1.25.0" ]; then
             cp "$SRC/libonnxruntime.so.1.25.0" downloads/ort/libonnxruntime.so
           fi
-          # 2. EP plugin (libonnxruntime_providers_*.so) — real files,直接 cp
-          cp "$SRC"/libonnxruntime_providers_*.so downloads/ort/ 2>/dev/null || true
+          # 2. EP plugin (libonnxruntime_providers_*.so) — 排除 tensorrt (用户决定不 ship TRT)
+          for so in "$SRC"/libonnxruntime_providers_*.so; do
+            [ -e "$so" ] || continue
+            base=$(basename "$so")
+            # 跳过 tensorrt plugin (advanced users 自带 TRT 时也不用本仓库 plugin,
+            # 直接用 ORT.Gpu NuGet 一致更简单)
+            [ "$base" = "libonnxruntime_providers_tensorrt.so" ] && continue
+            cp "$so" downloads/ort/
+          done
           echo ">>> ORT official contents (单一 libonnxruntime.so + plugins):"
           ls -la downloads/ort
 
-      # ── linux-x64 only:bundle CUDA runtime + cuDNN + TensorRT 给 NVIDIA 客户机零配置 ──
-      # 客户机只需装 NVIDIA driver (libcuda.so.1 来自 driver),无需装 CUDA Toolkit / cuDNN / TensorRT。
-      # Source: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 + nvcr.io/nvidia/tensorrt 官方镜像。
-      - name: Bundle CUDA 12 + cuDNN 9 + TensorRT 10 runtime (linux-x64 only)
+      # ── linux-x64 only:bundle CUDA runtime + cuDNN 给 NVIDIA 客户机零配置 ──
+      # 客户机只需装 NVIDIA driver (libcuda.so.1 来自 driver) → CUDA EP 零配置启用。
+      # 不 bundle TensorRT (~800MB):TRT EP 是 advanced users 路径,自己装 TensorRT 即可。
+      # libonnxruntime_providers_tensorrt.so plugin 文件保留 (850KB),customer 自带 TRT 时仍可用。
+      # Source: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 (官方,稳定)。
+      - name: Bundle CUDA 12 + cuDNN 9 runtime (linux-x64 only,for NVIDIA zero-config)
         if: matrix.name == 'linux-x64'
         shell: bash
         run: |
@@ -205,7 +214,6 @@ jobs:
               # 用 -L 解 symlink,真正拷贝 .so 真身。.so.X.Y.Z 文件名是真身,.so.X 是 symlink。
               # CUDA 12 runtime
               for lib in libcudart.so libcublas.so libcublasLt.so libcurand.so libcufft.so; do
-                # 先找带版本号的真身 (libcudart.so.12.4.131 等)
                 real=$(find /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu -name "${lib}.[0-9]*" -type f 2>/dev/null | head -1)
                 [ -z "$real" ] && real=$(find /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu -name "${lib}*" 2>/dev/null | tail -1)
                 if [ -n "$real" ]; then
@@ -218,7 +226,7 @@ jobs:
                   fi
                 fi
               done
-              # cuDNN 9 (libcudnn.so.9 + 子模块 libcudnn_*.so.9 都是 dlopen)
+              # cuDNN 9 (libcudnn.so.9 + 子模块 libcudnn_*.so.9 都是 dlopen 用)
               for f in /usr/lib/x86_64-linux-gnu/libcudnn*.so.9*; do
                 [ -f "$f" ] || continue
                 cp -L "$f" /out/
@@ -228,21 +236,7 @@ jobs:
             '
 
           echo ""
-          echo ">>> 拉 TensorRT 10 runtime (用 PyPI nvidia-tensorrt-cu12 wheel,免 NGC 注册)"
-          # PyPI nvidia-tensorrt-cu12 内带 libnvinfer.so.10 + libnvonnxparser.so.10
-          python3 -m pip install --target /tmp/trt nvidia-tensorrt-cu12 2>/dev/null || true
-          if [ -d /tmp/trt ]; then
-            find /tmp/trt -name "libnvinfer.so.10" -exec cp -L {} downloads/ort/ \; 2>/dev/null || true
-            find /tmp/trt -name "libnvonnxparser.so.10" -exec cp -L {} downloads/ort/ \; 2>/dev/null || true
-            find /tmp/trt -name "libnvinfer_plugin.so.10" -exec cp -L {} downloads/ort/ \; 2>/dev/null || true
-          fi
-          # PyPI 没拉到也无所谓 — 客户没用 TensorRT EP 不影响
-          if ! ls downloads/ort/libnvinfer.so.10 2>/dev/null; then
-            echo "::warning::TensorRT 10 runtime 没 bundle 进 deploy (PyPI wheel 拉失败),客户用 TRT EP 需自装"
-          fi
-
-          echo ""
-          echo ">>> 最终 downloads/ort/ (linux-x64 含 CUDA bundle):"
+          echo ">>> linux-x64 bundle 内容 (无 TensorRT,advanced users 自装):"
           ls -la downloads/ort/
           du -sh downloads/ort/
 
@@ -394,12 +388,12 @@ jobs:
 
   # ── Stage:全 7 平台 verify ✅ 后,汇总成单个 deploy/ artifact ──
   # 客户用 ./artifacts/download_deploy.sh 一键拉这个 artifact 即得完整 deploy/<7 平台>/
+  # 只在 target_set=all 时跑 (单平台 trigger 只是诊断用,不应触发 stage-deploy)
   stage:
     name: stage-deploy
     needs: verify
     runs-on: ubuntu-latest
-    # 仅在 verify 全 7 ✅ 后才跑 (任意 fail 都会 skip 这个 job,不会 ship 部分通过的产物)
-    if: success()
+    if: success() && inputs.target_set == 'all'
     steps:
       - uses: actions/checkout@v6
 
