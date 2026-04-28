@@ -28,7 +28,7 @@ name: Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)
 # Linux glibc 策略:
 #   - CPU 档 (x64 + arm64) 都用 ubuntu:18.04 (glibc 2.27),覆盖最广:
 #     Ubuntu 18.04+ / 中标麒麟 V7+ / 银河麒麟 V10 全系 / 统信 UOS V20+ / RHEL 7+
-#     需要 ubuntu-toolchain-r PPA 装 gcc-11,deadsnakes PPA 装 Python 3.10
+#     最终用 manylinux_2_28 (glibc 2.28),内置 cp311-cp311 跟全平台统一 Python 3.11
 #   - GPU 加速档 (cuda/rocm/openvino) 用 Ubuntu 22.04 base (glibc 2.35),
 #     SDK 本身针对 Ubuntu 22.04 编,降版本不可行
 #
@@ -167,9 +167,10 @@ jobs:
         if: matrix.platform != 'linux'
         uses: actions/setup-python@v6
         with:
-          # Win ARM64 没有 Python 3.10 官方 wheel (3.11 才开始支持 Windows ARM64),
-          # 所以 win-arm64 一档强制 3.11,其他平台保持统一 3.10。
-          python-version: ${{ (matrix.platform == 'windows' && matrix.arch == 'arm64') && '3.11' || '3.10' }}
+          # 全平台统一 Python 3.11 — 所有 archs 都支持 (包含 Windows ARM64)。
+          # 3.10 在 Win ARM64 没官方 wheel,3.11 是 Win ARM64 首个支持版本,所以
+          # 取 3.11 作为最低公共分母,Win/Mac/Linux/manylinux 一致。
+          python-version: '3.11'
 
       # ============================================================
       # 2. macOS Xcode 选择
@@ -594,9 +595,9 @@ jobs:
               set -ex
               git config --global --add safe.directory "*" || true
 
-              # manylinux_2_28 已预装 gcc/g++/cmake/ninja/python (用 cp310 跟其它平台统一 Python 3.10)
-              /opt/python/cp310-cp310/bin/pip install "cmake>=3.28,<4" "numpy<2" psutil
-              export PATH="/opt/python/cp310-cp310/bin:$PATH"
+              # manylinux_2_28 已预装 gcc/g++/cmake/ninja/python (用 cp311 跟其它平台统一 Python 3.11)
+              /opt/python/cp311-cp311/bin/pip install "cmake>=3.28,<4" "numpy<2" psutil
+              export PATH="/opt/python/cp311-cp311/bin:$PATH"
               python3 --version
               gcc --version
               cmake --version

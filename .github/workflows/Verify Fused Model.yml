@@ -53,11 +53,12 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          WIN_X64='{"name":"win-x64","runner":"windows-2022","python":"3.10"}'
-          MAC_X64='{"name":"osx-x64","runner":"macos-15-intel","python":"3.10"}'
-          MAC_ARM64='{"name":"osx-arm64","runner":"macos-14","python":"3.10"}'
-          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","python":"3.10"}'
-          LINUX_ARM64='{"name":"linux-arm64","runner":"ubuntu-24.04-arm","python":"3.10"}'
+          # 全平台统一 Python 3.11 (3.11 是 Win ARM64 首个支持版,所以取它当最低公共分母)
+          WIN_X64='{"name":"win-x64","runner":"windows-2022","python":"3.11"}'
+          MAC_X64='{"name":"osx-x64","runner":"macos-15-intel","python":"3.11"}'
+          MAC_ARM64='{"name":"osx-arm64","runner":"macos-14","python":"3.11"}'
+          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","python":"3.11"}'
+          LINUX_ARM64='{"name":"linux-arm64","runner":"ubuntu-24.04-arm","python":"3.11"}'
 
           case "${{ inputs.target_set }}" in
             # ── 单平台档 ──
