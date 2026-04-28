@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RootNamespace>CSharpVerify</RootNamespace>
+    <AssemblyName>CSharpVerify</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- 让 .NET 优先用 bin 同目录的 native lib (我们手动复制 build 出来的 dll/dylib/so) -->
+    <ResolveAssemblyReferenceUseGac>false</ResolveAssemblyReferenceUseGac>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Managed only — 不带 native, 我们用自己 build 的 native 替代 -->
+    <PackageReference Include="OpenCvSharp4" Version="4.10.0.20241108" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.25.0" />
+  </ItemGroup>
+
+</Project>

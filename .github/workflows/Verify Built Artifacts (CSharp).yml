@@ -1,0 +1,165 @@
+name: Verify Built Artifacts (C# 端到端测试)
+
+# 目的:
+#   下载我们自己 build 的 ORT (Build ORT 1.25.0 Desktop) + OpenCvSharp (Build-Opencvsharp-AllPlatforms-4.10.0)
+#   native artifacts,放到 C# 测试程序的 bin 目录,跑端到端推理验证。
+#
+#   这是真正的 "build 验证" — 证明我们生成的 native lib 在每个平台上能正常加载、
+#   跟 OpenCvSharp 一起读图,通过 ORT.Managed 推理融合模型,输出符合预期。
+#
+# 与 "Verify Fused Model.yml" 的区别:
+#   - 那个是 PyPI onnxruntime + opencv-python (验证模型 + ORT 1.25 通用兼容性)
+#   - 这个是我们自己 build 的 native (验证 BuildOpenvino 仓库 CI 产物)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ort_run_id:
+        description: 'ORT Build run ID (留空则用 main 最近成功)'
+        required: false
+        type: string
+      opencv_run_id:
+        description: 'OpenCvSharp Build run ID (留空则用 main 最近成功)'
+        required: false
+        type: string
+      target_set:
+        description: 'Which platforms to verify'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - windows-only
+          - macos-only
+          - linux-only
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          # Win x64 用 ORT win-x64-dml + OpenCvSharp win-x64
+          # Mac x64 用 ORT osx-x64-coreml + OpenCvSharp osx-x64-slice
+          # Mac arm64 用 ORT osx-arm64-coreml + OpenCvSharp osx-arm64-slice
+          # Linux x64 用 ORT linux-x64-cpu + OpenCvSharp linux-x86_64
+          # Linux arm64 用 ORT linux-arm64-cpu + OpenCvSharp linux-aarch64
+          WIN_X64='{"name":"win-x64","runner":"windows-2022","ort_artifact":"onnxruntime-1.25.0-win-x64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-x64","ocv_lib":"OpenCvSharpExtern.dll"}'
+          MAC_X64='{"name":"osx-x64","runner":"macos-15-intel","ort_artifact":"onnxruntime-1.25.0-osx-x64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-x64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
+          MAC_ARM64='{"name":"osx-arm64","runner":"macos-14","ort_artifact":"onnxruntime-1.25.0-osx-arm64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-arm64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
+          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","ort_artifact":"onnxruntime-1.25.0-linux-x64-cpu","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          LINUX_ARM64='{"name":"linux-arm64","runner":"ubuntu-24.04-arm","ort_artifact":"onnxruntime-1.25.0-linux-arm64-cpu","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-aarch64","ocv_lib":"libOpenCvSharpExtern.so"}'
+
+          case "${{ inputs.target_set }}" in
+            windows-only) echo "matrix={\"include\":[$WIN_X64]}" >> $GITHUB_OUTPUT ;;
+            macos-only)   echo "matrix={\"include\":[$MAC_X64,$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
+            linux-only)   echo "matrix={\"include\":[$LINUX_X64,$LINUX_ARM64]}" >> $GITHUB_OUTPUT ;;
+            *)            echo "matrix={\"include\":[$WIN_X64,$MAC_X64,$MAC_ARM64,$LINUX_X64,$LINUX_ARM64]}" >> $GITHUB_OUTPUT ;;
+          esac
+
+  verify:
+    name: ${{ matrix.name }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve ORT run ID (latest success on main if not given)
+        id: ort_run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.ort_run_id }}" ]; then
+            echo "id=${{ inputs.ort_run_id }}" >> $GITHUB_OUTPUT
+          else
+            ID=$(gh run list -R ${{ github.repository }} \
+              --workflow="Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)" \
+              --status=success --branch=main --limit=1 --json databaseId --jq '.[0].databaseId')
+            if [ -z "$ID" ]; then echo "::error::No success ORT run found"; exit 1; fi
+            echo "id=$ID" >> $GITHUB_OUTPUT
+            echo ">>> Using ORT run $ID"
+          fi
+
+      - name: Resolve OpenCvSharp run ID
+        id: ocv_run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.opencv_run_id }}" ]; then
+            echo "id=${{ inputs.opencv_run_id }}" >> $GITHUB_OUTPUT
+          else
+            ID=$(gh run list -R ${{ github.repository }} \
+              --workflow="Build-Opencvsharp-AllPlatforms-4.10.0" \
+              --status=success --branch=main --limit=1 --json databaseId --jq '.[0].databaseId')
+            if [ -z "$ID" ]; then echo "::error::No success OpenCvSharp run found"; exit 1; fi
+            echo "id=$ID" >> $GITHUB_OUTPUT
+            echo ">>> Using OpenCvSharp run $ID"
+          fi
+
+      - name: Download ORT artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p downloads/ort
+          gh run download ${{ steps.ort_run.outputs.id }} -R ${{ github.repository }} \
+            -n "${{ matrix.ort_artifact }}" -D downloads/ort
+          echo ">>> ORT artifact contents:"
+          ls -la downloads/ort
+
+      - name: Download OpenCvSharp artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p downloads/ocv
+          gh run download ${{ steps.ocv_run.outputs.id }} -R ${{ github.repository }} \
+            -n "${{ matrix.ocv_artifact }}" -D downloads/ocv
+          echo ">>> OpenCvSharp artifact contents:"
+          ls -la downloads/ocv
+
+      - name: Build C# verify project
+        shell: bash
+        run: |
+          cd tests/CSharpVerify
+          dotnet build -c Release -v minimal
+
+      - name: Stage native libs into bin dir
+        shell: bash
+        run: |
+          BIN=tests/CSharpVerify/bin/Release/net8.0
+          mkdir -p "$BIN"
+          # ORT native (主 + 可选附加 dll)
+          cp "downloads/ort/${{ matrix.ort_lib }}" "$BIN/"
+          if [ -n "${{ matrix.ort_extra }}" ] && [ -f "downloads/ort/${{ matrix.ort_extra }}" ]; then
+            cp "downloads/ort/${{ matrix.ort_extra }}" "$BIN/"
+          fi
+          # OpenCvSharp native
+          cp "downloads/ocv/${{ matrix.ocv_lib }}" "$BIN/"
+          echo ">>> Final $BIN contents:"
+          ls -la "$BIN"
+
+      - name: Run C# verify (load native libs + run inference + assert)
+        shell: bash
+        run: |
+          cd tests/CSharpVerify
+          # 用绝对路径,避免 cwd 不一致
+          MODEL=$(realpath ../merged_no_topk_fp16.onnx)
+          IMG=$(realpath ../test.png)
+          dotnet bin/Release/net8.0/CSharpVerify.dll "$MODEL" "$IMG"
