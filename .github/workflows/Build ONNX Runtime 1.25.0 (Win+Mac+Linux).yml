@@ -85,7 +85,7 @@ jobs:
           MAC_ARM64_COREML='{"platform":"macos","arch":"arm64","ep":"coreml","runner":"macos-14","docker":"","deploy_target":"11.0","xcode_version":"15.2","artifact_name":"onnxruntime-1.25.0-osx-arm64-coreml"}'
 
           # Linux 各档 (用 docker 字段控制容器)
-          LINUX_X64_CUDA='{"platform":"linux","arch":"x64","ep":"cuda","runner":"ubuntu-22.04","docker":"nvidia/cuda:12.6.0-cudnn-devel-ubuntu22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cuda"}'
+          LINUX_X64_CUDA='{"platform":"linux","arch":"x64","ep":"cuda","runner":"ubuntu-22.04","docker":"nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cuda"}'
           LINUX_X64_ROCM='{"platform":"linux","arch":"x64","ep":"rocm","runner":"ubuntu-22.04","docker":"rocm/dev-ubuntu-22.04:6.2.4-complete","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-rocm"}'
           LINUX_X64_OPENVINO='{"platform":"linux","arch":"x64","ep":"openvino","runner":"ubuntu-22.04","docker":"openvino/ubuntu22_dev:2025.4.1","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-openvino"}'
           LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-22.04","docker":"quay.io/pypa/manylinux_2_28_x86_64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
