@@ -204,103 +204,41 @@ jobs:
           pip3 install "cmake>=3.28,<4" "numpy<2"
 
       # ============================================================
-      # 4. macOS-only: chrono operator<< → strftime patch
-      #    避开 Xcode 16.x libc++ <format> → std::to_chars (macOS 13.4+) 链。
+      # 4. macOS-only: 校验 ORT 1.25 的内置 chrono guard 是否生效
+      #
+      # 背景:
+      #   - 1.18.1 没有 ORT_USE_CXX20_STD_CHRONO 宏,需要外部 patch ostream_sink.cc
+      #     + apple_log_sink.mm 来绕过 std::to_chars (macOS 13.4+)
+      #   - 1.25.0 在 logging.cc 自己加了保护:
+      #         #if (SDK < 14.4) || (deploy_target < 13.3)
+      #             #undef ORT_USE_CXX20_STD_CHRONO
+      #         #endif
+      #     若禁用 → fallback 到 date 库 (header-only, 不引 <format>),无 to_chars 依赖
+      #
+      # 我们的两档:
+      #   - x64:   Xcode 16.x SDK 15+ (>= 14.4) ✓  但 deploy_target 10.15 < 13.3 ✗
+      #   - arm64: Xcode 15.2 SDK 14.2 (< 14.4) ✗  deploy_target 11.0 < 13.3 ✗
+      #
+      #   两档都至少满足一个 #undef 条件,所以 ORT 1.25 自动用 date fallback,
+      #   完全不需要外部 patch。我们只做 sanity check 确认 logging.cc 里有这个 guard。
       # ============================================================
-      - name: Patch chrono stream (macOS only)
+      - name: Verify ORT 1.25 chrono guard (macOS)
         if: matrix.platform == 'macos'
         shell: bash
         run: |
-          F1="onnxruntime/core/common/logging/sinks/ostream_sink.cc"
-          if [ ! -f "$F1" ]; then
-            echo "::error::$F1 not found in ORT v1.25.0"; find onnxruntime -name "ostream_sink*" -type f; exit 1
+          F="onnxruntime/core/common/logging/logging.cc"
+          if ! grep -q "ORT_USE_CXX20_STD_CHRONO" "$F"; then
+            echo "::error::ORT 1.25 不再有 ORT_USE_CXX20_STD_CHRONO 保护宏 — 需要重新评估 patch 策略"
+            head -100 "$F"
+            exit 1
           fi
-          cat > "$F1" << 'PATCH_EOF'
-          // Copyright (c) Microsoft Corporation. All rights reserved.
-          // Licensed under the MIT License.
-          // Patched: chrono operator<< → strftime, avoid libc++ <format> → std::to_chars.
-          #include "core/common/logging/sinks/ostream_sink.h"
-          #include "core/common/logging/logging.h"
-          #include <ctime>
-          #include <iomanip>
-          #include <iostream>
-          #include <sstream>
-          namespace onnxruntime { namespace logging {
-          #ifndef ORT_MINIMAL_BUILD
-          struct Color {
-            constexpr static const char* kWarn = "\033[0;93m";
-            constexpr static const char* kError = "\033[1;31m";
-            constexpr static const char* kFatal = "\033[1;37;41m";
-            constexpr static const char* kEnd = "\033[m";
-          };
-          #endif
-          void OStreamSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id,
-                                     const Capture& message) {
-            auto time_t_val = std::chrono::system_clock::to_time_t(timestamp);
-            auto tm_val = *std::localtime(&time_t_val);
-            auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                           timestamp.time_since_epoch()) % 1000000;
-            std::ostringstream msg;
-          #ifndef ORT_MINIMAL_BUILD
-            if (message.Severity() == Severity::kWARNING) msg << Color::kWarn;
-            else if (message.Severity() == Severity::kERROR) msg << Color::kError;
-            else if (message.Severity() == Severity::kFATAL) msg << Color::kFatal;
-          #endif
-            msg << std::put_time(&tm_val, "%Y-%m-%d %H:%M:%S")
-                << "." << std::setfill('0') << std::setw(6) << us.count()
-                << " [" << message.SeverityPrefix() << ":" << message.Category()
-                << ":" << logger_id << ", "
-                << message.Location().ToString() << "] " << message.Message();
-          #ifndef ORT_MINIMAL_BUILD
-            if (message.Severity() == Severity::kWARNING || message.Severity() == Severity::kERROR
-                || message.Severity() == Severity::kFATAL) msg << Color::kEnd;
-          #endif
-            msg << "\n";
-            (*stream_) << msg.str();
-            if (flush_) stream_->flush();
-          }
-          }}  // namespace
-          PATCH_EOF
-
-          F2="onnxruntime/core/platform/apple/logging/apple_log_sink.mm"
-          if [ ! -f "$F2" ]; then
-            echo "::error::$F2 not found"; find onnxruntime -name "apple_log_sink*" -type f; exit 1
+          if ! grep -q "__MAC_OS_X_VERSION_MIN_REQUIRED < 130300" "$F"; then
+            echo "::error::macOS deploy_target < 13.3 的保护条件没找到 — patch 策略需重写"
+            grep -n -B 2 -A 5 "ORT_USE_CXX20_STD_CHRONO" "$F"
+            exit 1
           fi
-          cat > "$F2" << 'PATCH_EOF'
-          // Copyright (c) Microsoft Corporation. All rights reserved.
-          // Licensed under the MIT License.
-          // Patched: chrono operator<< → strftime.
-          #include "core/platform/apple/logging/apple_log_sink.h"
-          #import <Foundation/Foundation.h>
-          #include <ctime>
-          #include <iomanip>
-          #include <sstream>
-          namespace onnxruntime { namespace logging {
-          void AppleLogSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id,
-                                      const Capture& message) {
-            auto time_t_val = std::chrono::system_clock::to_time_t(timestamp);
-            auto tm_val = *std::localtime(&time_t_val);
-            auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                           timestamp.time_since_epoch()) % 1000000;
-            std::ostringstream msg;
-            msg << std::put_time(&tm_val, "%Y-%m-%d %H:%M:%S")
-                << "." << std::setfill('0') << std::setw(6) << us.count()
-                << " [" << message.SeverityPrefix() << ":" << message.Category()
-                << ":" << logger_id << ", "
-                << message.Location().ToString() << "] " << message.Message();
-            NSLog(@"%s", msg.str().c_str());
-          }
-          }}  // namespace
-          PATCH_EOF
-
-          # 扫描其它可能要 patch 的文件
-          SUSPECTS=$(grep -rl "timestamp_ns::operator<<\|using date::operator<<" \
-            --include='*.cc' --include='*.cpp' --include='*.mm' onnxruntime/ 2>/dev/null \
-            | grep -v "ostream_sink.cc" | grep -v "apple_log_sink.mm" | grep -v "syslog_sink.cc" || true)
-          if [ -n "$SUSPECTS" ]; then
-            echo "::warning::Found additional chrono/date operator<< files:"
-            echo "$SUSPECTS"
-          fi
+          echo "✅ ORT 1.25 logging.cc 自带 chrono guard,fallback 到 date 库,无需外部 patch"
+          grep -n -B 2 -A 8 "TARGET_OS_MAC" "$F" | head -30
 
       # ============================================================
       # 5. Build (per-platform/per-EP)
@@ -663,46 +601,129 @@ jobs:
           EOF
           ls -lh artifacts/
 
-      - name: Organize artifacts (Linux)
+      - name: Organize artifacts (Linux) — bundle transitive deps via ldd
         if: matrix.platform == 'linux'
         shell: bash
         run: |
           mkdir -p artifacts
           cp "build/${{ inputs.build_type }}/libonnxruntime.so" artifacts/
-
-          # 所有 providers shared/specific .so
           for f in build/${{ inputs.build_type }}/libonnxruntime_providers_*.so; do
             [ -f "$f" ] && cp "$f" artifacts/
           done
 
-          # GPU EP 档:把 runtime 依赖 .so 也带上 (cuDNN/cublas/openvino runtime/rocm runtime)
-          # 让客户端不需要再装完整 SDK,只需要硬件驱动。
-          if [ "${{ matrix.ep }}" = "cuda" ]; then
-            # cuDNN 9 + cuBLAS 12 关键 runtime libs
-            for lib in libcudart.so.12 libcublas.so.12 libcublasLt.so.12 libcudnn.so.9 \
-                       libcudnn_ops.so.9 libcudnn_engines_precompiled.so.9 libcudnn_heuristic.so.9; do
-              docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
-                bash -c "find /usr/local/cuda /usr/lib/x86_64-linux-gnu -name '$lib*' 2>/dev/null | head -1 | xargs -I{} cp {} /work/artifacts/" \
-                2>/dev/null || true
+          # ──────────────────────────────────────────────────────────────
+          # 通用 ldd 传递依赖打包器:
+          #   - 入口: artifacts/ 里所有 .so
+          #   - 迭代 ldd,把所有非系统、非驱动的 .so 复制到 artifacts/
+          #   - 排除项 (客户机器必须自己提供的):
+          #       glibc 系列: libc/libm/libdl/libpthread/librt/libresolv/libutil/libcrypt/ld-linux*
+          #       内核/VDSO: linux-vdso/linux-gate
+          #       GCC runtime: libgcc_s/libstdc++ (用户系统都有)
+          #       GPU 内核驱动 / userland 接驱动:
+          #         NVIDIA: libcuda.so / libnvidia-* (随 NVIDIA driver 一起,不能我们 ship)
+          #         AMD:    libdrm_amdgpu / libdrm  (随 amdgpu driver)
+          #         Intel:  libze_loader / libze_intel_gpu (随 Intel GPU 用户态)
+          # ──────────────────────────────────────────────────────────────
+
+          BUNDLER=$(cat <<'BUNDLER_EOF'
+          set -e
+          ARTIFACTS_DIR="/work/artifacts"
+          SEEN=$(mktemp)
+          for f in "$ARTIFACTS_DIR"/*.so*; do
+            [ -e "$f" ] && echo "$(basename "$f")" >> "$SEEN"
+          done
+
+          should_skip() {
+            case "$1" in
+              ld-linux-*|libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*) return 0 ;;
+              librt.so.*|libresolv.so.*|libutil.so.*|libnsl.so.*|libcrypt.so.*) return 0 ;;
+              linux-vdso.so.*|linux-gate.so.*) return 0 ;;
+              libgcc_s.so.*|libstdc++.so.*) return 0 ;;
+              # 驱动相关 (客户必装,不打包)
+              libcuda.so.*|libnvidia-*) return 0 ;;
+              libdrm.so.*|libdrm_amdgpu.so.*|libdrm_radeon.so.*) return 0 ;;
+              libze_loader.so.*|libze_intel_gpu.so.*) return 0 ;;
+              # X11/系统 GUI
+              libX11.so.*|libxcb.so.*|libGL.so.*|libEGL.so.*|libGLX.so.*) return 0 ;;
+            esac
+            return 1
+          }
+
+          # 多轮迭代直到没新依赖
+          ROUND=0
+          while true; do
+            ROUND=$((ROUND + 1))
+            ADDED=0
+            for f in "$ARTIFACTS_DIR"/*.so*; do
+              [ -e "$f" ] || continue
+              ldd "$f" 2>/dev/null | awk '/=>/ {print $3}' | while read -r dep; do
+                [ -z "$dep" ] && continue
+                [ ! -f "$dep" ] && continue
+                base=$(basename "$dep")
+                should_skip "$base" && continue
+                if ! grep -qx "$base" "$SEEN"; then
+                  cp "$dep" "$ARTIFACTS_DIR/" && \
+                    echo "  [round $ROUND] +$base ($(stat -c %s "$dep") bytes)"
+                  echo "$base" >> "$SEEN"
+                fi
+              done
             done
-            ls artifacts/ | grep -E "cudart|cublas|cudnn" || echo "  (cuDNN/cuBLAS 没找到全,客户端可能要装)"
-          fi
-          if [ "${{ matrix.ep }}" = "rocm" ]; then
-            # ROCm 关键 runtime libs (~80 MB)
-            for lib in libhsa-runtime64.so.1 libamdhip64.so.6 libroctracer64.so.4 \
-                       libMIOpen.so.1 librocblas.so.4; do
-              docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
-                bash -c "find /opt/rocm/lib -name '$lib*' 2>/dev/null | head -1 | xargs -I{} cp {} /work/artifacts/" \
-                2>/dev/null || true
-            done
-            ls artifacts/ | grep -E "hsa|amdhip|MIOpen|rocblas" || echo "  (ROCm runtime 没找到全)"
-          fi
-          if [ "${{ matrix.ep }}" = "openvino" ]; then
-            # OpenVINO 关键 runtime libs
-            cp /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino.so* artifacts/ 2>/dev/null || true
+            CUR=$(wc -l < "$SEEN")
+            [ "$CUR" -eq "${PREV:-0}" ] && break
+            PREV=$CUR
+          done
+
+          echo ">>> Bundled $(ls "$ARTIFACTS_DIR"/*.so* 2>/dev/null | wc -l) shared libraries"
+          BUNDLER_EOF
+          )
+
+          # 在合适的环境跑 BUNDLER (有 ldd + 全部依赖路径可见)
+          if [ -n "${{ matrix.docker }}" ]; then
+            # 容器内跑 (容器里有 SDK 完整路径)
+            docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+              bash -c "$BUNDLER"
+          elif [ "${{ matrix.ep }}" = "openvino" ]; then
+            # OpenVINO 在 host 上跑 (LD_LIBRARY_PATH 加上 OV runtime)
+            export LD_LIBRARY_PATH="/opt/intel/openvino_2024/runtime/lib/intel64:/opt/intel/openvino_2024/runtime/3rdparty/tbb/lib:${LD_LIBRARY_PATH:-}"
+            # 也手动复制 plugins.xml + TBB (ldd 不会跟踪 dlopen 的 plugin)
+            cp /opt/intel/openvino_2024/runtime/lib/intel64/plugins.xml artifacts/ 2>/dev/null || true
             cp /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino_intel_*_plugin.so artifacts/ 2>/dev/null || true
             cp /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino_*frontend.so artifacts/ 2>/dev/null || true
-            ls artifacts/ | grep openvino || echo "  (openvino runtime 没找到)"
+            cp /opt/intel/openvino_2024/runtime/3rdparty/tbb/lib/libtbb.so* artifacts/ 2>/dev/null || true
+            cp /opt/intel/openvino_2024/runtime/3rdparty/tbb/lib/libtbbmalloc.so* artifacts/ 2>/dev/null || true
+            ARTIFACTS_DIR="$(pwd)/artifacts"
+            BUNDLER_LOCAL=$(echo "$BUNDLER" | sed "s|/work/artifacts|$ARTIFACTS_DIR|g")
+            bash -c "$BUNDLER_LOCAL"
+          else
+            # arm64 cpu: host 上直接跑 (依赖只有系统 libstdc++/libc 之类,会被全部 skip)
+            ARTIFACTS_DIR="$(pwd)/artifacts"
+            BUNDLER_LOCAL=$(echo "$BUNDLER" | sed "s|/work/artifacts|$ARTIFACTS_DIR|g")
+            bash -c "$BUNDLER_LOCAL"
+          fi
+
+          # GPU EP 必须把 plugin / 运行时插件单独捞出来 (dlopen 不走 ldd)
+          if [ "${{ matrix.ep }}" = "cuda" ]; then
+            # cuDNN 的所有子模块 (graph/cnn/adv/heuristic/engines_*) 都是 dlopen 的
+            docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+              bash -c '
+                for sub in libcudnn_graph libcudnn_cnn libcudnn_adv libcudnn_ops \
+                           libcudnn_heuristic libcudnn_engines_precompiled libcudnn_engines_runtime_compiled; do
+                  find /usr/local/cuda /usr/lib/x86_64-linux-gnu -name "${sub}.so*" 2>/dev/null \
+                    | head -3 | xargs -I{} cp -n {} /work/artifacts/ 2>/dev/null || true
+                done
+                # 必要的 stub: cuda.so (driver stub for link, NOT for runtime!)
+                # 不打包 libcuda.so, 客户端必须有 NVIDIA driver
+              '
+          fi
+          if [ "${{ matrix.ep }}" = "rocm" ]; then
+            docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+              bash -c '
+                # ROCm 的 backend 也是 dlopen,把 backend lib 一并打包
+                for lib in libamd_comgr.so libhipfft.so librocfft.so libroctx64.so \
+                           librocm_smi64.so librocrand.so libhipsparse.so libhipblas.so; do
+                  find /opt/rocm -name "${lib}*" 2>/dev/null | head -2 | xargs -I{} cp -n {} /work/artifacts/ 2>/dev/null || true
+                done
+              '
           fi
 
           # glibc floor 信息
@@ -710,19 +731,36 @@ jobs:
             | grep -oE "GLIBC_[0-9]+\.[0-9]+" \
             | sort -u | sort -t_ -k2 -V | tail -1 || echo "unknown")
 
+          # 客户端硬性要求 (.so 不打包的部分)
+          if [ "${{ matrix.ep }}" = "cuda" ]; then
+            CLIENT_REQUIRES="NVIDIA driver >= 525 (libcuda.so) — 不在 artifact 里"
+          elif [ "${{ matrix.ep }}" = "rocm" ]; then
+            CLIENT_REQUIRES="amdgpu kernel module + libdrm_amdgpu — 不在 artifact 里"
+          elif [ "${{ matrix.ep }}" = "openvino" ]; then
+            CLIENT_REQUIRES="(可选) Intel GPU 驱动 (i915/Xe kmod) 用于 GPU 推理"
+          else
+            CLIENT_REQUIRES="无 (CPU only)"
+          fi
+
           cat > artifacts/version.txt <<EOF
-          ORT Version: $ORT_VERSION
-          Platform:    Linux
-          Arch:        ${{ matrix.arch }}
-          EP:          ${{ matrix.ep }}
-          glibc Floor: $GLIBC_FLOOR
-          Container:   ${{ matrix.docker }}
-          Runner:      ${{ matrix.runner }}
-          Build Type:  ${{ inputs.build_type }}
+          ORT Version:    $ORT_VERSION
+          Platform:       Linux
+          Arch:           ${{ matrix.arch }}
+          EP:             ${{ matrix.ep }}
+          glibc Floor:    $GLIBC_FLOOR
+          Container:      ${{ matrix.docker }}
+          Runner:         ${{ matrix.runner }}
+          Build Type:     ${{ inputs.build_type }}
+
+          Bundled libs:   $(ls artifacts/*.so* 2>/dev/null | wc -l) files
+          Total size:     $(du -sh artifacts/ | awk '{print $1}')
+          Client requires: $CLIENT_REQUIRES
           EOF
 
           echo ">>> Final artifacts:"
           ls -lh artifacts/
+          echo ">>> Total size:"
+          du -sh artifacts/
 
       # ============================================================
       # 8. Smoke load test
