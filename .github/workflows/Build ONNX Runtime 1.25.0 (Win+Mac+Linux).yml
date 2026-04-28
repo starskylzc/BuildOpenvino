@@ -179,7 +179,10 @@ jobs:
             Write-Host ">>> pip cmake: $pipCmake"
             & $pipCmake --version
           } else {
-            Write-Host "::warning::pip cmake not found, build.py 会用系统 cmake"
+            # 注:Win ARM64 runner 上 pip cmake wheel 有时不在 sysconfig.get_path('scripts'),
+            # 走系统 cmake 兜底。ORT 1.25 已经修了之前 cmake 4.3 + pytorch_cpuinfo 的崩溃,
+            # 系统 cmake 现在 build 成功 ✅ — 所以这只是 info,不再用 ::warning:: 出 GHA Annotation。
+            Write-Host ">>> pip cmake 不在标准路径,用系统 cmake (ORT 1.25 已兼容 cmake 4.3+)"
             cmake --version
           }
 
