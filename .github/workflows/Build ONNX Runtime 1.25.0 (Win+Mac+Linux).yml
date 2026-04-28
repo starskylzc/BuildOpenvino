@@ -301,7 +301,7 @@ jobs:
         if: matrix.platform == 'linux' && matrix.ep == 'cuda'
         shell: bash
         run: |
-          docker run --rm \
+          docker run --rm --user root \
             -v "$(pwd):/work" -w /work \
             -e ORT_VERSION="${{ env.ORT_VERSION }}" \
             "${{ matrix.docker }}" \
@@ -366,12 +366,15 @@ jobs:
         if: matrix.platform == 'linux' && matrix.ep == 'rocm'
         shell: bash
         run: |
-          docker run --rm \
+          docker run --rm --user root \
             -v "$(pwd):/work" -w /work \
             -e ORT_VERSION="${{ env.ORT_VERSION }}" \
             "${{ matrix.docker }}" \
             bash -c '
               set -ex
+              # git "dubious ownership" — 容器内 root 跑挂载的 host 目录,git 会拒
+              git config --global --add safe.directory "*" || true
+
               apt-get update -y
               apt-get install -y --no-install-recommends \
                 build-essential ninja-build pkg-config \
@@ -382,10 +385,14 @@ jobs:
               python3 -m pip install --upgrade pip
               python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
 
-              # 验证 MIGraphX 在 ROCm 安装里 (-complete tag 自带)
+              # 显式装 migraphx-dev (rocm/dev-ubuntu-22.04:*-complete 没自动带 cmake config)
+              apt-get install -y migraphx migraphx-dev || apt-get install -y migraphx || true
+
+              # 验证 migraphx CMake config + lib 存在
+              find /opt/rocm -name "migraphxConfig.cmake" -o -name "migraphx-config.cmake" 2>/dev/null | head -5
               ls /opt/rocm/lib/libmigraphx*.so 2>/dev/null | head -3 \
-                || (echo "::error::MIGraphX 不在容器里, 需要换 -complete tag"; \
-                    ls /opt/rocm/lib/ | head -20; exit 1)
+                || (echo "::error::libmigraphx*.so 找不到,migraphx apt 装失败"; \
+                    apt list --installed 2>/dev/null | grep -i migraphx; exit 1)
 
               python3 tools/ci_build/build.py \
                 --build_dir build \
@@ -416,6 +423,9 @@ jobs:
             "${{ matrix.docker }}" \
             bash -c '
               set -ex
+              # git "dubious ownership" — root in container reading host-mounted /work
+              git config --global --add safe.directory "*" || true
+
               apt-get update -y
               apt-get install -y --no-install-recommends \
                 build-essential ninja-build pkg-config \
@@ -424,7 +434,7 @@ jobs:
                 protobuf-compiler libprotobuf-dev \
                 git ca-certificates
               python3 -m pip install --upgrade pip
-              python3 -m pip install "cmake>=3.28,<4" "numpy<2"
+              python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
 
               # 镜像里 OpenVINO 路径定位 (Intel 通常装 /opt/intel/openvino 或 /opt/intel/openvino_2025)
               OV_ROOT=""
@@ -443,11 +453,12 @@ jobs:
               source "$OV_ROOT/setupvars.sh"
               echo "INTEL_OPENVINO_DIR=$INTEL_OPENVINO_DIR"
 
+              # --parallel 2 限并行避免 OOM (GHA 7GB 内存,OpenVINO build 单文件峰值~3GB)
               python3 tools/ci_build/build.py \
                 --build_dir build \
                 --config ${{ inputs.build_type }} \
                 --use_openvino CPU \
-                --parallel \
+                --parallel 2 \
                 --build_shared_lib \
                 --skip_tests \
                 --skip_submodule_sync \
@@ -463,7 +474,7 @@ jobs:
         if: matrix.platform == 'linux' && matrix.arch == 'x64' && matrix.ep == 'cpu'
         shell: bash
         run: |
-          docker run --rm \
+          docker run --rm --user root \
             -v "$(pwd):/work" -w /work \
             -e ORT_VERSION="${{ env.ORT_VERSION }}" \
             "${{ matrix.docker }}" \
@@ -495,7 +506,7 @@ jobs:
         if: matrix.platform == 'linux' && matrix.arch == 'arm64' && matrix.ep == 'cpu'
         shell: bash
         run: |
-          docker run --rm \
+          docker run --rm --user root \
             -v "$(pwd):/work" -w /work \
             -e ORT_VERSION="${{ env.ORT_VERSION }}" \
             "${{ matrix.docker }}" \
