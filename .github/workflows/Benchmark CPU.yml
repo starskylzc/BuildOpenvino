@@ -1,0 +1,92 @@
+name: Benchmark CPU EP (融合模型实际速度/内存)
+
+# 目的:
+#   在多个 CPU 平台上跑融合模型 100 次推理,测 latency / RSS / CPU 占用,
+#   决定 GPU EP 是否值得继续折腾。
+#
+#   用 PyPI onnxruntime 1.23.2 (跟我们 build 的 1.25 量级一致),省得等 build。
+#   重点看 Linux x64 / Linux arm64 — 真实信创 CPU 性能代理 (GHA Standard runner)。
+#
+#   GHA Standard runner ~= 中端信创笔记本/桌面:
+#     ubuntu-24.04        Standard_D4ads_v5  4 vCPU AMD EPYC, 16 GB RAM
+#     ubuntu-24.04-arm    Standard_D4pds_v5  4 vCPU Cobalt 100 (ARM Neoverse-N2), 16 GB RAM
+#     windows-2022        Standard_D4ads_v5  4 vCPU AMD EPYC, 16 GB RAM
+#     macos-14            M1 Pro             3 perf + 3 effi cores, 7 GB RAM (虚拟化)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which platforms'
+        required: true
+        default: 'linux-only'
+        type: choice
+        options:
+          - linux-only
+          - all
+
+env:
+  ORT_VERSION: "1.23.2"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04"}'
+          LINUX_ARM64='{"name":"linux-arm64","runner":"ubuntu-24.04-arm"}'
+          WIN_X64='{"name":"win-x64","runner":"windows-2022"}'
+          MAC_ARM64='{"name":"mac-arm64","runner":"macos-14"}'
+          case "${{ inputs.target }}" in
+            linux-only) echo "matrix={\"include\":[$LINUX_X64,$LINUX_ARM64]}" >> $GITHUB_OUTPUT ;;
+            *)          echo "matrix={\"include\":[$LINUX_X64,$LINUX_ARM64,$WIN_X64,$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
+          esac
+
+  benchmark:
+    name: ${{ matrix.name }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install benchmark deps
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "onnxruntime==${{ env.ORT_VERSION }}" "numpy<2" "Pillow>=10.4" psutil
+
+      - name: Show CPU info
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cat /proc/cpuinfo | grep -E "model name|Model|Hardware|cpu cores|cpu MHz" | head -8
+            echo ""
+            echo "Memory:"
+            free -h | head -2
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            sysctl -n machdep.cpu.brand_string
+            sysctl -n machdep.cpu.core_count
+            sysctl -n hw.memsize | awk '{printf "RAM: %.1f GB\n", $1/1024/1024/1024}'
+          else
+            wmic cpu get name,numberofcores,maxclockspeed /value 2>&1 || echo "(wmic on win-2022)"
+          fi
+
+      - name: Run benchmark
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python tests/benchmark_cpu.py
