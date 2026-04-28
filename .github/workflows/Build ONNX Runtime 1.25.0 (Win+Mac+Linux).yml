@@ -344,6 +344,24 @@ jobs:
       # ORT 1.25 起完全删除了 --use_rocm 标志 (issue #26801),
       # AMD GPU 加速必须通过 --use_migraphx 路径 (MIGraphX 是 AMD 的 ML 框架,基于 ROCm)。
       # rocm/dev-ubuntu-22.04:*-complete 容器自带 MIGraphX,无需额外装。
+      - name: Free disk space (Linux ROCm — 镜像 ~25 GB)
+        if: matrix.platform == 'linux' && matrix.ep == 'rocm'
+        shell: bash
+        run: |
+          # GHA 标准 runner 默认 14 GB 空闲, ROCm complete 镜像 25+ GB 装不下
+          echo ">>> Disk before:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          echo ">>> Disk after:"
+          df -h /
+
       - name: Build (Linux x64 ROCm/MIGraphX, in container)
         if: matrix.platform == 'linux' && matrix.ep == 'rocm'
         shell: bash
@@ -386,19 +404,20 @@ jobs:
             '
 
       # ---- Linux x64 OpenVINO (在 openvino/ubuntu22_dev:2025.4.1 容器内) ----
+      # 该镜像默认非 root user (uid 1000),sudo 需要密码。
+      # 加 --user root 直接以 root 身份运行容器,apt-get install 才能装系统包。
       - name: Build (Linux x64 OpenVINO, in container)
         if: matrix.platform == 'linux' && matrix.ep == 'openvino'
         shell: bash
         run: |
-          docker run --rm \
+          docker run --rm --user root \
             -v "$(pwd):/work" -w /work \
             -e ORT_VERSION="${{ env.ORT_VERSION }}" \
             "${{ matrix.docker }}" \
             bash -c '
               set -ex
-              # openvino/ubuntu22_dev 镜像默认非 root,切到 root 装编译依赖
-              sudo apt-get update -y
-              sudo apt-get install -y --no-install-recommends \
+              apt-get update -y
+              apt-get install -y --no-install-recommends \
                 build-essential ninja-build pkg-config \
                 libssl-dev libcurl4-openssl-dev zlib1g-dev \
                 python3 python3-pip python3-dev \
@@ -736,13 +755,13 @@ jobs:
 
           # 所有 Linux 档现在都有 docker (cuda/rocm/openvino/cpu/arm64-cpu),
           # 统一在容器内跑 BUNDLER,LD_LIBRARY_PATH + ldd 路径都准
-          docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+          docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
             bash -c "$BUNDLER"
 
           # GPU EP 必须把 plugin / 运行时插件单独捞出来 (dlopen 不走 ldd)
           if [ "${{ matrix.ep }}" = "cuda" ]; then
             # cuDNN 的所有子模块 (graph/cnn/adv/heuristic/engines_*) 都是 dlopen 的
-            docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+            docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
               bash -c '
                 for sub in libcudnn_graph libcudnn_cnn libcudnn_adv libcudnn_ops \
                            libcudnn_heuristic libcudnn_engines_precompiled libcudnn_engines_runtime_compiled; do
@@ -754,7 +773,7 @@ jobs:
               '
           fi
           if [ "${{ matrix.ep }}" = "rocm" ]; then
-            docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+            docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
               bash -c '
                 # MIGraphX + ROCm backend 都是 dlopen,显式抓取
                 for lib in libmigraphx.so libmigraphx_c.so libmigraphx_onnx.so \
@@ -765,7 +784,7 @@ jobs:
               '
           fi
           if [ "${{ matrix.ep }}" = "openvino" ]; then
-            docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+            docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
               bash -c '
                 # 容器内定位 OpenVINO 安装路径
                 OV_ROOT=""
@@ -863,7 +882,7 @@ jobs:
         if: matrix.platform == 'linux'
         shell: bash
         run: |
-          docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+          docker run --rm --user root -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
             bash -c '
               # 容器里有 python 用容器的,没 python 用 ldd 兜底
               if command -v python3 >/dev/null 2>&1; then
