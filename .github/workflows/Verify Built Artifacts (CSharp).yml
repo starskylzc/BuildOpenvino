@@ -1,21 +1,24 @@
 name: Verify Built Artifacts (C# 端到端测试)
 
 # 目的:
-#   下载我们自己 build 的 ORT (Build ORT 1.25.0 Desktop) + OpenCvSharp (Build-Opencvsharp-AllPlatforms-4.10.0)
-#   native artifacts,放到 C# 测试程序的 bin 目录,跑端到端推理验证。
+#   下载 ORT native + OpenCvSharp native,运行 test.png 端到端推理验证 (画框 + ORT 推理双 lib 在同一 C# 进程)。
 #
-#   这是真正的 "build 验证" — 证明我们生成的 native lib 在每个平台上能正常加载、
-#   跟 OpenCvSharp 一起读图,通过 ORT.Managed 推理融合模型,输出符合预期。
-#
-# 与 "Verify Fused Model.yml" 的区别:
-#   - 那个是 PyPI onnxruntime + opencv-python (验证模型 + ORT 1.25 通用兼容性)
-#   - 这个是我们自己 build 的 native (验证 BuildOpenvino 仓库 CI 产物)
+#   ORT native 来源分两种:
+#     - self-build (5 个): win-x64-dml / win-x86-cpu / win-arm64-dml / mac-x64-coreml / mac-arm64-coreml
+#       从 BuildOpenvino 仓库 "Build ORT 1.25.0 Desktop" workflow CI artifact 拉。
+#       Win 因 1.25 没出 NuGet,Mac 因官方 deploy_target 太新 (osx-arm64 14.0,osx-x64 完全没),
+#       必须自 build。
+#     - official (2 个): linux-x64-gpu(CUDA12+TRT) / linux-aarch64
+#       从 microsoft/onnxruntime v1.25.0 GitHub release tgz 拉。
+#       glibc 2.27 floor (比我们 manylinux_2_28 还宽,信创全适配)。
+#       linux-x64 用 GPU 包 (含 CUDA + TensorRT),CPU EP 在 runner 上验证 (no GPU on GHA),
+#       但 CUDA/TRT plugin .so 也会被 stage 进 deploy/,客户机有 NVIDIA driver 即可启用。
 
 on:
   workflow_dispatch:
     inputs:
       ort_run_id:
-        description: 'ORT Build run ID (留空则用 main 最近成功)'
+        description: 'Self-build ORT run ID (留空则按 artifact 名找最近成功)'
         required: false
         type: string
       opencv_run_id:
@@ -23,30 +26,27 @@ on:
         required: false
         type: string
       target_set:
-        description: 'Which platforms to verify (推荐:每次只跑一个,跟 ORT build 名对齐)'
+        description: 'Which platforms to verify'
         required: true
         default: 'all'
         type: choice
         options:
-          # ── 单平台档 (跟 ORT build target_set 完全对齐) ──
+          # ── 单平台档 ──
           - win-x64-dml
           - win-x86-cpu
           - win-arm64-dml
           - mac-x64-coreml
           - mac-arm64-coreml
-          - linux-x64-cuda
-          - linux-x64-rocm
-          - linux-x64-openvino
-          - linux-x64-cpu
-          - linux-arm64-cpu
+          - linux-x64
+          - linux-aarch64
           # ── 聚合档 ──
           - all
-          - windows-only
-          - macos-only
-          - linux-only
+          - self-build-only      # 5 个 self-build (Win + Mac)
+          - official-only        # 2 个官方 Linux
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ORT_VERSION: "1.25.0"
 
 jobs:
   prepare:
@@ -56,44 +56,42 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          # 全 10 平台:跟 ORT build target_set 完全对齐
-          # rid:        .NET RID,用于 publish
-          # publish_self_contained: 是否 self-contained publish (win-x86 需要,因为
-          #             windows-2022 runner 是 x64 host,默认没装 x86 .NET runtime)
-          # gpu_ep:     仅 Linux GPU 档为 true,这种 build 的 ORT 含 GPU plugin 但
-          #             CI runner 没 GPU,我们用 CPU EP 兜底验证 lib 加载 + CPU 推理
-          WIN_X64='{"name":"win-x64-dml","runner":"windows-2022","rid":"win-x64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-win-x64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-x64","ocv_lib":"OpenCvSharpExtern.dll"}'
-          WIN_X86='{"name":"win-x86-cpu","runner":"windows-2022","rid":"win-x86","publish_self_contained":true,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-win-x86-cpu","ort_lib":"onnxruntime.dll","ort_extra":"","ocv_artifact":"win-x86","ocv_lib":"OpenCvSharpExtern.dll"}'
-          WIN_ARM64='{"name":"win-arm64-dml","runner":"windows-11-arm","rid":"win-arm64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-win-arm64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-arm64","ocv_lib":"OpenCvSharpExtern.dll"}'
-          MAC_X64='{"name":"mac-x64-coreml","runner":"macos-15-intel","rid":"osx-x64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-osx-x64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-x64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
-          MAC_ARM64='{"name":"mac-arm64-coreml","runner":"macos-14","rid":"osx-arm64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-osx-arm64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-arm64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
-          LINUX_X64_CPU='{"name":"linux-x64-cpu","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-linux-x64-cpu","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
-          LINUX_ARM64_CPU='{"name":"linux-arm64-cpu","runner":"ubuntu-24.04-arm","rid":"linux-arm64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-linux-arm64-cpu","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-aarch64","ocv_lib":"libOpenCvSharpExtern.so"}'
-          LINUX_X64_CUDA='{"name":"linux-x64-cuda","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"gpu_ep":true,"ort_artifact":"onnxruntime-1.25.0-linux-x64-cuda","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
-          LINUX_X64_ROCM='{"name":"linux-x64-rocm","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"gpu_ep":true,"ort_artifact":"onnxruntime-1.25.0-linux-x64-rocm","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
-          LINUX_X64_OPENVINO='{"name":"linux-x64-openvino","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"gpu_ep":true,"ort_artifact":"onnxruntime-1.25.0-linux-x64-openvino","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          # 7 个 target — 5 self-build + 2 official Linux
+          # source:           "self-build" 从 CI artifact 拉,"official" 从 GitHub release 拉
+          # rid:              .NET RID (publish 用)
+          # publish_self_contained: 是否 self-contained publish (win-x86 必须,host 是 x64)
+          # ort_artifact:     self-build CI artifact 名 (source=self-build 时用)
+          # ort_official_url: 官方 release URL (source=official 时用)
+          # ort_lib:          主 onnxruntime 库文件名
+          # ort_extra:        附加 .so/.dll 列表 (空格分隔),staging 时一并 copy
+          # ocv_artifact:     OpenCvSharp CI artifact 名
+          # ocv_lib:          OpenCvSharp 主库文件名
+          WIN_X64='{"name":"win-x64-dml","runner":"windows-2022","rid":"win-x64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-win-x64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-x64","ocv_lib":"OpenCvSharpExtern.dll"}'
+          WIN_X86='{"name":"win-x86-cpu","runner":"windows-2022","rid":"win-x86","publish_self_contained":true,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-win-x86-cpu","ort_lib":"onnxruntime.dll","ort_extra":"","ocv_artifact":"win-x86","ocv_lib":"OpenCvSharpExtern.dll"}'
+          WIN_ARM64='{"name":"win-arm64-dml","runner":"windows-11-arm","rid":"win-arm64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-win-arm64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-arm64","ocv_lib":"OpenCvSharpExtern.dll"}'
+          MAC_X64='{"name":"mac-x64-coreml","runner":"macos-15-intel","rid":"osx-x64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-osx-x64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-x64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
+          MAC_ARM64='{"name":"mac-arm64-coreml","runner":"macos-14","rid":"osx-arm64","publish_self_contained":false,"source":"self-build","ort_artifact":"onnxruntime-1.25.0-osx-arm64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-arm64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
+
+          # 官方 Linux:
+          # - linux-x64 用 GPU 包 (CPU EP 内置 + CUDA12 + TensorRT plugin),客户机有 NVIDIA driver 自动启用 GPU
+          # - linux-aarch64 只有 CPU 包 (官方没出 ARM GPU 版,行业现实 ARM+GPU 极少)
+          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"source":"official","ort_official_url":"https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-x64-gpu-1.25.0.tgz","ort_official_dir":"onnxruntime-linux-x64-gpu-1.25.0","ort_lib":"libonnxruntime.so.1.25.0","ort_extra":"libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so libonnxruntime_providers_tensorrt.so","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          LINUX_AARCH64='{"name":"linux-aarch64","runner":"ubuntu-24.04-arm","rid":"linux-arm64","publish_self_contained":false,"source":"official","ort_official_url":"https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-aarch64-1.25.0.tgz","ort_official_dir":"onnxruntime-linux-aarch64-1.25.0","ort_lib":"libonnxruntime.so.1.25.0","ort_extra":"libonnxruntime_providers_shared.so","ocv_artifact":"linux-aarch64","ocv_lib":"libOpenCvSharpExtern.so"}'
 
           case "${{ inputs.target_set }}" in
-            # ── 单平台档 (跟 ORT build target_set 对齐) ──
             win-x64-dml)        echo "matrix={\"include\":[$WIN_X64]}" >> $GITHUB_OUTPUT ;;
             win-x86-cpu)        echo "matrix={\"include\":[$WIN_X86]}" >> $GITHUB_OUTPUT ;;
             win-arm64-dml)      echo "matrix={\"include\":[$WIN_ARM64]}" >> $GITHUB_OUTPUT ;;
             mac-x64-coreml)     echo "matrix={\"include\":[$MAC_X64]}" >> $GITHUB_OUTPUT ;;
             mac-arm64-coreml)   echo "matrix={\"include\":[$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
-            linux-x64-cuda)     echo "matrix={\"include\":[$LINUX_X64_CUDA]}" >> $GITHUB_OUTPUT ;;
-            linux-x64-rocm)     echo "matrix={\"include\":[$LINUX_X64_ROCM]}" >> $GITHUB_OUTPUT ;;
-            linux-x64-openvino) echo "matrix={\"include\":[$LINUX_X64_OPENVINO]}" >> $GITHUB_OUTPUT ;;
-            linux-x64-cpu)      echo "matrix={\"include\":[$LINUX_X64_CPU]}" >> $GITHUB_OUTPUT ;;
-            linux-arm64-cpu)    echo "matrix={\"include\":[$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
-            # ── 聚合档 ──
-            windows-only)
-              echo "matrix={\"include\":[$WIN_X64,$WIN_X86,$WIN_ARM64]}" >> $GITHUB_OUTPUT ;;
-            macos-only)
-              echo "matrix={\"include\":[$MAC_X64,$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
-            linux-only)
-              echo "matrix={\"include\":[$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+            linux-x64)          echo "matrix={\"include\":[$LINUX_X64]}" >> $GITHUB_OUTPUT ;;
+            linux-aarch64)      echo "matrix={\"include\":[$LINUX_AARCH64]}" >> $GITHUB_OUTPUT ;;
+            self-build-only)
+              echo "matrix={\"include\":[$WIN_X64,$WIN_X86,$WIN_ARM64,$MAC_X64,$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
+            official-only)
+              echo "matrix={\"include\":[$LINUX_X64,$LINUX_AARCH64]}" >> $GITHUB_OUTPUT ;;
             *)
-              echo "matrix={\"include\":[$WIN_X64,$WIN_X86,$WIN_ARM64,$MAC_X64,$MAC_ARM64,$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+              echo "matrix={\"include\":[$WIN_X64,$WIN_X86,$WIN_ARM64,$MAC_X64,$MAC_ARM64,$LINUX_X64,$LINUX_AARCH64]}" >> $GITHUB_OUTPUT ;;
           esac
 
   verify:
@@ -112,18 +110,20 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Setup Python (用于 PNG ↔ BGR 转换 — OpenCvSharp 精简版没编 imgcodecs)
+      - name: Setup Python (PNG↔BGR 转换 — OpenCvSharp 精简版没编 imgcodecs)
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
-      - name: Install Pillow (CI 端 PNG↔BGR 转换用,无 numpy 依赖,全平台有 wheel)
+      - name: Install Pillow
         shell: bash
         run: |
           python -m pip install --upgrade pip
           python -m pip install "Pillow>=10.4"
 
-      - name: Resolve ORT run ID (find run containing matrix.ort_artifact)
+      # ── ORT artifact 来源分支 ──
+      - name: Resolve ORT run ID (self-build only)
+        if: matrix.source == 'self-build'
         id: ort_run
         shell: bash
         env:
@@ -131,12 +131,8 @@ jobs:
         run: |
           if [ -n "${{ inputs.ort_run_id }}" ]; then
             echo "id=${{ inputs.ort_run_id }}" >> $GITHUB_OUTPUT
-            echo ">>> Using user-specified ORT run ${{ inputs.ort_run_id }}"
           else
-            # 重要:per-platform ORT runs 每个 run 只有 1 个平台的 artifact。
-            # 不能简单取 latest success — 必须找含 ${{ matrix.ort_artifact }} 的那个。
             ARTIFACT_NAME="${{ matrix.ort_artifact }}"
-            echo ">>> Searching success runs for artifact: $ARTIFACT_NAME"
             FOUND=""
             for ID in $(gh run list -R ${{ github.repository }} \
                 --workflow="Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)" \
@@ -144,51 +140,18 @@ jobs:
                 --json databaseId --jq '.[].databaseId'); do
               if gh api "repos/${{ github.repository }}/actions/runs/$ID/artifacts" \
                   --jq '.artifacts[].name' 2>/dev/null | grep -qFx "$ARTIFACT_NAME"; then
-                FOUND=$ID
-                break
+                FOUND=$ID; break
               fi
             done
             if [ -z "$FOUND" ]; then
-              echo "::error::No success ORT run with artifact '$ARTIFACT_NAME' found in last 30 runs"
+              echo "::error::No success ORT run with artifact '$ARTIFACT_NAME' found"
               exit 1
             fi
             echo "id=$FOUND" >> $GITHUB_OUTPUT
-            echo ">>> Using ORT run $FOUND for artifact $ARTIFACT_NAME"
           fi
 
-      - name: Resolve OpenCvSharp run ID (find run containing matrix.ocv_artifact)
-        id: ocv_run
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -n "${{ inputs.opencv_run_id }}" ]; then
-            echo "id=${{ inputs.opencv_run_id }}" >> $GITHUB_OUTPUT
-            echo ">>> Using user-specified OpenCvSharp run ${{ inputs.opencv_run_id }}"
-          else
-            # OpenCvSharp 用 boolean inputs,1 个 run 通常含全 7 archs;但保险起见也按 artifact 名找
-            ARTIFACT_NAME="${{ matrix.ocv_artifact }}"
-            echo ">>> Searching success runs for artifact: $ARTIFACT_NAME"
-            FOUND=""
-            for ID in $(gh run list -R ${{ github.repository }} \
-                --workflow="Build-Opencvsharp-AllPlatforms-4.10.0" \
-                --status=success --branch=main --limit=10 \
-                --json databaseId --jq '.[].databaseId'); do
-              if gh api "repos/${{ github.repository }}/actions/runs/$ID/artifacts" \
-                  --jq '.artifacts[].name' 2>/dev/null | grep -qFx "$ARTIFACT_NAME"; then
-                FOUND=$ID
-                break
-              fi
-            done
-            if [ -z "$FOUND" ]; then
-              echo "::error::No success OpenCvSharp run with artifact '$ARTIFACT_NAME' found"
-              exit 1
-            fi
-            echo "id=$FOUND" >> $GITHUB_OUTPUT
-            echo ">>> Using OpenCvSharp run $FOUND for artifact $ARTIFACT_NAME"
-          fi
-
-      - name: Download ORT artifact
+      - name: Download ORT (self-build) from CI artifact
+        if: matrix.source == 'self-build'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -198,6 +161,51 @@ jobs:
             -n "${{ matrix.ort_artifact }}" -D downloads/ort
           echo ">>> ORT artifact contents:"
           ls -la downloads/ort
+
+      - name: Download ORT (official) from GitHub release
+        if: matrix.source == 'official'
+        shell: bash
+        run: |
+          mkdir -p downloads/ort
+          curl -sSL -o /tmp/ort-official.tgz "${{ matrix.ort_official_url }}"
+          echo ">>> Downloaded:" && ls -la /tmp/ort-official.tgz
+          tar xzf /tmp/ort-official.tgz -C /tmp
+          # 把 lib/* 平铺到 downloads/ort/ (跟 self-build artifact 结构一致,后续 stage 同样逻辑)
+          cp /tmp/${{ matrix.ort_official_dir }}/lib/*.so* downloads/ort/ 2>/dev/null || true
+          # 把 .so.1.25.0 创建无版本号 symlink (libonnxruntime.so → libonnxruntime.so.1.25.0),
+          # .NET P/Invoke 默认找 libonnxruntime.so 不带版本号
+          if [ -f "downloads/ort/libonnxruntime.so.1.25.0" ] && [ ! -e "downloads/ort/libonnxruntime.so" ]; then
+            ln -sf libonnxruntime.so.1.25.0 downloads/ort/libonnxruntime.so
+          fi
+          echo ">>> ORT official contents:"
+          ls -la downloads/ort
+
+      - name: Resolve OpenCvSharp run ID
+        id: ocv_run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.opencv_run_id }}" ]; then
+            echo "id=${{ inputs.opencv_run_id }}" >> $GITHUB_OUTPUT
+          else
+            ARTIFACT_NAME="${{ matrix.ocv_artifact }}"
+            FOUND=""
+            for ID in $(gh run list -R ${{ github.repository }} \
+                --workflow="Build-Opencvsharp-AllPlatforms-4.10.0" \
+                --status=success --branch=main --limit=10 \
+                --json databaseId --jq '.[].databaseId'); do
+              if gh api "repos/${{ github.repository }}/actions/runs/$ID/artifacts" \
+                  --jq '.artifacts[].name' 2>/dev/null | grep -qFx "$ARTIFACT_NAME"; then
+                FOUND=$ID; break
+              fi
+            done
+            if [ -z "$FOUND" ]; then
+              echo "::error::No success OpenCvSharp run with artifact '$ARTIFACT_NAME' found"
+              exit 1
+            fi
+            echo "id=$FOUND" >> $GITHUB_OUTPUT
+          fi
 
       - name: Download OpenCvSharp artifact
         env:
@@ -210,42 +218,71 @@ jobs:
           echo ">>> OpenCvSharp artifact contents:"
           ls -la downloads/ocv
 
-      - name: Publish C# verify project (RID-specific, optional self-contained)
+      - name: Publish C# verify project
         shell: bash
         run: |
           cd tests/CSharpVerify
-          # 统一用 publish 而不是 build:可以指定 RID,方便 win-x86 self-contained
-          # publish_self_contained=true 时 bundle .NET runtime,适合 host arch ≠ 目标 arch 的场景
           if [ "${{ matrix.publish_self_contained }}" = "true" ]; then
             dotnet publish -c Release -r ${{ matrix.rid }} --self-contained true -o publish -v minimal
           else
             dotnet publish -c Release -r ${{ matrix.rid }} --self-contained false -o publish -v minimal
           fi
-          echo ">>> publish/ contents:"
           ls -la publish/
 
-      - name: Stage native libs into publish dir
+      - name: Stage native libs (separate clean dir for deploy artifact)
         shell: bash
         run: |
           PUB=tests/CSharpVerify/publish
-          # ORT native (主 + 可选附加 dll)
-          cp "downloads/ort/${{ matrix.ort_lib }}" "$PUB/"
-          if [ -n "${{ matrix.ort_extra }}" ] && [ -f "downloads/ort/${{ matrix.ort_extra }}" ]; then
-            cp "downloads/ort/${{ matrix.ort_extra }}" "$PUB/"
-          fi
-          # OpenCvSharp native
-          cp "downloads/ocv/${{ matrix.ocv_lib }}" "$PUB/"
-          echo ">>> Final $PUB contents:"
-          ls -la "$PUB"
+          STAGED=tests/CSharpVerify/staged
+          mkdir -p "$STAGED"
 
-      - name: Generate test.bgr from test.png (CI-only,production 用摄像头帧)
+          stage_to() {
+            local dir=$1
+            # ORT 主库
+            if [ -f "downloads/ort/${{ matrix.ort_lib }}" ]; then
+              cp "downloads/ort/${{ matrix.ort_lib }}" "$dir/"
+            fi
+            # 没版本号 symlink (Linux .so)
+            if [ -e "downloads/ort/libonnxruntime.so" ]; then
+              cp -P "downloads/ort/libonnxruntime.so" "$dir/" 2>/dev/null || \
+                cp "downloads/ort/libonnxruntime.so" "$dir/"
+            fi
+            for extra in ${{ matrix.ort_extra }}; do
+              if [ -f "downloads/ort/$extra" ]; then
+                cp "downloads/ort/$extra" "$dir/"
+              fi
+            done
+            cp "downloads/ocv/${{ matrix.ocv_lib }}" "$dir/"
+          }
+          # 1. publish/ — 给 C# verify 跑用
+          stage_to "$PUB"
+          # 2. staged/ — 干净的 deploy artifact (没 C# 二进制)
+          stage_to "$STAGED"
+
+          # 写一个 version.txt 标识来源
+          cat > "$STAGED/version.txt" <<EOF
+          ORT version: 1.25.0
+          ORT source : ${{ matrix.source }}
+          OpenCvSharp: 4.10.0
+          Platform   : ${{ matrix.name }}
+          .NET RID   : ${{ matrix.rid }}
+          Build at   : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+
+          echo ">>> publish/ contents (含 C# 二进制):"
+          ls -la "$PUB"
+          echo ""
+          echo ">>> staged/ contents (deploy artifact 内容):"
+          ls -la "$STAGED"
+
+      - name: Generate test.bgr from test.png
         shell: bash
         run: |
           cd tests
           python png_to_bgr.py
           ls -la test.bgr
 
-      - name: Run C# verify (raw BGR → OpenCvSharp imgproc → ORT 推理 → annotated.bgr)
+      - name: Run C# verify (test.png → BGR → ORT 推理 + OpenCvSharp 画框 → annotated.bgr)
         shell: bash
         run: |
           cd tests/CSharpVerify
@@ -260,7 +297,6 @@ jobs:
           fi
           chmod +x "publish/$EXE_NAME" 2>/dev/null || true
 
-          # framework-dependent .NET 不会自动搜 publish/ 目录找 native lib;显式加上。
           export DYLD_LIBRARY_PATH="$PUB:${DYLD_LIBRARY_PATH:-}"
           export LD_LIBRARY_PATH="$PUB:${LD_LIBRARY_PATH:-}"
           export PATH="$PUB:$PATH"
@@ -268,7 +304,7 @@ jobs:
           "./publish/$EXE_NAME" "$MODEL" "$BGR" "$OUT"
           ls -la "$OUT"
 
-      - name: Convert annotated.bgr → annotated.png (人肉眼确认 OpenCvSharp 画框正确)
+      - name: Convert annotated.bgr → annotated.png
         if: always()
         shell: bash
         run: |
@@ -278,11 +314,9 @@ jobs:
           if [ -f "$BGR" ]; then
             python ../bgr_to_png.py "$BGR" "$PNG"
             ls -la "$PNG"
-          else
-            echo "::warning::$BGR not found, skip PNG conversion"
           fi
 
-      - name: Upload annotated PNG (供肉眼确认 OpenCvSharp 画框 + ORT 推理一起工作)
+      - name: Upload annotated PNG
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -290,3 +324,13 @@ jobs:
           path: tests/CSharpVerify/annotated-${{ matrix.name }}.png
           retention-days: 14
           if-no-files-found: warn
+
+      # ── 上传 verified native libs (供 Stage Deploy workflow 直接拉) ──
+      - name: Upload verified deploy artifact
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deploy-${{ matrix.name }}
+          path: tests/CSharpVerify/staged/*
+          retention-days: 14
+          if-no-files-found: error

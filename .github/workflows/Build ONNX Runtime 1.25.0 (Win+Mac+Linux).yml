@@ -56,7 +56,7 @@ on:
           - Release
           - RelWithDebInfo
       target_set:
-        description: 'Which platforms to build (推荐:每次只跑一个,不影响其他平台)'
+        description: 'Which platforms to build (5 platforms only — Linux 全用官方 release)'
         required: true
         default: 'all'
         type: choice
@@ -67,18 +67,15 @@ on:
           - win-arm64-dml
           - mac-x64-coreml
           - mac-arm64-coreml
-          - linux-x64-cuda
-          - linux-x64-rocm
-          - linux-x64-openvino
-          - linux-x64-cpu
-          - linux-arm64-cpu
-          # ── 聚合档 (一次跑多个,慎用) ──
+          # ── 聚合档 ──
           - all
           - windows-only
           - macos-only
-          - linux-only
-          - linux-cpu-only      # 信创最稳的兜底,只要这一档
-          - linux-gpu-only      # 不含 cpu/arm64,仅 GPU 加速档
+        # 注:Linux 不在 self-build 范围。
+        #   linux-x64 / linux-aarch64 / linux-x64-gpu(CUDA+TRT) 直接用官方
+        #   onnxruntime v1.25.0 release tgz (glibc 2.27,信创全适配,
+        #   比我们的 manylinux_2_28 还宽)。OpenVINO/ROCm/CANN 上游 bug
+        #   太多,按需再加。
 
 jobs:
   prepare:
@@ -95,47 +92,25 @@ jobs:
           # deploy_target / xcode_version: 仅 macOS 用
           # artifact_name: 上传产物名
 
+          # 5 个 self-build platform — Linux 全部用官方 release
           WIN_X64_DML='{"platform":"windows","arch":"x64","ep":"dml","runner":"windows-2022","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x64-dml"}'
           WIN_X86_CPU='{"platform":"windows","arch":"x86","ep":"cpu","runner":"windows-2022","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-x86-cpu"}'
           WIN_ARM64_DML='{"platform":"windows","arch":"arm64","ep":"dml","runner":"windows-11-arm","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-win-arm64-dml"}'
           MAC_X64_COREML='{"platform":"macos","arch":"x86_64","ep":"coreml","runner":"macos-15-intel","docker":"","deploy_target":"10.15","xcode_version":"","artifact_name":"onnxruntime-1.25.0-osx-x64-coreml"}'
           MAC_ARM64_COREML='{"platform":"macos","arch":"arm64","ep":"coreml","runner":"macos-14","docker":"","deploy_target":"11.0","xcode_version":"15.2","artifact_name":"onnxruntime-1.25.0-osx-arm64-coreml"}'
 
-          # Linux 各档 (用 docker 字段控制容器)
-          # ★ CPU 档跟 OpenCvSharp 4.10.0 完全对齐:ubuntu:18.04 / arm64v8/ubuntu:18.04 (glibc 2.27)
-          #   覆盖 Ubuntu 18.04+ / 中标麒麟 V7 / 银河麒麟 V10 全系 / 统信 UOS V20 / Anolis 8 / RHEL 7+
-          # ★ arm64 runner 升 ubuntu-24.04-arm,跟 OpenCvSharp 一致
-          LINUX_X64_CUDA='{"platform":"linux","arch":"x64","ep":"cuda","runner":"ubuntu-22.04","docker":"nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cuda"}'
-          LINUX_X64_ROCM='{"platform":"linux","arch":"x64","ep":"rocm","runner":"ubuntu-22.04","docker":"rocm/dev-ubuntu-22.04:6.2.4-complete","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-rocm"}'
-          LINUX_X64_OPENVINO='{"platform":"linux","arch":"x64","ep":"openvino","runner":"ubuntu-22.04","docker":"openvino/ubuntu22_dev:2025.4.1","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-openvino"}'
-          LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-24.04","docker":"quay.io/pypa/manylinux_2_28_x86_64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
-          LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-24.04-arm","docker":"quay.io/pypa/manylinux_2_28_aarch64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
-
           case "${{ inputs.target_set }}" in
-            # ── 单平台档 ──
             win-x64-dml)        echo "matrix={\"include\":[$WIN_X64_DML]}" >> $GITHUB_OUTPUT ;;
             win-x86-cpu)        echo "matrix={\"include\":[$WIN_X86_CPU]}" >> $GITHUB_OUTPUT ;;
             win-arm64-dml)      echo "matrix={\"include\":[$WIN_ARM64_DML]}" >> $GITHUB_OUTPUT ;;
             mac-x64-coreml)     echo "matrix={\"include\":[$MAC_X64_COREML]}" >> $GITHUB_OUTPUT ;;
             mac-arm64-coreml)   echo "matrix={\"include\":[$MAC_ARM64_COREML]}" >> $GITHUB_OUTPUT ;;
-            linux-x64-cuda)     echo "matrix={\"include\":[$LINUX_X64_CUDA]}" >> $GITHUB_OUTPUT ;;
-            linux-x64-rocm)     echo "matrix={\"include\":[$LINUX_X64_ROCM]}" >> $GITHUB_OUTPUT ;;
-            linux-x64-openvino) echo "matrix={\"include\":[$LINUX_X64_OPENVINO]}" >> $GITHUB_OUTPUT ;;
-            linux-x64-cpu)      echo "matrix={\"include\":[$LINUX_X64_CPU]}" >> $GITHUB_OUTPUT ;;
-            linux-arm64-cpu)    echo "matrix={\"include\":[$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
-            # ── 聚合档 ──
             windows-only)
               echo "matrix={\"include\":[$WIN_X64_DML,$WIN_X86_CPU,$WIN_ARM64_DML]}" >> $GITHUB_OUTPUT ;;
             macos-only)
               echo "matrix={\"include\":[$MAC_X64_COREML,$MAC_ARM64_COREML]}" >> $GITHUB_OUTPUT ;;
-            linux-only)
-              echo "matrix={\"include\":[$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
-            linux-cpu-only)
-              echo "matrix={\"include\":[$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
-            linux-gpu-only)
-              echo "matrix={\"include\":[$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO]}" >> $GITHUB_OUTPUT ;;
             *)
-              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_X86_CPU,$WIN_ARM64_DML,$MAC_X64_COREML,$MAC_ARM64_COREML,$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+              echo "matrix={\"include\":[$WIN_X64_DML,$WIN_X86_CPU,$WIN_ARM64_DML,$MAC_X64_COREML,$MAC_ARM64_COREML]}" >> $GITHUB_OUTPUT ;;
           esac
 
   build:

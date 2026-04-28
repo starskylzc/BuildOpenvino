@@ -1,0 +1,170 @@
+name: Stage Deploy (汇总 verified deploy artifacts)
+
+# 目的:
+#   把 "Verify Built Artifacts (C# 端到端测试)" workflow 全 7 平台 ✅ 的产物
+#   汇总成一个 deploy.zip artifact,本地一键下载就有完整 deploy/<platform>/ 目录。
+#
+# 前提:
+#   必须传 verify_run_id,且该 run 全 7 个 platform job 都 success。
+#   不允许部分通过就 stage — 部分 ✅ 是部署事故。
+#
+# 输出:
+#   single artifact "deploy-1.25.0-<sha>.zip" 包含:
+#     deploy/
+#       win-x64/        onnxruntime.dll + DirectML.dll + OpenCvSharpExtern.dll + version.txt
+#       win-x86/        onnxruntime.dll + OpenCvSharpExtern.dll + version.txt
+#       win-arm64/      onnxruntime.dll + DirectML.dll + OpenCvSharpExtern.dll + version.txt
+#       osx-x64/        libonnxruntime.dylib + libonnxruntime_providers_coreml.dylib + libOpenCvSharpExtern.dylib + version.txt
+#       osx-arm64/      同上
+#       linux-x64/      libonnxruntime.so + libonnxruntime_providers_{cuda,tensorrt,shared}.so + libOpenCvSharpExtern.so + version.txt
+#       linux-aarch64/  libonnxruntime.so + libonnxruntime_providers_shared.so + libOpenCvSharpExtern.so + version.txt
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify_run_id:
+        description: '必填: Verify Built Artifacts run ID (必须全 7 平台 success)'
+        required: true
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate verify run is fully success (全 7 platforms)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          RUN_ID="${{ inputs.verify_run_id }}"
+          echo ">>> Validating run $RUN_ID"
+          STATUS=$(gh run view $RUN_ID -R ${{ github.repository }} --json status,conclusion --jq '"\(.status)/\(.conclusion)"')
+          echo "  Status: $STATUS"
+          if [ "$STATUS" != "completed/success" ]; then
+            echo "::error::Run $RUN_ID 不是 completed/success ($STATUS),不能 stage 部分通过的产物"
+            exit 1
+          fi
+          # 检查 7 个平台 job 都 success
+          EXPECTED="win-x64-dml win-x86-cpu win-arm64-dml mac-x64-coreml mac-arm64-coreml linux-x64 linux-aarch64"
+          MISSING=""
+          for plat in $EXPECTED; do
+            CONCL=$(gh run view $RUN_ID -R ${{ github.repository }} --json jobs \
+              --jq ".jobs[] | select(.name==\"$plat\") | .conclusion")
+            if [ "$CONCL" != "success" ]; then
+              MISSING="$MISSING $plat($CONCL)"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::缺少 success 的平台:$MISSING"
+            exit 1
+          fi
+          echo "  ✅ 全 7 平台 success — 可以 stage"
+
+      - name: Download all 7 deploy-<platform> artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          RUN_ID="${{ inputs.verify_run_id }}"
+          mkdir -p staging
+          for plat in win-x64-dml win-x86-cpu win-arm64-dml mac-x64-coreml mac-arm64-coreml linux-x64 linux-aarch64; do
+            echo ">>> Pulling deploy-$plat"
+            gh run download $RUN_ID -R ${{ github.repository }} \
+              -n "deploy-$plat" -D "staging/$plat"
+            ls -la "staging/$plat" | head -10
+          done
+
+      - name: Assemble deploy/ tree (rename to clean platform names)
+        shell: bash
+        run: |
+          mkdir -p deploy
+          # platform 名字归一化:不带 EP suffix
+          mv staging/win-x64-dml       deploy/win-x64
+          mv staging/win-x86-cpu       deploy/win-x86
+          mv staging/win-arm64-dml     deploy/win-arm64
+          mv staging/mac-x64-coreml    deploy/osx-x64
+          mv staging/mac-arm64-coreml  deploy/osx-arm64
+          mv staging/linux-x64         deploy/linux-x64
+          mv staging/linux-aarch64     deploy/linux-aarch64
+
+          echo ">>> 完整 deploy/ tree:"
+          find deploy -type f | sort | head -100
+          echo ""
+          echo ">>> 每个平台总大小:"
+          du -sh deploy/*
+
+      - name: Generate deploy/README.md (客户部署说明)
+        shell: bash
+        run: |
+          cat > deploy/README.md <<'EOF'
+          # YuYiNoPhotoLib Native Runtime Bundle (1.25.0)
+
+          7 个平台,选择对应你客户机的 SKU 直接 ship 整个目录即可。
+
+          | 平台目录 | 客户机 OS | 加速 | 备注 |
+          |---|---|---|---|
+          | `win-x64/` | Windows 10/11 x64 | DirectML 自动 (NVIDIA/AMD/Intel iGPU) | 主流桌面 |
+          | `win-x86/` | Windows 10/11 32-bit | CPU only | 老 32-bit 进程 |
+          | `win-arm64/` | Windows 11 ARM64 | DirectML | Surface ARM / Snapdragon |
+          | `osx-x64/` | macOS 10.15+ Intel | CoreML | 老 Intel Mac |
+          | `osx-arm64/` | macOS 11.0+ Apple Silicon | CoreML + ANE | M1/M2/M3/M4 |
+          | `linux-x64/` | Linux x86_64 (glibc 2.27+) | CPU EP / CUDA12 / TensorRT | 信创 + NVIDIA dGPU |
+          | `linux-aarch64/` | Linux ARM64 (glibc 2.27+) | CPU only | 鲲鹏 / 飞腾 信创 |
+
+          ## C# 客户端使用
+
+          ```csharp
+          // ORT 跨平台 P/Invoke 自动找同目录的 native lib
+          using var sess = new InferenceSession("model.onnx");
+          // Windows: 不指定 EP 默认 DML (自动 GPU)
+          // macOS:   sess.AppendExecutionProvider_CoreML(...)
+          // Linux NVIDIA: sess.AppendExecutionProvider_CUDA(...) 或 _Tensorrt
+          // Linux ARM 或 信创 CPU: 默认 CPU EP
+          ```
+
+          ## 信创 OS 兼容性
+
+          Linux build 用官方 Microsoft 1.25.0 release (glibc 2.27 floor),覆盖:
+          - ✅ 银河麒麟 V10 系列 (glibc 2.28+)
+          - ✅ 中标麒麟 V10 / 统信 UOS V20
+          - ✅ openEuler / RHEL 8+ / Anolis 8+
+          - ✅ Ubuntu 18.04+ / Debian 10+
+
+          ## 不在本 bundle 的国产 NPU
+
+          按需单独提供:
+          - 华为昇腾 (CANN EP) — 需要客户 CANN Toolkit 8.0+
+          - 海光 DCU (MIGraphX EP) — 需要客户 DTK
+          - 寒武纪 / 摩尔线程 / 燧原 — 需要换框架到厂商 SDK
+
+          联系开发支持申请。
+          EOF
+          ls -la deploy/README.md
+
+      - name: Upload final deploy bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: deploy-1.25.0-${{ github.sha }}
+          path: deploy/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "## ✅ Stage Deploy 完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Verify run: \`${{ inputs.verify_run_id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "本地下载:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "gh run download ${{ github.run_id }} -R ${{ github.repository }} \\\\" >> $GITHUB_STEP_SUMMARY
+          echo "  -n deploy-1.25.0-${{ github.sha }} -D ./deploy" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "或用 \`./artifacts/download_deploy.sh\` 一键。" >> $GITHUB_STEP_SUMMARY
