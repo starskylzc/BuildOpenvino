@@ -101,8 +101,6 @@ var outMap = results.ToDictionary(r => r.Name, r => r.AsTensor<Float16>());
 Console.WriteLine($"  Outputs: {string.Join(", ", outMap.Keys)}");
 
 // ── helpers ──
-record Det(float X1, float Y1, float X2, float Y2, float Score, int Cls);
-
 // 把 letterboxed 坐标映射回原图
 Det MapBack(Det d) => new(
     Math.Max(0, (d.X1 - padX) / ratio),
@@ -247,3 +245,6 @@ if (fail)
 }
 Console.WriteLine($"\n🎉 C# end-to-end OK — OpenCvSharp 画框 + ORT 推理 (我们自己 build 的) 全部工作");
 return 0;
+
+// ── Type declarations (must come AFTER top-level statements per C# rules) ──
+record Det(float X1, float Y1, float X2, float Y2, float Score, int Cls);
