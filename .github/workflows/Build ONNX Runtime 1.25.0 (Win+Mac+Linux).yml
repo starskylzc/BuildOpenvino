@@ -14,7 +14,7 @@ name: Build ORT 1.25.0 Desktop (Win + Mac + Linux, full GPU/iGPU/CPU)
 #   │ osx-arm64-coreml        │ macOS 11.0   │ Apple GPU + ANE  │ CoreML + CPU │ —         │
 #   │ linux-x64-cuda          │ Ubuntu 22.04 │ NVIDIA dGPU      │ CUDA + CPU   │ 2.35      │
 #   │ linux-x64-rocm          │ Ubuntu 22.04 │ AMD Radeon dGPU  │ ROCm + CPU   │ 2.35      │
-#   │ linux-x64-openvino      │ Ubuntu 22.04 │ Intel iGPU/Arc   │ OpenVINO+CPU │ 2.35      │
+#   │ linux-x64-openvino      │ ov2025.4.1   │ Intel iGPU/Arc   │ OpenVINO+CPU │ 2.35      │
 #   │ linux-x64-cpu           │ manylinux_2_28│—                │ CPU          │ 2.28      │
 #   │ linux-arm64-cpu         │ manylinux_2_28│—                │ CPU          │ 2.28      │
 #   └─────────────────────────┴──────────────┴──────────────────┴──────────────┴───────────┘
@@ -87,7 +87,7 @@ jobs:
           # Linux 各档 (用 docker 字段控制容器)
           LINUX_X64_CUDA='{"platform":"linux","arch":"x64","ep":"cuda","runner":"ubuntu-22.04","docker":"nvidia/cuda:12.6.0-cudnn-devel-ubuntu22.04","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cuda"}'
           LINUX_X64_ROCM='{"platform":"linux","arch":"x64","ep":"rocm","runner":"ubuntu-22.04","docker":"rocm/dev-ubuntu-22.04:6.2.4-complete","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-rocm"}'
-          LINUX_X64_OPENVINO='{"platform":"linux","arch":"x64","ep":"openvino","runner":"ubuntu-22.04","docker":"","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-openvino"}'
+          LINUX_X64_OPENVINO='{"platform":"linux","arch":"x64","ep":"openvino","runner":"ubuntu-22.04","docker":"openvino/ubuntu22_dev:2025.4.1","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-openvino"}'
           LINUX_X64_CPU='{"platform":"linux","arch":"x64","ep":"cpu","runner":"ubuntu-22.04","docker":"quay.io/pypa/manylinux_2_28_x86_64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-x64-cpu"}'
           LINUX_ARM64_CPU='{"platform":"linux","arch":"arm64","ep":"cpu","runner":"ubuntu-22.04-arm","docker":"quay.io/pypa/manylinux_2_28_aarch64","deploy_target":"","xcode_version":"","artifact_name":"onnxruntime-1.25.0-linux-arm64-cpu"}'
 
@@ -191,43 +191,10 @@ jobs:
           if ! command -v ninja &>/dev/null; then brew install ninja; fi
           cmake --version
 
-      - name: Install deps (Linux openvino - on host)
-        if: matrix.platform == 'linux' && matrix.ep == 'openvino'
-        shell: bash
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y build-essential ninja-build pkg-config \
-            libssl-dev libcurl4-openssl-dev zlib1g-dev \
-            python3-pip python3-dev wget curl tar \
-            protobuf-compiler libprotobuf-dev
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "cmake>=3.28,<4" "numpy<2"
-
-          # OpenVINO 2024.6 LTS via 官方 tarball (apt 包安装路径不稳定,改用 tarball 直解压)
-          # storage.openvinotoolkit.org 是 Intel 官方 CDN,跨 Ubuntu/RHEL 通用,确定路径
-          OV_VER="2024.6.0"
-          OV_BUILD="17404.4c0f47d2335"
-          OV_DIR="l_openvino_toolkit_ubuntu22_${OV_VER}.${OV_BUILD}_x86_64"
-          OV_TGZ="${OV_DIR}.tgz"
-          OV_URL="https://storage.openvinotoolkit.org/repositories/openvino/packages/2024.6/linux/${OV_TGZ}"
-
-          echo ">>> Downloading OpenVINO 2024.6 LTS from $OV_URL"
-          wget -q --show-progress "$OV_URL" -O "/tmp/${OV_TGZ}"
-
-          echo ">>> Extracting to /opt/intel/"
-          sudo mkdir -p /opt/intel
-          sudo tar -xzf "/tmp/${OV_TGZ}" -C /opt/intel/
-          sudo mv "/opt/intel/${OV_DIR}" /opt/intel/openvino_2024
-
-          # 验证关键路径
-          ls /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino.so* \
-            || (echo "::error::OpenVINO extract failed - libopenvino.so not found"; \
-                ls -la /opt/intel/openvino_2024/ 2>/dev/null; exit 1)
-          ls /opt/intel/openvino_2024/setupvars.sh \
-            || (echo "::error::setupvars.sh missing"; exit 1)
-
-          echo "OPENVINO_ROOT=/opt/intel/openvino_2024" >> $GITHUB_ENV
-          echo "✅ OpenVINO 2024.6 LTS extracted to /opt/intel/openvino_2024"
+      # OpenVINO 走 Intel 官方 dev Docker 镜像 (openvino/ubuntu22_dev:2025.4.1):
+      #   - OpenVINO 预装 /opt/intel/openvino_2025
+      #   - 包含 setupvars.sh / OpenVINOConfig.cmake / 全部 plugin
+      #   - 跨发布版本路径稳定,不需要 host 上装 deps
 
       # arm64 cpu 改用 manylinux_2_28_aarch64 容器 (glibc 2.28),
       # 覆盖银河麒麟 V10 SP1 ARM / 统信 UOS V20 ARM,无需在 host 装 deps。
@@ -410,24 +377,59 @@ jobs:
                   onnxruntime_BUILD_BENCHMARKS=OFF
             '
 
-      # ---- Linux x64 OpenVINO (on host, OV via apt) ----
-      - name: Build (Linux x64 OpenVINO)
+      # ---- Linux x64 OpenVINO (在 openvino/ubuntu22_dev:2025.4.1 容器内) ----
+      - name: Build (Linux x64 OpenVINO, in container)
         if: matrix.platform == 'linux' && matrix.ep == 'openvino'
         shell: bash
         run: |
-          source /opt/intel/openvino_2024/setupvars.sh
-          python3 tools/ci_build/build.py \
-            --build_dir build \
-            --config ${{ inputs.build_type }} \
-            --use_openvino CPU \
-            --parallel \
-            --build_shared_lib \
-            --skip_tests \
-            --skip_submodule_sync \
-            --compile_no_warning_as_error \
-            --cmake_extra_defines \
-              onnxruntime_BUILD_UNIT_TESTS=OFF \
-              onnxruntime_BUILD_BENCHMARKS=OFF
+          docker run --rm \
+            -v "$(pwd):/work" -w /work \
+            -e ORT_VERSION="${{ env.ORT_VERSION }}" \
+            "${{ matrix.docker }}" \
+            bash -c '
+              set -ex
+              # openvino/ubuntu22_dev 镜像默认非 root,切到 root 装编译依赖
+              sudo apt-get update -y
+              sudo apt-get install -y --no-install-recommends \
+                build-essential ninja-build pkg-config \
+                libssl-dev libcurl4-openssl-dev zlib1g-dev \
+                python3 python3-pip python3-dev \
+                protobuf-compiler libprotobuf-dev \
+                git ca-certificates
+              python3 -m pip install --upgrade pip
+              python3 -m pip install "cmake>=3.28,<4" "numpy<2"
+
+              # 镜像里 OpenVINO 路径定位 (Intel 通常装 /opt/intel/openvino 或 /opt/intel/openvino_2025)
+              OV_ROOT=""
+              for cand in /opt/intel/openvino /opt/intel/openvino_2025 /opt/intel/openvino_2025.4 /opt/intel/openvino_2025.4.1; do
+                if [ -d "$cand" ] && [ -f "$cand/setupvars.sh" ]; then
+                  OV_ROOT="$cand"
+                  break
+                fi
+              done
+              if [ -z "$OV_ROOT" ]; then
+                echo "::error::OpenVINO 在容器内找不到"
+                ls -la /opt/intel/ 2>/dev/null
+                exit 1
+              fi
+              echo ">>> OpenVINO root: $OV_ROOT"
+              source "$OV_ROOT/setupvars.sh"
+              echo "INTEL_OPENVINO_DIR=$INTEL_OPENVINO_DIR"
+
+              python3 tools/ci_build/build.py \
+                --build_dir build \
+                --config ${{ inputs.build_type }} \
+                --use_openvino CPU \
+                --parallel \
+                --build_shared_lib \
+                --skip_tests \
+                --skip_submodule_sync \
+                --compile_no_warning_as_error \
+                --allow_running_as_root \
+                --cmake_extra_defines \
+                  onnxruntime_BUILD_UNIT_TESTS=OFF \
+                  onnxruntime_BUILD_BENCHMARKS=OFF
+            '
 
       # ---- Linux x64 CPU (manylinux_2_28 container, glibc 2.28 floor) ----
       - name: Build (Linux x64 CPU manylinux_2_28, in container)
@@ -723,29 +725,10 @@ jobs:
           BUNDLER_EOF
           )
 
-          # 在合适的环境跑 BUNDLER (有 ldd + 全部依赖路径可见)
-          if [ -n "${{ matrix.docker }}" ]; then
-            # 容器内跑 (容器里有 SDK 完整路径)
-            docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
-              bash -c "$BUNDLER"
-          elif [ "${{ matrix.ep }}" = "openvino" ]; then
-            # OpenVINO 在 host 上跑 (LD_LIBRARY_PATH 加上 OV runtime)
-            export LD_LIBRARY_PATH="/opt/intel/openvino_2024/runtime/lib/intel64:/opt/intel/openvino_2024/runtime/3rdparty/tbb/lib:${LD_LIBRARY_PATH:-}"
-            # 也手动复制 plugins.xml + TBB (ldd 不会跟踪 dlopen 的 plugin)
-            cp /opt/intel/openvino_2024/runtime/lib/intel64/plugins.xml artifacts/ 2>/dev/null || true
-            cp /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino_intel_*_plugin.so artifacts/ 2>/dev/null || true
-            cp /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino_*frontend.so artifacts/ 2>/dev/null || true
-            cp /opt/intel/openvino_2024/runtime/3rdparty/tbb/lib/libtbb.so* artifacts/ 2>/dev/null || true
-            cp /opt/intel/openvino_2024/runtime/3rdparty/tbb/lib/libtbbmalloc.so* artifacts/ 2>/dev/null || true
-            ARTIFACTS_DIR="$(pwd)/artifacts"
-            BUNDLER_LOCAL=$(echo "$BUNDLER" | sed "s|/work/artifacts|$ARTIFACTS_DIR|g")
-            bash -c "$BUNDLER_LOCAL"
-          else
-            # arm64 cpu: host 上直接跑 (依赖只有系统 libstdc++/libc 之类,会被全部 skip)
-            ARTIFACTS_DIR="$(pwd)/artifacts"
-            BUNDLER_LOCAL=$(echo "$BUNDLER" | sed "s|/work/artifacts|$ARTIFACTS_DIR|g")
-            bash -c "$BUNDLER_LOCAL"
-          fi
+          # 所有 Linux 档现在都有 docker (cuda/rocm/openvino/cpu/arm64-cpu),
+          # 统一在容器内跑 BUNDLER,LD_LIBRARY_PATH + ldd 路径都准
+          docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+            bash -c "$BUNDLER"
 
           # GPU EP 必须把 plugin / 运行时插件单独捞出来 (dlopen 不走 ldd)
           if [ "${{ matrix.ep }}" = "cuda" ]; then
@@ -769,6 +752,30 @@ jobs:
                            librocm_smi64.so librocrand.so libhipsparse.so libhipblas.so; do
                   find /opt/rocm -name "${lib}*" 2>/dev/null | head -2 | xargs -I{} cp -n {} /work/artifacts/ 2>/dev/null || true
                 done
+              '
+          fi
+          if [ "${{ matrix.ep }}" = "openvino" ]; then
+            docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
+              bash -c '
+                # 容器内定位 OpenVINO 安装路径
+                OV_ROOT=""
+                for cand in /opt/intel/openvino /opt/intel/openvino_2025 /opt/intel/openvino_2025.4 /opt/intel/openvino_2025.4.1; do
+                  [ -d "$cand" ] && [ -f "$cand/setupvars.sh" ] && OV_ROOT="$cand" && break
+                done
+                if [ -z "$OV_ROOT" ]; then
+                  echo "::warning::OpenVINO 路径在容器内找不到,plugin 可能漏抓"
+                  exit 0
+                fi
+                LIB="$OV_ROOT/runtime/lib/intel64"
+                # OpenVINO plugins.xml + Intel plugins + frontend 都是 dlopen 的,ldd 抓不到
+                cp -n "$LIB/plugins.xml" /work/artifacts/ 2>/dev/null || true
+                cp -n "$LIB"/libopenvino_intel_*_plugin.so* /work/artifacts/ 2>/dev/null || true
+                cp -n "$LIB"/libopenvino_*_frontend.so* /work/artifacts/ 2>/dev/null || true
+                cp -n "$LIB"/libopenvino_auto_*plugin.so* /work/artifacts/ 2>/dev/null || true
+                cp -n "$LIB"/libopenvino_hetero_plugin.so* /work/artifacts/ 2>/dev/null || true
+                # TBB threading runtime
+                TBB="$OV_ROOT/runtime/3rdparty/tbb/lib"
+                [ -d "$TBB" ] && cp -n "$TBB"/libtbb.so* "$TBB"/libtbbmalloc.so* /work/artifacts/ 2>/dev/null || true
               '
           fi
 
@@ -828,15 +835,11 @@ jobs:
           $dll = "artifacts\onnxruntime.dll"
           python -c "import ctypes; lib = ctypes.CDLL(r'$dll'); fn = lib.OrtGetApiBase; fn.restype = ctypes.c_void_p; print('OrtGetApiBase =', hex(fn()))"
 
-      - name: Smoke load (macOS / Linux native, non-container)
-        if: (matrix.platform == 'macos') || (matrix.platform == 'linux' && matrix.docker == '')
+      - name: Smoke load (macOS)
+        if: matrix.platform == 'macos'
         shell: bash
         run: |
-          if [ "${{ matrix.platform }}" = "macos" ]; then
-            FILE="artifacts/libonnxruntime.dylib"
-          else
-            FILE="artifacts/libonnxruntime.so"
-          fi
+          FILE="artifacts/libonnxruntime.dylib"
           python3 -c "
           import ctypes, os, sys
           lib = ctypes.CDLL('$FILE')
@@ -847,7 +850,7 @@ jobs:
           "
 
       - name: Smoke load (Linux container)
-        if: matrix.platform == 'linux' && matrix.docker != ''
+        if: matrix.platform == 'linux'
         shell: bash
         run: |
           docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
