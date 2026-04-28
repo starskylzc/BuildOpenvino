@@ -205,7 +205,7 @@ jobs:
 
       - name: Setup MSBuild (Windows)
         if: matrix.platform == 'windows'
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
 
       - name: Install deps (macOS)
         if: matrix.platform == 'macos'
