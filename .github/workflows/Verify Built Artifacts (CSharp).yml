@@ -23,17 +23,22 @@ on:
         required: false
         type: string
       target_set:
-        description: 'Which platforms to verify (推荐:每次只跑一个,某个失败不影响其他)'
+        description: 'Which platforms to verify (推荐:每次只跑一个,跟 ORT build 名对齐)'
         required: true
         default: 'all'
         type: choice
         options:
-          # ── 单平台档 ──
-          - win-x64
-          - osx-x64
-          - osx-arm64
-          - linux-x64
-          - linux-arm64
+          # ── 单平台档 (跟 ORT build target_set 完全对齐) ──
+          - win-x64-dml
+          - win-x86-cpu
+          - win-arm64-dml
+          - mac-x64-coreml
+          - mac-arm64-coreml
+          - linux-x64-cuda
+          - linux-x64-rocm
+          - linux-x64-openvino
+          - linux-x64-cpu
+          - linux-arm64-cpu
           # ── 聚合档 ──
           - all
           - windows-only
@@ -51,29 +56,44 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          # Win x64 用 ORT win-x64-dml + OpenCvSharp win-x64
-          # Mac x64 用 ORT osx-x64-coreml + OpenCvSharp osx-x64-slice
-          # Mac arm64 用 ORT osx-arm64-coreml + OpenCvSharp osx-arm64-slice
-          # Linux x64 用 ORT linux-x64-cpu + OpenCvSharp linux-x86_64
-          # Linux arm64 用 ORT linux-arm64-cpu + OpenCvSharp linux-aarch64
-          WIN_X64='{"name":"win-x64","runner":"windows-2022","ort_artifact":"onnxruntime-1.25.0-win-x64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-x64","ocv_lib":"OpenCvSharpExtern.dll"}'
-          MAC_X64='{"name":"osx-x64","runner":"macos-15-intel","ort_artifact":"onnxruntime-1.25.0-osx-x64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-x64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
-          MAC_ARM64='{"name":"osx-arm64","runner":"macos-14","ort_artifact":"onnxruntime-1.25.0-osx-arm64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-arm64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
-          LINUX_X64='{"name":"linux-x64","runner":"ubuntu-24.04","ort_artifact":"onnxruntime-1.25.0-linux-x64-cpu","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
-          LINUX_ARM64='{"name":"linux-arm64","runner":"ubuntu-24.04-arm","ort_artifact":"onnxruntime-1.25.0-linux-arm64-cpu","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-aarch64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          # 全 10 平台:跟 ORT build target_set 完全对齐
+          # rid:        .NET RID,用于 publish
+          # publish_self_contained: 是否 self-contained publish (win-x86 需要,因为
+          #             windows-2022 runner 是 x64 host,默认没装 x86 .NET runtime)
+          # gpu_ep:     仅 Linux GPU 档为 true,这种 build 的 ORT 含 GPU plugin 但
+          #             CI runner 没 GPU,我们用 CPU EP 兜底验证 lib 加载 + CPU 推理
+          WIN_X64='{"name":"win-x64-dml","runner":"windows-2022","rid":"win-x64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-win-x64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-x64","ocv_lib":"OpenCvSharpExtern.dll"}'
+          WIN_X86='{"name":"win-x86-cpu","runner":"windows-2022","rid":"win-x86","publish_self_contained":true,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-win-x86-cpu","ort_lib":"onnxruntime.dll","ort_extra":"","ocv_artifact":"win-x86","ocv_lib":"OpenCvSharpExtern.dll"}'
+          WIN_ARM64='{"name":"win-arm64-dml","runner":"windows-11-arm","rid":"win-arm64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-win-arm64-dml","ort_lib":"onnxruntime.dll","ort_extra":"DirectML.dll","ocv_artifact":"win-arm64","ocv_lib":"OpenCvSharpExtern.dll"}'
+          MAC_X64='{"name":"mac-x64-coreml","runner":"macos-15-intel","rid":"osx-x64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-osx-x64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-x64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
+          MAC_ARM64='{"name":"mac-arm64-coreml","runner":"macos-14","rid":"osx-arm64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-osx-arm64-coreml","ort_lib":"libonnxruntime.dylib","ort_extra":"libonnxruntime_providers_coreml.dylib","ocv_artifact":"osx-arm64-slice","ocv_lib":"libOpenCvSharpExtern.dylib"}'
+          LINUX_X64_CPU='{"name":"linux-x64-cpu","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-linux-x64-cpu","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          LINUX_ARM64_CPU='{"name":"linux-arm64-cpu","runner":"ubuntu-24.04-arm","rid":"linux-arm64","publish_self_contained":false,"gpu_ep":false,"ort_artifact":"onnxruntime-1.25.0-linux-arm64-cpu","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-aarch64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          LINUX_X64_CUDA='{"name":"linux-x64-cuda","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"gpu_ep":true,"ort_artifact":"onnxruntime-1.25.0-linux-x64-cuda","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          LINUX_X64_ROCM='{"name":"linux-x64-rocm","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"gpu_ep":true,"ort_artifact":"onnxruntime-1.25.0-linux-x64-rocm","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
+          LINUX_X64_OPENVINO='{"name":"linux-x64-openvino","runner":"ubuntu-24.04","rid":"linux-x64","publish_self_contained":false,"gpu_ep":true,"ort_artifact":"onnxruntime-1.25.0-linux-x64-openvino","ort_lib":"libonnxruntime.so","ort_extra":"","ocv_artifact":"linux-x86_64","ocv_lib":"libOpenCvSharpExtern.so"}'
 
           case "${{ inputs.target_set }}" in
-            # ── 单平台档 ──
-            win-x64)      echo "matrix={\"include\":[$WIN_X64]}" >> $GITHUB_OUTPUT ;;
-            osx-x64)      echo "matrix={\"include\":[$MAC_X64]}" >> $GITHUB_OUTPUT ;;
-            osx-arm64)    echo "matrix={\"include\":[$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
-            linux-x64)    echo "matrix={\"include\":[$LINUX_X64]}" >> $GITHUB_OUTPUT ;;
-            linux-arm64)  echo "matrix={\"include\":[$LINUX_ARM64]}" >> $GITHUB_OUTPUT ;;
+            # ── 单平台档 (跟 ORT build target_set 对齐) ──
+            win-x64-dml)        echo "matrix={\"include\":[$WIN_X64]}" >> $GITHUB_OUTPUT ;;
+            win-x86-cpu)        echo "matrix={\"include\":[$WIN_X86]}" >> $GITHUB_OUTPUT ;;
+            win-arm64-dml)      echo "matrix={\"include\":[$WIN_ARM64]}" >> $GITHUB_OUTPUT ;;
+            mac-x64-coreml)     echo "matrix={\"include\":[$MAC_X64]}" >> $GITHUB_OUTPUT ;;
+            mac-arm64-coreml)   echo "matrix={\"include\":[$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
+            linux-x64-cuda)     echo "matrix={\"include\":[$LINUX_X64_CUDA]}" >> $GITHUB_OUTPUT ;;
+            linux-x64-rocm)     echo "matrix={\"include\":[$LINUX_X64_ROCM]}" >> $GITHUB_OUTPUT ;;
+            linux-x64-openvino) echo "matrix={\"include\":[$LINUX_X64_OPENVINO]}" >> $GITHUB_OUTPUT ;;
+            linux-x64-cpu)      echo "matrix={\"include\":[$LINUX_X64_CPU]}" >> $GITHUB_OUTPUT ;;
+            linux-arm64-cpu)    echo "matrix={\"include\":[$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
             # ── 聚合档 ──
-            windows-only) echo "matrix={\"include\":[$WIN_X64]}" >> $GITHUB_OUTPUT ;;
-            macos-only)   echo "matrix={\"include\":[$MAC_X64,$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
-            linux-only)   echo "matrix={\"include\":[$LINUX_X64,$LINUX_ARM64]}" >> $GITHUB_OUTPUT ;;
-            *)            echo "matrix={\"include\":[$WIN_X64,$MAC_X64,$MAC_ARM64,$LINUX_X64,$LINUX_ARM64]}" >> $GITHUB_OUTPUT ;;
+            windows-only)
+              echo "matrix={\"include\":[$WIN_X64,$WIN_X86,$WIN_ARM64]}" >> $GITHUB_OUTPUT ;;
+            macos-only)
+              echo "matrix={\"include\":[$MAC_X64,$MAC_ARM64]}" >> $GITHUB_OUTPUT ;;
+            linux-only)
+              echo "matrix={\"include\":[$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
+            *)
+              echo "matrix={\"include\":[$WIN_X64,$WIN_X86,$WIN_ARM64,$MAC_X64,$MAC_ARM64,$LINUX_X64_CUDA,$LINUX_X64_ROCM,$LINUX_X64_OPENVINO,$LINUX_X64_CPU,$LINUX_ARM64_CPU]}" >> $GITHUB_OUTPUT ;;
           esac
 
   verify:
@@ -148,26 +168,33 @@ jobs:
           echo ">>> OpenCvSharp artifact contents:"
           ls -la downloads/ocv
 
-      - name: Build C# verify project
+      - name: Publish C# verify project (RID-specific, optional self-contained)
         shell: bash
         run: |
           cd tests/CSharpVerify
-          dotnet build -c Release -v minimal
+          # 统一用 publish 而不是 build:可以指定 RID,方便 win-x86 self-contained
+          # publish_self_contained=true 时 bundle .NET runtime,适合 host arch ≠ 目标 arch 的场景
+          if [ "${{ matrix.publish_self_contained }}" = "true" ]; then
+            dotnet publish -c Release -r ${{ matrix.rid }} --self-contained true -o publish -v minimal
+          else
+            dotnet publish -c Release -r ${{ matrix.rid }} --self-contained false -o publish -v minimal
+          fi
+          echo ">>> publish/ contents:"
+          ls -la publish/
 
-      - name: Stage native libs into bin dir
+      - name: Stage native libs into publish dir
         shell: bash
         run: |
-          BIN=tests/CSharpVerify/bin/Release/net8.0
-          mkdir -p "$BIN"
+          PUB=tests/CSharpVerify/publish
           # ORT native (主 + 可选附加 dll)
-          cp "downloads/ort/${{ matrix.ort_lib }}" "$BIN/"
+          cp "downloads/ort/${{ matrix.ort_lib }}" "$PUB/"
           if [ -n "${{ matrix.ort_extra }}" ] && [ -f "downloads/ort/${{ matrix.ort_extra }}" ]; then
-            cp "downloads/ort/${{ matrix.ort_extra }}" "$BIN/"
+            cp "downloads/ort/${{ matrix.ort_extra }}" "$PUB/"
           fi
           # OpenCvSharp native
-          cp "downloads/ocv/${{ matrix.ocv_lib }}" "$BIN/"
-          echo ">>> Final $BIN contents:"
-          ls -la "$BIN"
+          cp "downloads/ocv/${{ matrix.ocv_lib }}" "$PUB/"
+          echo ">>> Final $PUB contents:"
+          ls -la "$PUB"
 
       - name: Run C# verify (OpenCvSharp 读图+画框 + ORT 推理 + 存 annotated PNG)
         shell: bash
@@ -177,10 +204,19 @@ jobs:
           MODEL=$(realpath ../merged_no_topk_fp16.onnx)
           IMG=$(realpath ../test.png)
           OUT="$(pwd)/annotated-${{ matrix.name }}.png"
-          dotnet bin/Release/net8.0/CSharpVerify.dll "$MODEL" "$IMG" "$OUT"
+
+          # Linux/Mac: ./publish/CSharpVerify
+          # Windows:   ./publish/CSharpVerify.exe
+          # self-contained 跟 framework-dependent 都直接跑 exe (publish 输出已知)
+          EXE_NAME="CSharpVerify"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            EXE_NAME="CSharpVerify.exe"
+          fi
+          chmod +x "publish/$EXE_NAME" 2>/dev/null || true
+          "./publish/$EXE_NAME" "$MODEL" "$IMG" "$OUT"
           ls -la "$OUT"
 
-      - name: Upload annotated PNG (供肉眼确认 OpenCvSharp 画框正确)
+      - name: Upload annotated PNG (供肉眼确认 OpenCvSharp 画框 + ORT 推理一起工作)
         if: always()
         uses: actions/upload-artifact@v7
         with:
