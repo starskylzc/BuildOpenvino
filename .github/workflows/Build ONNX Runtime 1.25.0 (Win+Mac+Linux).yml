@@ -112,6 +112,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       ORT_VERSION: 'v1.25.0'
+      # 强制所有 JavaScript action 用 Node 24 (上游 v5/v6 部分仍标 Node 20)。
+      # 2026-06-02 后 GHA 默认 Node 24,此变量提前对齐,消除 deprecation warning。
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
@@ -195,20 +198,36 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y build-essential ninja-build pkg-config \
             libssl-dev libcurl4-openssl-dev zlib1g-dev \
-            python3-pip python3-dev gnupg lsb-release wget curl \
+            python3-pip python3-dev wget curl tar \
             protobuf-compiler libprotobuf-dev
-          pip3 install "cmake>=3.28,<4" "numpy<2"
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "cmake>=3.28,<4" "numpy<2"
 
-          # OpenVINO 2024.6 (LTS) APT 源安装
-          wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
-            | sudo gpg --dearmor -o /usr/share/keyrings/intel-sw-products.gpg
-          echo "deb [signed-by=/usr/share/keyrings/intel-sw-products.gpg] https://apt.repos.intel.com/openvino/2024 ubuntu22 main" \
-            | sudo tee /etc/apt/sources.list.d/intel-openvino-2024.list
-          sudo apt-get update -y
-          sudo apt-get install -y openvino-2024.6.0
-          # OpenVINO 装到 /opt/intel/openvino_2024
-          ls /opt/intel/openvino_2024 || (echo "::error::OpenVINO install failed"; exit 1)
+          # OpenVINO 2024.6 LTS via 官方 tarball (apt 包安装路径不稳定,改用 tarball 直解压)
+          # storage.openvinotoolkit.org 是 Intel 官方 CDN,跨 Ubuntu/RHEL 通用,确定路径
+          OV_VER="2024.6.0"
+          OV_BUILD="17404.4c0f47d2335"
+          OV_DIR="l_openvino_toolkit_ubuntu22_${OV_VER}.${OV_BUILD}_x86_64"
+          OV_TGZ="${OV_DIR}.tgz"
+          OV_URL="https://storage.openvinotoolkit.org/repositories/openvino/packages/2024.6/linux/${OV_TGZ}"
+
+          echo ">>> Downloading OpenVINO 2024.6 LTS from $OV_URL"
+          wget -q --show-progress "$OV_URL" -O "/tmp/${OV_TGZ}"
+
+          echo ">>> Extracting to /opt/intel/"
+          sudo mkdir -p /opt/intel
+          sudo tar -xzf "/tmp/${OV_TGZ}" -C /opt/intel/
+          sudo mv "/opt/intel/${OV_DIR}" /opt/intel/openvino_2024
+
+          # 验证关键路径
+          ls /opt/intel/openvino_2024/runtime/lib/intel64/libopenvino.so* \
+            || (echo "::error::OpenVINO extract failed - libopenvino.so not found"; \
+                ls -la /opt/intel/openvino_2024/ 2>/dev/null; exit 1)
+          ls /opt/intel/openvino_2024/setupvars.sh \
+            || (echo "::error::setupvars.sh missing"; exit 1)
+
           echo "OPENVINO_ROOT=/opt/intel/openvino_2024" >> $GITHUB_ENV
+          echo "✅ OpenVINO 2024.6 LTS extracted to /opt/intel/openvino_2024"
 
       # arm64 cpu 改用 manylinux_2_28_aarch64 容器 (glibc 2.28),
       # 覆盖银河麒麟 V10 SP1 ARM / 统信 UOS V20 ARM,无需在 host 装 deps。
@@ -328,7 +347,10 @@ jobs:
                 python3 python3-pip python3-dev \
                 protobuf-compiler libprotobuf-dev \
                 git ca-certificates
-              pip3 install --break-system-packages "cmake>=3.28,<4" "numpy<2"
+              # Ubuntu 22.04 内置 pip 22.0,先升 pip 再安装 (旧 pip 不识别 --break-system-packages,
+              # Ubuntu 22.04 也没启用 PEP 668,所以不需要这个标志)
+              python3 -m pip install --upgrade pip
+              python3 -m pip install "cmake>=3.28,<4" "numpy<2"
 
               python3 tools/ci_build/build.py \
                 --build_dir build \
@@ -365,7 +387,9 @@ jobs:
                 python3 python3-pip python3-dev \
                 protobuf-compiler libprotobuf-dev \
                 git ca-certificates
-              pip3 install --break-system-packages "cmake>=3.28,<4" "numpy<2"
+              # 同 cuda 处理:升 pip 先,然后无 --break-system-packages 装
+              python3 -m pip install --upgrade pip
+              python3 -m pip install "cmake>=3.28,<4" "numpy<2"
 
               # ROCm 已预装在 /opt/rocm
               ls /opt/rocm/ | head -10
