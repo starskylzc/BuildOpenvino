@@ -317,15 +317,19 @@ jobs:
               # Ubuntu 22.04 内置 pip 22.0,先升 pip 再安装 (旧 pip 不识别 --break-system-packages,
               # Ubuntu 22.04 也没启用 PEP 668,所以不需要这个标志)
               python3 -m pip install --upgrade pip
-              python3 -m pip install "cmake>=3.28,<4" "numpy<2"
+              # psutil:让 ORT build.py 自动估算 nvcc 并发 (没装会警告并限到单线程)
+              python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
 
+              # GHA 标准 runner 7 GB 内存,并行度限 2 防 OOM (CUDA 编译单线程峰值 3~4 GB)
+              # 用 --parallel 2 (而不是 --parallel 默认无限),既快又不会 OOM kill
               python3 tools/ci_build/build.py \
                 --build_dir build \
                 --config ${{ inputs.build_type }} \
                 --use_cuda \
                 --cuda_home /usr/local/cuda \
                 --cudnn_home /usr/lib/x86_64-linux-gnu \
-                --parallel \
+                --parallel 2 \
+                --nvcc_threads 1 \
                 --build_shared_lib \
                 --skip_tests \
                 --skip_submodule_sync \
@@ -336,8 +340,11 @@ jobs:
                   onnxruntime_BUILD_BENCHMARKS=OFF
             '
 
-      # ---- Linux x64 ROCm (in rocm/dev container) ----
-      - name: Build (Linux x64 ROCm, in container)
+      # ---- Linux x64 ROCm/MIGraphX (in rocm/dev container) ----
+      # ORT 1.25 起完全删除了 --use_rocm 标志 (issue #26801),
+      # AMD GPU 加速必须通过 --use_migraphx 路径 (MIGraphX 是 AMD 的 ML 框架,基于 ROCm)。
+      # rocm/dev-ubuntu-22.04:*-complete 容器自带 MIGraphX,无需额外装。
+      - name: Build (Linux x64 ROCm/MIGraphX, in container)
         if: matrix.platform == 'linux' && matrix.ep == 'rocm'
         shell: bash
         run: |
@@ -354,19 +361,20 @@ jobs:
                 python3 python3-pip python3-dev \
                 protobuf-compiler libprotobuf-dev \
                 git ca-certificates
-              # 同 cuda 处理:升 pip 先,然后无 --break-system-packages 装
               python3 -m pip install --upgrade pip
-              python3 -m pip install "cmake>=3.28,<4" "numpy<2"
+              python3 -m pip install "cmake>=3.28,<4" "numpy<2" psutil
 
-              # ROCm 已预装在 /opt/rocm
-              ls /opt/rocm/ | head -10
+              # 验证 MIGraphX 在 ROCm 安装里 (-complete tag 自带)
+              ls /opt/rocm/lib/libmigraphx*.so 2>/dev/null | head -3 \
+                || (echo "::error::MIGraphX 不在容器里, 需要换 -complete tag"; \
+                    ls /opt/rocm/lib/ | head -20; exit 1)
 
               python3 tools/ci_build/build.py \
                 --build_dir build \
                 --config ${{ inputs.build_type }} \
-                --use_rocm \
-                --rocm_home /opt/rocm \
-                --parallel \
+                --use_migraphx \
+                --migraphx_home /opt/rocm \
+                --parallel 2 \
                 --build_shared_lib \
                 --skip_tests \
                 --skip_submodule_sync \
@@ -574,9 +582,10 @@ jobs:
             echo "✅ CUDA EP: $(ls -lh $CUDA_PROV)"
           fi
           if [ "${{ matrix.ep }}" = "rocm" ]; then
-            ROCM_PROV="build/${{ inputs.build_type }}/libonnxruntime_providers_rocm.so"
-            [ -f "$ROCM_PROV" ] || (echo "::error::ROCm provider missing"; exit 1)
-            echo "✅ ROCm EP: $(ls -lh $ROCM_PROV)"
+            # ORT 1.25 通过 --use_migraphx 路径,产物是 libonnxruntime_providers_migraphx.so
+            MIGX_PROV="build/${{ inputs.build_type }}/libonnxruntime_providers_migraphx.so"
+            [ -f "$MIGX_PROV" ] || (echo "::error::MIGraphX provider missing"; exit 1)
+            echo "✅ MIGraphX (AMD/ROCm) EP: $(ls -lh $MIGX_PROV)"
           fi
           if [ "${{ matrix.ep }}" = "openvino" ]; then
             OV_PROV="build/${{ inputs.build_type }}/libonnxruntime_providers_openvino.so"
@@ -747,8 +756,9 @@ jobs:
           if [ "${{ matrix.ep }}" = "rocm" ]; then
             docker run --rm -v "$(pwd):/work" -w /work "${{ matrix.docker }}" \
               bash -c '
-                # ROCm 的 backend 也是 dlopen,把 backend lib 一并打包
-                for lib in libamd_comgr.so libhipfft.so librocfft.so libroctx64.so \
+                # MIGraphX + ROCm backend 都是 dlopen,显式抓取
+                for lib in libmigraphx.so libmigraphx_c.so libmigraphx_onnx.so \
+                           libamd_comgr.so libhipfft.so librocfft.so libroctx64.so \
                            librocm_smi64.so librocrand.so libhipsparse.so libhipblas.so; do
                   find /opt/rocm -name "${lib}*" 2>/dev/null | head -2 | xargs -I{} cp -n {} /work/artifacts/ 2>/dev/null || true
                 done
