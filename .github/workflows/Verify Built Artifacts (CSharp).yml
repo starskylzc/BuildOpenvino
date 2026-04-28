@@ -315,8 +315,7 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      # ── 上传 verified native libs (供 Stage Deploy workflow 直接拉) ──
-      - name: Upload verified deploy artifact
+      - name: Upload verified deploy artifact (单平台,供 stage job 汇总)
         if: success()
         uses: actions/upload-artifact@v7
         with:
@@ -324,3 +323,84 @@ jobs:
           path: tests/CSharpVerify/staged/*
           retention-days: 14
           if-no-files-found: error
+
+  # ── Stage:全 7 平台 verify ✅ 后,汇总成单个 deploy/ artifact ──
+  # 客户用 ./artifacts/download_deploy.sh 一键拉这个 artifact 即得完整 deploy/<7 平台>/
+  stage:
+    name: stage-deploy
+    needs: verify
+    runs-on: ubuntu-latest
+    # 仅在 verify 全 7 ✅ 后才跑 (任意 fail 都会 skip 这个 job,不会 ship 部分通过的产物)
+    if: success()
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all 7 deploy-<platform> artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p staging
+          for plat in win-x64-dml win-x86-cpu win-arm64-dml mac-x64-coreml mac-arm64-coreml linux-x64 linux-aarch64; do
+            echo ">>> Pulling deploy-$plat"
+            gh run download ${{ github.run_id }} -R ${{ github.repository }} \
+              -n "deploy-$plat" -D "staging/$plat"
+            ls -la "staging/$plat" | head -10
+          done
+
+      - name: Assemble deploy/ tree (rename to clean platform names)
+        shell: bash
+        run: |
+          mkdir -p deploy
+          mv staging/win-x64-dml       deploy/win-x64
+          mv staging/win-x86-cpu       deploy/win-x86
+          mv staging/win-arm64-dml     deploy/win-arm64
+          mv staging/mac-x64-coreml    deploy/osx-x64
+          mv staging/mac-arm64-coreml  deploy/osx-arm64
+          mv staging/linux-x64         deploy/linux-x64
+          mv staging/linux-aarch64     deploy/linux-aarch64
+          echo ">>> 完整 deploy/ tree:"
+          find deploy -type f | sort
+          echo ""
+          du -sh deploy/*
+
+      - name: Generate deploy/README.md (客户部署说明)
+        shell: bash
+        run: |
+          cat > deploy/README.md <<'EOF'
+          # Native Runtime Bundle (ORT 1.25.0 + OpenCvSharp 4.10.0)
+
+          7 个平台,选对应你客户机 OS 的 SKU 直接 ship 整个目录即可。
+
+          | 平台目录 | 客户机 OS | 加速 |
+          |---|---|---|
+          | `win-x64/` | Windows 10/11 x64 | DirectML 自动 (NVIDIA/AMD/Intel iGPU) |
+          | `win-x86/` | Windows 10/11 32-bit | CPU only |
+          | `win-arm64/` | Windows 11 ARM64 | DirectML |
+          | `osx-x64/` | macOS 10.15+ Intel | CoreML |
+          | `osx-arm64/` | macOS 11.0+ Apple Silicon | CoreML + ANE |
+          | `linux-x64/` | Linux x86_64 (glibc 2.27+) | CPU / CUDA12 / TensorRT |
+          | `linux-aarch64/` | Linux ARM64 (glibc 2.27+) | CPU only |
+
+          客户端 C# 代码用 `NativeLibrary.SetDllImportResolver` 强制从 app 目录加载
+          (参考 `tests/CSharpVerify/Program.cs`)。
+
+          信创 OS 兼容: 麒麟 V10 / UOS V20 / openEuler / RHEL 8+ (glibc 2.27 floor)。
+          EOF
+
+      - name: Upload final deploy bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: deploy-1.25.0-${{ github.sha }}
+          path: deploy/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "## ✅ 全 7 平台 verified + staged 完成" >> $GITHUB_STEP_SUMMARY
+          echo "本地下载:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "cd artifacts/ && ./download_deploy.sh" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

@@ -1,33 +1,36 @@
 #!/usr/bin/env bash
-# 一键下载最近成功的 Stage Deploy artifact 到本地 deploy/
+# 一键下载最近成功的 Verify Built Artifacts run 的最终 deploy bundle 到本地 deploy/
+#
+# Stage Deploy 已经合并进 Verify 工作流的 stage-deploy job (依赖全 7 verify ✅),
+# 所以一个 verify run 的 'deploy-1.25.0-<sha>' artifact = 完整 deploy/。
 #
 # 用法:
-#   ./download_deploy.sh                    # 用最近成功的 Stage Deploy run
-#   ./download_deploy.sh <stage_run_id>     # 指定 run ID
+#   ./download_deploy.sh                    # 用最近成功的 Verify run
+#   ./download_deploy.sh <verify_run_id>    # 指定 run ID
 
 set -euo pipefail
 REPO="${REPO:-starskylzc/BuildOpenvino}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEPLOY_DIR="$HERE/deploy"
 
-STAGE_RUN="${1:-}"
-if [ -z "$STAGE_RUN" ]; then
-  STAGE_RUN=$(gh run list -R "$REPO" \
-    --workflow="Stage Deploy (汇总 verified deploy artifacts)" \
+VERIFY_RUN="${1:-}"
+if [ -z "$VERIFY_RUN" ]; then
+  VERIFY_RUN=$(gh run list -R "$REPO" \
+    --workflow="Verify Built Artifacts (C# 端到端测试)" \
     --status=success --branch=main --limit=1 \
     --json databaseId --jq '.[0].databaseId')
-  if [ -z "$STAGE_RUN" ] || [ "$STAGE_RUN" = "null" ]; then
-    echo "::error::没找到成功的 Stage Deploy run。请先在 GitHub 上跑一次:"
-    echo "    Verify Built Artifacts (target_set=all) → 全 7 ✅ → Stage Deploy (传那个 verify run id)"
+  if [ -z "$VERIFY_RUN" ] || [ "$VERIFY_RUN" = "null" ]; then
+    echo "::error::没找到成功的 Verify run。请先 trigger:"
+    echo "    gh workflow run 'Verify Built Artifacts (C# 端到端测试)' --ref main -f target_set=all"
     exit 1
   fi
-  echo ">>> Using latest success Stage Deploy run: $STAGE_RUN"
+  echo ">>> Using latest success Verify run: $VERIFY_RUN"
 fi
 
-ARTIFACT_NAME=$(gh api "repos/$REPO/actions/runs/$STAGE_RUN/artifacts" \
+ARTIFACT_NAME=$(gh api "repos/$REPO/actions/runs/$VERIFY_RUN/artifacts" \
   --jq '.artifacts[] | select(.name | startswith("deploy-1.25.0-")) | .name' | head -1)
 if [ -z "$ARTIFACT_NAME" ]; then
-  echo "::error::Stage Deploy run $STAGE_RUN 没找到 deploy-1.25.0-* artifact"
+  echo "::error::Verify run $VERIFY_RUN 没找到 deploy-1.25.0-* artifact (stage-deploy job 没跑或没全 ✅)"
   exit 1
 fi
 echo ">>> Artifact: $ARTIFACT_NAME"
