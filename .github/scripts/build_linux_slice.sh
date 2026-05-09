@@ -156,7 +156,11 @@ TCEOF
     TOOLCHAIN_ARGS+=(-DCMAKE_TOOLCHAIN_FILE="$TC")
     # OpenCV 4.10 默认 CPU dispatch 假设 x86 SSE/AVX 或 ARM NEON, LoongArch 都没有.
     # 强制空, 走通用 C++ kernel.
-    SIMD_ARGS+=(-DCPU_BASELINE= -DCPU_DISPATCH=)
+    # OpenCV 自带 libpng/libjpeg-turbo 对 LoongArch 用 -mlsx SIMD flag, GCC 13 cross 不支持
+    # → 关掉所有图像 codec (LoongArch 客户用 raw 摄像头帧, MJPEG 等编码摄像头不支持是已知 limit).
+    SIMD_ARGS+=(-DCPU_BASELINE= -DCPU_DISPATCH=
+                -DWITH_PNG=OFF -DWITH_JPEG=OFF -DWITH_TIFF=OFF
+                -DWITH_OPENEXR=OFF -DWITH_PROTOBUF=OFF)
 fi
 
 echo "==> Build OpenCV static ($ARCH, Linux)"
@@ -180,11 +184,6 @@ cmake -S "$SRC/opencv" -B "$B/opencv" -G Ninja \
   -D WITH_WEBP=OFF \
   -D WITH_OPENJPEG=OFF \
   -D WITH_JASPER=OFF \
-  -D WITH_OPENEXR=OFF \
-  -D WITH_TIFF=OFF \
-  -D WITH_PNG=OFF \
-  -D WITH_JPEG=OFF \
-  -D WITH_PROTOBUF=OFF \
   -D WITH_GPHOTO2=OFF \
   -D WITH_1394=OFF \
   -D WITH_GTK=OFF \
