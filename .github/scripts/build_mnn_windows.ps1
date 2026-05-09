@@ -143,10 +143,23 @@ switch ($ARCH) {
     'arm64' {
         # Win10 ARM 起才有 Win on ARM, 不需要 YY-Thunks; 启用 ARM82 + KleidiAI fp16 加速
         $cmakeArchExtra += @('-DMNN_ARM82=ON', '-DMNN_KLEIDIAI=ON')
-        # CMP0091=OLD: ARM64 armasm64.exe 不识别 MSVC_RUNTIME_LIBRARY abstraction (cmake 3.15+),
-        # 切回 OLD policy 让 cmake 不给 ASM target 设此属性 (回退到手写 /MT / /MD 链接器 flag)。
-        # x64/x86 不需要(它们识别这个 abstraction, MNN_WIN_RUNTIME_MT=ON 走得通)。
-        $cmakeArchExtra += @('-DCMAKE_POLICY_DEFAULT_CMP0091=OLD')
+
+        # MNN 的 CMakeLists.txt 显式 'cmake_policy(SET CMP0091 NEW)' 强制开 MSVC_RUNTIME_LIBRARY abstraction,
+        # 命令行 -DCMAKE_POLICY_DEFAULT_CMP0091=OLD 被 override。NEW 模式下 cmake 给所有 target(包括 ASM)
+        # 自动设 MSVC_RUNTIME_LIBRARY="MultiThreadedDLL" 默认值,armasm64.exe 不识别 → configure 失败。
+        # 修法: 在 cmake configure 前 sed patch MNN/CMakeLists.txt 把 NEW 改成 OLD(仅 arm64 上 patch,
+        # 不影响 x64/x86 — 他们靠 NEW 让 MNN_WIN_RUNTIME_MT=ON 设 /MT 工作)。
+        $mnnCMakeLists = Join-Path $MNN_SOURCE 'CMakeLists.txt'
+        if (Test-Path $mnnCMakeLists) {
+            $orig = Get-Content $mnnCMakeLists -Raw
+            $patched = $orig -replace 'cmake_policy\(SET CMP0091 NEW\)', 'cmake_policy(SET CMP0091 OLD)'
+            if ($patched -ne $orig) {
+                Set-Content $mnnCMakeLists -Value $patched -NoNewline
+                Write-Host ">>> Patched MNN/CMakeLists.txt: CMP0091 NEW -> OLD (arm64 ASM compat)"
+            } else {
+                Write-Host "::warning::CMP0091 NEW pattern not found in MNN/CMakeLists.txt; cmake may still fail"
+            }
+        }
         # 不强制 SUBSYSTEM (Win10 ARM64 默认 10.0)
     }
     default { throw "Unsupported ARCH: $ARCH" }
