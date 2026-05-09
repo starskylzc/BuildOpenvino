@@ -94,8 +94,11 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          brew update
-          brew install cmake ninja
+          # 用 'brew list || brew install' 做 idempotent — 否则已装时 brew 把
+          # 'already installed' 写到 stderr → GHA 转 ##[warning] annotation。
+          for pkg in cmake ninja; do
+            brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"
+          done
 
       - name: Build x86_64 slice (macOS 10.15)
         shell: bash
@@ -136,8 +139,11 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          brew update
-          brew install cmake ninja
+          # 用 'brew list || brew install' 做 idempotent — 否则已装时 brew 把
+          # 'already installed' 写到 stderr → GHA 转 ##[warning] annotation。
+          for pkg in cmake ninja; do
+            brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"
+          done
 
       - name: Build arm64 slice (macOS 11.0)
         shell: bash
@@ -210,17 +216,14 @@ jobs:
       - uses: actions/checkout@v6
         if: steps.check.outputs.enabled == 'true'
 
-      - uses: ilammy/msvc-dev-cmd@v1
-        if: steps.check.outputs.enabled == 'true'
-        with:
-          arch: ${{ matrix.arch }}
-
+      # 不用 ilammy/msvc-dev-cmd@v1: 该 action 是 Node 20, GHA 转出
+      # 'Node.js 20 is deprecated' ##[warning]。改在 ps1 内部直接 cmd.exe /c vcvarsall.bat
+      # 加载 VS env (跟 MNN workflow 同款)。
       - name: Install tools (cmake/ninja)
         if: steps.check.outputs.enabled == 'true'
         shell: pwsh
         run: |
           choco install -y ninja cmake
-          cmake --version
           ninja --version
           python --version
 

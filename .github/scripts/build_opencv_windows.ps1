@@ -36,16 +36,6 @@ if ($TargetArch -in @('x64','x86')) {
     Write-Host ">>> Win7 compat: linking $YyThunksObj"
 }
 
-# ── 强制使用 pip cmake (>=3.28,<4): cmake 4.x 在 ARM64 + ASM target 有 MSVC_RUNTIME_LIBRARY 抽象 bug
-#    (跟 MNN workflow 同样的 fix)。OpenCvSharpExtern 不直接编 ASM, 但对齐稳妥。
-python -m pip install --quiet "cmake>=3.28,<4"
-$pipCmake = python -c "import sysconfig, os; p=os.path.join(sysconfig.get_path('scripts'),'cmake.exe'); print(p if os.path.exists(p) else '')"
-$pipCmake = ($pipCmake | Out-String).Trim()
-if ($pipCmake -and (Test-Path $pipCmake)) {
-    $env:PATH = "$(Split-Path $pipCmake -Parent);$env:PATH"
-    Write-Host ">>> Using pip cmake: $pipCmake"
-}
-
 # 使用当前位置作为根目录
 $ROOT = Join-Path (Get-Location) "_work"
 $SRC = Join-Path $ROOT "src"
@@ -63,6 +53,41 @@ New-Item -ItemType Directory -Force -Path $OUT_DIR | Out-Null
 $SRC_SLASH = $SRC.Replace("\", "/")
 $B_DIR_SLASH = $B_DIR.Replace("\", "/")
 $OUT_DIR_SLASH = $OUT_DIR.Replace("\", "/")
+
+# ============================================================
+# 加载 VS 2022 dev env (替代 ilammy/msvc-dev-cmd@v1, 后者是 Node 20 → GHA warning)
+# ============================================================
+$vsRoots = @(
+  'C:\Program Files\Microsoft Visual Studio\2022\Enterprise',
+  'C:\Program Files\Microsoft Visual Studio\2022\Community',
+  'C:\Program Files\Microsoft Visual Studio\2022\Professional',
+  'C:\Program Files\Microsoft Visual Studio\2022\BuildTools'
+)
+$vcvarsall = $null
+foreach ($r in $vsRoots) {
+    $cand = Join-Path $r 'VC\Auxiliary\Build\vcvarsall.bat'
+    if (Test-Path $cand) { $vcvarsall = $cand; break }
+}
+if (-not $vcvarsall) { throw "vcvarsall.bat not found under VS 2022 install" }
+
+$tmp = New-TemporaryFile
+& cmd.exe /c "`"$vcvarsall`" $TargetArch && set" 2>&1 | Out-File -FilePath $tmp -Encoding ascii
+if ($LASTEXITCODE -ne 0) {
+    Get-Content $tmp
+    throw "vcvarsall.bat failed for arch=$TargetArch"
+}
+Get-Content $tmp | ForEach-Object {
+    if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "env:$($matches[1])" -Value $matches[2] }
+}
+Remove-Item $tmp -Force
+
+# 强制使用 pip cmake (跟 MNN workflow 同样, 避 cmake 4.x ARM64 ASM bug)
+python -m pip install --quiet "cmake>=3.28,<4"
+$pipCmakePath = python -c "import sysconfig, os; p = os.path.join(sysconfig.get_path('scripts'), 'cmake.exe'); print(p if os.path.exists(p) else '')"
+$pipCmakePath = ($pipCmakePath | Out-String).Trim()
+if ($pipCmakePath -and (Test-Path $pipCmakePath)) {
+    $env:PATH = "$(Split-Path $pipCmakePath -Parent);$env:PATH"
+}
 
 Write-Host "==> Tool versions"
 cmake --version
@@ -178,6 +203,8 @@ cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D CMAKE_POLICY_DEFAULT_CMP0091=NEW `
   -D CMAKE_MSVC_RUNTIME_LIBRARY=$RuntimeLibOpenCV `
+  -D CMAKE_C_FLAGS=/w `
+  -D CMAKE_CXX_FLAGS=/w `
   -D OPENCV_EXTRA_MODULES_PATH="$SRC_CONTRIB" `
   -D BUILD_SHARED_LIBS=OFF `
   -D BUILD_WITH_STATIC_CRT=$StaticCrt `
@@ -284,6 +311,8 @@ $cmakeArgs = @(
     '-DCMAKE_POLICY_VERSION_MINIMUM=3.5',
     '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW',
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=$RuntimeLib",
+    '-DCMAKE_C_FLAGS=/w',
+    '-DCMAKE_CXX_FLAGS=/w',
     "-DOpenCV_DIR=$BUILD_OPENCV"
 )
 if ($ExtraLinker) {
