@@ -47,7 +47,12 @@ case "$ARCH" in
     ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON)
     ;;
   arm64)
-    ARCH_FLAGS+=(-DMNN_ARM82=ON -DMNN_KLEIDIAI=ON)
+    # osx-arm64: 单一 libMNN.dylib (CPU+ARM82+Metal+CoreML embed)。
+    # MNN_KLEIDIAI=OFF: KleidiAI 主要加速量化 GEMM (LLM) + SME2 fp16/fp32 GEMM。
+    # 我们 fp16 detection 模型不量化, M1/M2/M3 Mac 无 SME2 → 不触发。
+    # M4+ Mac 有 SME2 但 face/object detection workload 单帧已经 sub-10ms,
+    # KleidiAI 边际收益小, 关掉精简产物。
+    ARCH_FLAGS+=(-DMNN_ARM82=ON -DMNN_KLEIDIAI=OFF)
     ;;
   *) echo "::error::Unsupported ARCH: $ARCH"; exit 1 ;;
 esac

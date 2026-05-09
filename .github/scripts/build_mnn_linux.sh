@@ -132,16 +132,17 @@ ARCH_FLAGS=()
 TOOLCHAIN_ARGS=()
 case "$ARCH" in
     x86_64)
-        # linux-x64: SEP_BUILD=ON 让 OpenCL/Express 等 backend 拆成独立 .so (libMNN_CL.so 等),
-        # 主 libMNN.so 不依赖 GPU 库。这是 MNN 官方推荐部署方式 (bench/MNN_BUILD_MATRIX.md §7),
-        # 留出 libMNN_MUSA.so 后续在摩尔线程开发机单独编完直接 drop-in 的 slot
-        # (GHA 无 MUSA SDK,本 workflow 不编 libMNN_MUSA.so)。
-        ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=ON)
+        # linux-x64: 用户要求单一 libMNN.so (CPU+OpenCL embed)。
+        # MUSA 当前不集成 (GHA 无 MUSA SDK 且 MUSA 必须 SEP_BUILD 拆出独立 .so 否则非摩尔线程
+        # 客户机启动崩) — 摩尔线程客户走 OpenCL 路径,后续如有需求单独编 MUSA 专版部署.
+        ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF)
         ;;
     aarch64)
-        # linux-arm64: 简报 §4 期望单一 libMNN.so (OpenCL + ARM82 embed)。
-        # MNN_SEP_BUILD 在 Linux 默认 ON, 必须显式 OFF 才能合并;否则会出多个 .so 不符简报。
-        ARCH_FLAGS+=(-DMNN_ARM82=ON -DMNN_KLEIDIAI=ON -DMNN_SEP_BUILD=OFF)
+        # linux-arm64: 单一 libMNN.so (CPU+ARM82+OpenCL embed)。
+        # MNN_KLEIDIAI=OFF: KleidiAI 加速量化 GEMM (LLM) + SME2 上的 fp16/fp32 GEMM。
+        # 我们 fp16 detection 模型不量化, 客户机 (麒麟 V10 ARM/飞腾/鲲鹏/树莓派/Jetson)
+        # 几乎全部无 SME2 → KleidiAI 在我们 workload 上不触发 → 关掉精简产物.
+        ARCH_FLAGS+=(-DMNN_ARM82=ON -DMNN_KLEIDIAI=OFF -DMNN_SEP_BUILD=OFF)
         ;;
     loongarch64)
         # 龙芯 3A5000+: 无 ARM82/AVX2 等 SIMD 优化, 通用 C++ + OpenCL 兜底
