@@ -167,10 +167,17 @@ if ($TargetArch -eq "arm64") {
 }
 
 # ── Win7 兼容档 (x64/x86) 用 /MT 静态 CRT, arm64 默认 /MD ──
+# 用 cmake 标准 CMAKE_MSVC_RUNTIME_LIBRARY (CMP0091 NEW) 全局 propagate, 所有 OpenCV target
+# (含 opencv_core/imgcodecs 子库 + 3rd_party libpng/IlmImf 等) 一致用 /MT。
+# OpenCV 的 BUILD_WITH_STATIC_CRT 是 OpenCV 自定义 option, 不一定 propagate 到所有 target,
+# 实测会有 LNK2038 mismatch (子库 /MD vs OpenCvSharpExtern /MT)。
 $StaticCrt = if ($TargetArch -in @('x64','x86')) { 'ON' } else { 'OFF' }
+$RuntimeLibOpenCV = if ($TargetArch -in @('x64','x86')) { 'MultiThreaded' } else { 'MultiThreadedDLL' }
 
 cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
+  -D CMAKE_POLICY_DEFAULT_CMP0091=NEW `
+  -D CMAKE_MSVC_RUNTIME_LIBRARY=$RuntimeLibOpenCV `
   -D OPENCV_EXTRA_MODULES_PATH="$SRC_CONTRIB" `
   -D BUILD_SHARED_LIBS=OFF `
   -D BUILD_WITH_STATIC_CRT=$StaticCrt `
@@ -280,6 +287,7 @@ $cmakeArgs = @(
     '-DCMAKE_BUILD_TYPE=Release',
     "-DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX",
     '-DCMAKE_POLICY_VERSION_MINIMUM=3.5',
+    '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW',
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=$RuntimeLib",
     "-DOpenCV_DIR=$BUILD_OPENCV"
 )
