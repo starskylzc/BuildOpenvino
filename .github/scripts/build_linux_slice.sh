@@ -2,96 +2,82 @@
 set -euo pipefail
 
 # 用法：
-#   build_linux_slice.sh x86_64
-#   build_linux_slice.sh aarch64
-#
-# 注意事项：
-#   - 在 Docker 容器内执行（ubuntu:18.04）
-#   - ARCH 只支持 x86_64 或 aarch64
+#   build_linux_slice.sh x86_64           (在 Docker ubuntu:18.04 容器内, glibc 2.27)
+#   build_linux_slice.sh aarch64          (在 Docker arm64v8/ubuntu:18.04 容器内, glibc 2.27)
+#   build_linux_slice.sh loongarch64      (在 Ubuntu 24.04 host 上交叉编译, 无 docker)
 ARCH="$1"
 
 OPENCV_VERSION="${OPENCV_VERSION:-4.10.0}"
 OPENCVSHARP_REF="${OPENCVSHARP_REF:-352c778e2034a05b42d0b472a7930aef47147b14}"
 BUILD_LIST="${BUILD_LIST:-core,imgproc,videoio}"
 
+# loongarch64: 不在 docker 内, 走交叉编译 (ubuntu 24.04 host 装 gcc-13-loongarch64-linux-gnu)
+CROSS_COMPILE=""
+[ "$ARCH" = "loongarch64" ] && CROSS_COMPILE="loongarch64"
+
 # ------------------------------------------------------------
-# 确定工作目录
-# 如果在 Docker 容器中通过 -w /ws 运行，GITHUB_WORKSPACE 不存在
-# 此时 pwd 就是 /ws（即项目根目录）
+# 工作目录
 # ------------------------------------------------------------
 ROOT="${GITHUB_WORKSPACE:-$(pwd)}/_work"
 SRC="$ROOT/src"
 B="$ROOT/build-$ARCH"
 OUT="$ROOT/out-$ARCH"
-
 mkdir -p "$SRC" "$B" "$OUT"
 
 # ------------------------------------------------------------
-# 安装构建依赖（容器内）
-# 关键：必须在 apt-get 之前设置以下环境变量，
-# 否则 tzdata 等包会触发交互式地区/时区选择界面，导致 workflow 永久卡死。
-# DEBIAN_FRONTEND=noninteractive  → 全程静默，不弹任何交互提示
-# TZ=UTC                          → 预设时区，tzdata 无需再询问
+# 安装构建依赖
+# Docker 模式 (x86_64/aarch64): 容器内 root, 直接 apt-get
+# Cross-compile 模式 (loongarch64): host 用 sudo, 装 gcc-loongarch64-linux-gnu
 # ------------------------------------------------------------
-echo "==> 安装构建依赖"
+echo "==> 安装构建依赖 (CROSS_COMPILE=${CROSS_COMPILE:-<docker-native>})"
 
 export DEBIAN_FRONTEND=noninteractive
 export TZ=UTC
 
-apt-get update -qq
-
-# ca-certificates 必须最先装，否则 git clone https:// 会因 SSL 证书验证失败而报错
-apt-get install -y --no-install-recommends \
-    ca-certificates \
-    tzdata \
-    ninja-build \
-    python3 \
-    git \
-    build-essential \
-    pkg-config \
-    wget \
-    gpg \
-    gpg-agent
+if [ -z "$CROSS_COMPILE" ]; then
+    # Docker 容器内 (root, 无 sudo)
+    APT="apt-get"
+    apt-get update -qq
+    apt-get install -y --no-install-recommends \
+        ca-certificates tzdata ninja-build python3 git file \
+        build-essential pkg-config wget gpg gpg-agent
+else
+    # Cross-compile on host (Ubuntu 24.04, sudo)
+    APT="sudo apt-get"
+    sudo apt-get update -qq
+    sudo apt-get install -y --no-install-recommends \
+        ca-certificates ninja-build python3 git file \
+        build-essential pkg-config \
+        gcc-13-loongarch64-linux-gnu g++-13-loongarch64-linux-gnu \
+        cmake
+    # symlink 给 cmake toolchain file 用 (无版本号路径)
+    sudo ln -sf "$(command -v loongarch64-linux-gnu-gcc-13)"  /usr/local/bin/loongarch64-linux-gnu-gcc
+    sudo ln -sf "$(command -v loongarch64-linux-gnu-g++-13)" /usr/local/bin/loongarch64-linux-gnu-g++
+    loongarch64-linux-gnu-gcc --version | head -1
+fi
 
 # ------------------------------------------------------------
-# 安装新版 cmake（通过 Kitware 官方 APT 源）
-# Ubuntu 18.04 自带 cmake 3.10，不支持 -S/-B 参数（需要 3.13+）
-# 也不支持 -B 自动创建目录（需要 3.14+）
-# 通过官方源安装最新稳定版解决所有兼容性问题
+# 安装新版 cmake（仅 docker 模式; cross-compile host 已通过上面的 cmake 包装好）
 # ------------------------------------------------------------
-echo "==> 安装新版 cmake（Kitware 官方源）"
-
-# 检测系统代号（ubuntu 18.04 = bionic，ubuntu 20.04 = focal 等）
-DISTRO_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-
-# 用 gpg 直接写入 trusted keyring，不依赖已废弃的 apt-key
-wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc \
-    | gpg --dearmor \
-    > /usr/share/keyrings/kitware-archive-keyring.gpg
-
-echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] \
+if [ -z "$CROSS_COMPILE" ]; then
+    echo "==> 安装新版 cmake（Kitware 官方源）"
+    DISTRO_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+    wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc \
+        | gpg --dearmor > /usr/share/keyrings/kitware-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] \
 https://apt.kitware.com/ubuntu/ ${DISTRO_CODENAME} main" \
-    > /etc/apt/sources.list.d/kitware.list
+        > /etc/apt/sources.list.d/kitware.list
+    apt-get update -qq
+    apt-get install -y --no-install-recommends cmake
 
-apt-get update -qq
-apt-get install -y --no-install-recommends cmake
-
-echo "==> cmake 版本"
-cmake --version
-
-# 尝试安装静态链接所需的 libstdc++ 开发包
-# Ubuntu 18.04 → libstdc++-7-dev（GCC 7）
-# Debian 10    → libstdc++-8-dev（GCC 8）
-# Ubuntu 20.04 → libstdc++-10-dev（GCC 10）
-# Ubuntu 22.04 → libstdc++-12-dev（GCC 12）
-# 依次尝试，找到一个能装的即可
-echo "==> 尝试安装 libstdc++ 静态开发包"
-apt-get install -y --no-install-recommends libstdc++-7-dev 2>/dev/null \
-  || apt-get install -y --no-install-recommends libstdc++-8-dev 2>/dev/null \
-  || apt-get install -y --no-install-recommends libstdc++-10-dev 2>/dev/null \
-  || apt-get install -y --no-install-recommends libstdc++-12-dev 2>/dev/null \
-  || apt-get install -y --no-install-recommends libstdc++-11-dev 2>/dev/null \
-  || echo "Warning: libstdc++-dev not found, -static-libstdc++ may fail at link time"
+    # libstdc++ 静态开发包 (GCC 版本随 distro 变,逐个 fallback)
+    apt-get install -y --no-install-recommends libstdc++-7-dev 2>/dev/null \
+      || apt-get install -y --no-install-recommends libstdc++-8-dev 2>/dev/null \
+      || apt-get install -y --no-install-recommends libstdc++-10-dev 2>/dev/null \
+      || apt-get install -y --no-install-recommends libstdc++-12-dev 2>/dev/null \
+      || apt-get install -y --no-install-recommends libstdc++-11-dev 2>/dev/null \
+      || echo "Warning: libstdc++-dev not found"
+fi
 
 echo "==> 工具版本"
 cmake --version
@@ -153,8 +139,29 @@ PY
 #   - 启用 V4L（Linux 摄像头）
 #   - 禁用 AVFoundation（macOS 专属）
 # ------------------------------------------------------------
+# ── LoongArch64 cross-compile: 写 cmake toolchain file + 关所有 SIMD ──
+TOOLCHAIN_ARGS=()
+SIMD_ARGS=()
+if [ "$CROSS_COMPILE" = "loongarch64" ]; then
+    TC="$B/loongarch64-toolchain.cmake"
+    cat > "$TC" <<'TCEOF'
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR loongarch64)
+set(CMAKE_C_COMPILER loongarch64-linux-gnu-gcc)
+set(CMAKE_CXX_COMPILER loongarch64-linux-gnu-g++)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+TCEOF
+    TOOLCHAIN_ARGS+=(-DCMAKE_TOOLCHAIN_FILE="$TC")
+    # OpenCV 4.10 默认 CPU dispatch 假设 x86 SSE/AVX 或 ARM NEON, LoongArch 都没有.
+    # 强制空, 走通用 C++ kernel.
+    SIMD_ARGS+=(-DCPU_BASELINE= -DCPU_DISPATCH=)
+fi
+
 echo "==> Build OpenCV static ($ARCH, Linux)"
 cmake -S "$SRC/opencv" -B "$B/opencv" -G Ninja \
+  "${TOOLCHAIN_ARGS[@]}" "${SIMD_ARGS[@]}" \
   -D CMAKE_BUILD_TYPE=Release \
   -D OPENCV_EXTRA_MODULES_PATH="$SRC/opencv_contrib/modules" \
   -D BUILD_SHARED_LIBS=OFF \
@@ -253,6 +260,7 @@ PY
 # ------------------------------------------------------------
 echo "==> Build OpenCvSharpExtern ($ARCH)"
 cmake -S "$SRC/opencvsharp/src" -B "$B/opencvsharp" -G Ninja \
+  "${TOOLCHAIN_ARGS[@]}" \
   -D CMAKE_BUILD_TYPE=Release \
   -D CMAKE_INSTALL_PREFIX="$OUT" \
   -D CMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
@@ -272,10 +280,20 @@ mkdir -p "$OUT/final"
 cp -f "$SOFILE" "$OUT/final/libOpenCvSharpExtern.so"
 
 # ------------------------------------------------------------
-# 验证最终产物
+# 验证最终产物 (cross-compile 时跳过 ldd, host 不能加载 loongarch64 ELF)
 # ------------------------------------------------------------
 echo "==> 验证产物 ($ARCH)"
 file "$OUT/final/libOpenCvSharpExtern.so" || true
-ldd  "$OUT/final/libOpenCvSharpExtern.so" || true
+if [ -z "$CROSS_COMPILE" ]; then
+    ldd "$OUT/final/libOpenCvSharpExtern.so" || true
+fi
+
+# Cross-compile 后,host runner 是 sudo + chown 不需要 (apt 装的那些都是 root 但产物在 mkdir 的目录下,
+# host runner 是 runner uid, 没问题)。Docker 路径需要 chown 给 host uid.
+if [ -z "$CROSS_COMPILE" ] && [ -d /ws ]; then
+    HOST_UID=$(stat -c '%u' /ws)
+    HOST_GID=$(stat -c '%g' /ws)
+    chown -R "$HOST_UID:$HOST_GID" "$OUT" "$B" 2>/dev/null || true
+fi
 
 echo "==> Done slice: $OUT/final/libOpenCvSharpExtern.so"

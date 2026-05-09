@@ -57,6 +57,14 @@ on:
         description: "Linux aarch64 (glibc 2.27, 兼容统信UOS/麒麟 ARM)"
         type: boolean
         default: true
+      build_linux_loongarch64:
+        description: "Linux loongarch64 (cross-compile, 龙芯 3A5000+)"
+        type: boolean
+        default: true
+      yy_thunks_version:
+        description: "YY-Thunks release (Win7 兼容; 仅 win-x64/x86)"
+        type: string
+        default: "v1.2.1"
 
 env:
   OPENCV_VERSION: "4.10.0"
@@ -223,6 +231,7 @@ jobs:
           $env:OPENCV_VERSION    = "${{ env.OPENCV_VERSION }}"
           $env:OPENCVSHARP_REF   = "${{ env.OPENCVSHARP_REF }}"
           $env:BUILD_LIST        = "${{ env.BUILD_LIST }}"
+          $env:YY_THUNKS_VERSION = "${{ inputs.yy_thunks_version }}"
           pwsh -File .github/scripts/build_opencv_windows.ps1 -TargetArch ${{ matrix.target }}
 
       - name: Smoke test (Windows ${{ matrix.target }})
@@ -325,3 +334,36 @@ jobs:
         with:
           name: linux-aarch64
           path: _work/out-aarch64/final/libOpenCvSharpExtern.so
+
+  # ============================================================
+  # Linux loongarch64 (cross-compile)
+  # Runner: ubuntu-24.04 (含 gcc-13-loongarch64-linux-gnu apt 包)
+  # 兼容: 龙芯 3A5000+ / Loongnix / 麒麟 V10 LoongArch
+  # GHA 无 LoongArch 原生 runner, 走交叉编译, 不在 docker 里
+  # ============================================================
+  build_linux_loongarch64:
+    if: ${{ inputs.build_linux_loongarch64 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build loongarch64 slice (cross-compile on host)
+        run: |
+          chmod +x .github/scripts/build_linux_slice.sh
+          OPENCV_VERSION=${{ env.OPENCV_VERSION }} \
+          OPENCVSHARP_REF=${{ env.OPENCVSHARP_REF }} \
+          BUILD_LIST=${{ env.BUILD_LIST }} \
+            bash .github/scripts/build_linux_slice.sh loongarch64
+
+      - name: Inspect cross-compiled artifact
+        run: |
+          LIB=_work/out-loongarch64/final/libOpenCvSharpExtern.so
+          file "$LIB"
+          ls -lh "$LIB"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-loongarch64
+          path: _work/out-loongarch64/final/libOpenCvSharpExtern.so

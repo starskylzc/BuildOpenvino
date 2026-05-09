@@ -19,6 +19,32 @@ Write-Host "============================================================"
 $OPENCV_VERSION = if ($env:OPENCV_VERSION) { $env:OPENCV_VERSION } else { "4.10.0" }
 $OPENCVSHARP_REF = if ($env:OPENCVSHARP_REF) { $env:OPENCVSHARP_REF } else { "352c778e2034a05b42d0b472a7930aef47147b14" }
 $BUILD_LIST = if ($env:BUILD_LIST) { $env:BUILD_LIST } else { "core,imgproc,videoio" }
+$YY_THUNKS_VERSION = if ($env:YY_THUNKS_VERSION) { $env:YY_THUNKS_VERSION } else { "v1.2.1" }
+
+# ── Win7 兼容: x64/x86 链接 YY-Thunks Win7 obj + /SUBSYSTEM:6.1/5.1 + /MT 静态 MSVC ──
+# arm64 不需 (Win10+ ARM 起没 Win7 ARM)
+$YyThunksObj = $null
+if ($TargetArch -in @('x64','x86')) {
+    $yyArch = $TargetArch
+    $yyZip = Join-Path (Get-Location) "yy-thunks.zip"
+    $yyDir = Join-Path (Get-Location) "yy-thunks"
+    Invoke-WebRequest -Uri "https://github.com/Chuyu-Team/YY-Thunks/releases/download/$YY_THUNKS_VERSION/YY-Thunks-Objs.zip" `
+        -OutFile $yyZip -UseBasicParsing
+    Expand-Archive $yyZip -DestinationPath $yyDir -Force
+    $YyThunksObj = Join-Path $yyDir "objs\$yyArch\YY_Thunks_for_Win7.obj"
+    if (-not (Test-Path $YyThunksObj)) { throw "YY-Thunks obj not found: $YyThunksObj" }
+    Write-Host ">>> Win7 compat: linking $YyThunksObj"
+}
+
+# ── 强制使用 pip cmake (>=3.28,<4): cmake 4.x 在 ARM64 + ASM target 有 MSVC_RUNTIME_LIBRARY 抽象 bug
+#    (跟 MNN workflow 同样的 fix)。OpenCvSharpExtern 不直接编 ASM, 但对齐稳妥。
+python -m pip install --quiet "cmake>=3.28,<4"
+$pipCmake = python -c "import sysconfig, os; p=os.path.join(sysconfig.get_path('scripts'),'cmake.exe'); print(p if os.path.exists(p) else '')"
+$pipCmake = ($pipCmake | Out-String).Trim()
+if ($pipCmake -and (Test-Path $pipCmake)) {
+    $env:PATH = "$(Split-Path $pipCmake -Parent);$env:PATH"
+    Write-Host ">>> Using pip cmake: $pipCmake"
+}
 
 # 使用当前位置作为根目录
 $ROOT = Join-Path (Get-Location) "_work"
@@ -140,11 +166,14 @@ if ($TargetArch -eq "arm64") {
   Write-Host ">>> ARM64 build: CPU_BASELINE=NEON, no x86 SIMD dispatch"
 }
 
+# ── Win7 兼容档 (x64/x86) 用 /MT 静态 CRT, arm64 默认 /MD ──
+$StaticCrt = if ($TargetArch -in @('x64','x86')) { 'ON' } else { 'OFF' }
+
 cmake -S "$SRC_OPENCV" -B "$BUILD_OPENCV" -G "Ninja" `
   -D CMAKE_BUILD_TYPE=Release `
   -D OPENCV_EXTRA_MODULES_PATH="$SRC_CONTRIB" `
   -D BUILD_SHARED_LIBS=OFF `
-  -D BUILD_WITH_STATIC_CRT=OFF `
+  -D BUILD_WITH_STATIC_CRT=$StaticCrt `
   -D BUILD_LIST="$BUILD_LIST" `
   -D BUILD_TESTS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_EXAMPLES=OFF -D BUILD_DOCS=OFF -D BUILD_opencv_apps=OFF `
   -D OPENCV_FORCE_3RDPARTY_BUILD=ON `
@@ -230,12 +259,29 @@ Write-Host "==> Build OpenCvSharpExtern (Windows $TargetArch)"
 $SRC_SHARP = "$SRC_SLASH/opencvsharp/src"
 $BUILD_SHARP = "$B_DIR_SLASH/opencvsharp"
 $INSTALL_PREFIX = "$OUT_DIR_SLASH"
-cmake -S "$SRC_SHARP" -B "$BUILD_SHARP" -G "Ninja" `
-  -D CMAKE_BUILD_TYPE=Release `
-  -D CMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" `
-  -D CMAKE_POLICY_VERSION_MINIMUM=3.5 `
-  -D CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
-  -D OpenCV_DIR="$BUILD_OPENCV"
+
+# ── Win7 兼容档 (x64/x86): /MT + YY-Thunks + /SUBSYSTEM:6.1 (x64) / 5.1 (x86) ──
+# arm64: /MD, 无 SUBSYSTEM 强制 (Win10+ ARM)
+$RuntimeLib = if ($TargetArch -in @('x64','x86')) { 'MultiThreaded' } else { 'MultiThreadedDLL' }
+$ExtraLinker = ''
+if ($TargetArch -eq 'x64') {
+    $ExtraLinker = "`"$YyThunksObj`" /SUBSYSTEM:WINDOWS,6.1 /ENTRY:DllMainCRTStartupForYY_Thunks /alternatename:YY_ThunksOriginalDllMainCRTStartup=_DllMainCRTStartup"
+} elseif ($TargetArch -eq 'x86') {
+    $ExtraLinker = "`"$YyThunksObj`" /SUBSYSTEM:WINDOWS,5.1 /ENTRY:DllMainCRTStartupForYY_Thunks /alternatename:_YY_ThunksOriginalDllMainCRTStartup@12=__DllMainCRTStartup@12"
+}
+
+$cmakeArgs = @(
+    '-S', "$SRC_SHARP", '-B', "$BUILD_SHARP", '-G', 'Ninja',
+    '-DCMAKE_BUILD_TYPE=Release',
+    "-DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX",
+    '-DCMAKE_POLICY_VERSION_MINIMUM=3.5',
+    "-DCMAKE_MSVC_RUNTIME_LIBRARY=$RuntimeLib",
+    "-DOpenCV_DIR=$BUILD_OPENCV"
+)
+if ($ExtraLinker) {
+    $cmakeArgs += "-DCMAKE_SHARED_LINKER_FLAGS=$ExtraLinker"
+}
+& cmake @cmakeArgs
 
 ninja -C "$BUILD_SHARP"
 ninja -C "$BUILD_SHARP" install
