@@ -121,7 +121,9 @@ jobs:
           OSX_X64='{"platform":"macos","rid":"osx-x64","arch":"x86_64","runner":"macos-15-intel","docker_image":"","deploy_target":"10.15","xcode_version":"","artifact_name":"mnn-3.5.0-osx-x64"}'
           OSX_ARM64='{"platform":"macos","rid":"osx-arm64","arch":"arm64","runner":"macos-14","docker_image":"","deploy_target":"12.0","xcode_version":"15.2","artifact_name":"mnn-3.5.0-osx-arm64"}'
           LINUX_X64='{"platform":"linux","rid":"linux-x64","arch":"x86_64","runner":"ubuntu-22.04","docker_image":"ubuntu:18.04","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-x64"}'
-          LINUX_ARM64='{"platform":"linux","rid":"linux-arm64","arch":"aarch64","runner":"ubuntu-24.04-arm","docker_image":"arm64v8/ubuntu:18.04","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-arm64"}'
+          # linux-arm64 用 ubuntu:20.04 (glibc 2.31, GCC 9 + 装 gcc-10) — 麒麟 V10 ARM 是 glibc 2.31。
+          # ubuntu:18.04 默认 GCC 7 不支持 KleidiAI 用的 SVE2/i8mm/sve 指令 (-march=armv8.2-a+sve2 报 invalid feature modifier)。
+          LINUX_ARM64='{"platform":"linux","rid":"linux-arm64","arch":"aarch64","runner":"ubuntu-24.04-arm","docker_image":"arm64v8/ubuntu:20.04","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-arm64"}'
           # LoongArch64 走交叉编译 (GHA 无原生 runner)。Ubuntu 24.04 自带 gcc-loongarch64-linux-gnu。
           LINUX_LA64='{"platform":"linux","rid":"linux-loongarch64","arch":"loongarch64","runner":"ubuntu-24.04","docker_image":"","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-loongarch64"}'
 

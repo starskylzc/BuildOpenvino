@@ -67,9 +67,21 @@ if [ -z "$CROSS_COMPILE" ]; then
         wget \
         gpg \
         gpg-agent \
+        software-properties-common \
         ocl-icd-opencl-dev
 
-    # Ubuntu 18.04 自带 cmake 3.10 太旧,装 Kitware 官方源最新版
+    # aarch64 (linux-arm64): KleidiAI 要求 SVE2/i8mm,需 GCC 10+。Ubuntu 20.04 默认 GCC 9 不够,装 gcc-10。
+    # x86_64 (linux-x64): GCC 7 (ubuntu:18.04) / GCC 9 (ubuntu:20.04) 都够,跳过升级。
+    if [ "$ARCH" = "aarch64" ]; then
+        echo "==> aarch64: 装 gcc-10 (KleidiAI 要求 SVE2/i8mm 支持)"
+        apt-get install -y --no-install-recommends gcc-10 g++-10
+        update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100
+        update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
+        export CC=gcc-10
+        export CXX=g++-10
+    fi
+
+    # Ubuntu 18.04 / 20.04 自带 cmake 太旧 (3.10 / 3.16),装 Kitware 官方源最新版
     DISTRO_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
     wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc \
         | gpg --dearmor > /usr/share/keyrings/kitware-archive-keyring.gpg
@@ -191,4 +203,16 @@ if [ -z "$CROSS_COMPILE" ]; then
 fi
 
 ls -lh "$OUT_DIR/"
+
+# 把 docker 内 root 创建的产物所有权交回 host runner uid,
+# 不然 host 上后续 step (Write version.txt / Upload artifact) Permission denied。
+# /ws 是 mount 点,它的 uid 跟 host workspace 一致,从这里读最稳。
+if [ -z "$CROSS_COMPILE" ] && [ -d /ws ]; then
+    HOST_UID=$(stat -c '%u' /ws)
+    HOST_GID=$(stat -c '%g' /ws)
+    echo ">>> chown artifacts to host uid:gid = $HOST_UID:$HOST_GID"
+    chown -R "$HOST_UID:$HOST_GID" "$OUT_DIR"
+    chown -R "$HOST_UID:$HOST_GID" "$BUILD_DIR" 2>/dev/null || true
+fi
+
 echo "✅ MNN Linux build done: $RID"

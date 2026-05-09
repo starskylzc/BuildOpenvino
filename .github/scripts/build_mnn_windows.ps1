@@ -127,6 +127,10 @@ switch ($ARCH) {
     'arm64' {
         # Win10 ARM 起才有 Win on ARM, 不需要 YY-Thunks; 启用 ARM82 + KleidiAI fp16 加速
         $cmakeArchExtra += @('-DMNN_ARM82=ON', '-DMNN_KLEIDIAI=ON')
+        # CMP0091=OLD: ARM64 armasm64.exe 不识别 MSVC_RUNTIME_LIBRARY abstraction (cmake 3.15+),
+        # 切回 OLD policy 让 cmake 不给 ASM target 设此属性 (回退到手写 /MT / /MD 链接器 flag)。
+        # x64/x86 不需要(它们识别这个 abstraction, MNN_WIN_RUNTIME_MT=ON 走得通)。
+        $cmakeArchExtra += @('-DCMAKE_POLICY_DEFAULT_CMP0091=OLD')
         # 不强制 SUBSYSTEM (Win10 ARM64 默认 10.0)
     }
     default { throw "Unsupported ARCH: $ARCH" }
