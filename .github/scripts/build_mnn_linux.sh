@@ -133,41 +133,26 @@ TOOLCHAIN_ARGS=()
 case "$ARCH" in
     x86_64)
         if [ "$RID" = "linux-x64-musa" ]; then
-            # linux-x64-musa: 单一 libMNN.so 含真 MUSA backend(NATIVE 模式).
+            # linux-x64-musa: 单一 libMNN.so 含真 MUSA backend (NATIVE 模式).
             # 跑在 mthreads/musa:rc4.3.0-devel-ubuntu22.04-amd64 image 内.
+            # 实际 SDK 路径: /usr/local/musa-4.3.0 (含 cmake/FindMUSA.cmake, lib/libmusart.so 等).
+            # 把 mthreads 的 FindMUSA.cmake 路径喂给 CMAKE_MODULE_PATH, 让 MNN
+            # musa_compat/CMakeLists.txt 的 find_package(MUSA QUIET) 找到, 进入 native 分支.
+            MUSA_SDK_DIR=/usr/local/musa-4.3.0
             ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF \
-                         -DMNN_MUSA=ON -DMNN_MUSA_NATIVE=ON -DMNN_MUSA_COMPAT_STUB=OFF)
+                         -DMNN_MUSA=ON -DMNN_MUSA_NATIVE=ON -DMNN_MUSA_COMPAT_STUB=OFF \
+                         -DCMAKE_MODULE_PATH="$MUSA_SDK_DIR/cmake" \
+                         -DCMAKE_PREFIX_PATH="$MUSA_SDK_DIR")
+            export MUSA_HOME="$MUSA_SDK_DIR"
+            export PATH="$MUSA_SDK_DIR/bin:$PATH"
 
-            # ── Diagnostic: 看 mthreads docker 内 MUSA SDK 实际路径 ──
-            echo ">>> MUSA SDK 路径 diagnostic:"
-            ls -ld /usr/local/musa /opt/musa /usr/local/cuda 2>/dev/null || true
-            find /usr/local /opt -maxdepth 3 -name 'libmusart*' -o -name 'MUSAConfig.cmake' -o -name 'FindMUSA.cmake' 2>/dev/null | head -10
-            echo "MUSA_HOME=${MUSA_HOME:-<not set>}"
-            echo "PATH=$PATH"
+            echo ">>> MUSA SDK at: $MUSA_SDK_DIR"
+            ls "$MUSA_SDK_DIR/cmake/" "$MUSA_SDK_DIR/lib/libmusart.so" 2>/dev/null | head -10
 
             # MNN 3.5.0 bug: MusaBackend.cpp:156 'getDescribe(tensor)->type' 应是 'quant->type'
             sed -i 's|TensorUtils::getDescribe(tensor)->type == DataType_DT_INT8|quant->type == DataType_DT_INT8|g' \
                 "$MNN_SOURCE/source/backend/musa/core/MusaBackend.cpp"
             echo ">>> Patched MusaBackend.cpp:156 (MNN 3.5.0 upstream bug fix)"
-
-            # MNN 3.5.0 bug: 3rd_party/musa_compat/CMakeLists.txt 的 find_package(MUSA QUIET) 在
-            # mthreads docker 上找不到 MUSA cmake module (MNN 没附带 FindMUSA.cmake), fallback 到
-            # stub. 直接 hardcode mthreads docker 标准 SDK 路径让 NATIVE 路径成立.
-            python3 - "$MNN_SOURCE/3rd_party/musa_compat/CMakeLists.txt" <<'PYEOF'
-import sys
-p = sys.argv[1]
-t = open(p).read()
-new_block = '''set(MUSA_FOUND TRUE)
-    set(MUSA_INCLUDE_DIRS /usr/local/musa/include)
-    set(MUSA_LIBRARIES /usr/local/musa/lib/libmusart.so /usr/local/musa/lib/libmusa.so)
-    # original line replaced: find_package(MUSA QUIET)'''
-if 'find_package(MUSA QUIET)' in t:
-    t2 = t.replace('find_package(MUSA QUIET)', new_block, 1)
-    open(p, 'w').write(t2)
-    print('>>> Patched musa_compat/CMakeLists.txt: hardcode /usr/local/musa')
-else:
-    print('::warning::find_package(MUSA QUIET) not found in musa_compat/CMakeLists.txt — already patched?')
-PYEOF
         else
             # linux-x64 (无 MUSA): 单一 libMNN.so (CPU+OpenCL+Express embed).
             ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF)
