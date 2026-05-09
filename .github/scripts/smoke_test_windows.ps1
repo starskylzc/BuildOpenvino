@@ -1,140 +1,107 @@
 # smoke_test_windows.ps1
-# OpenCvSharpExtern 冒烟测试（Windows）
+# OpenCvSharpExtern 冒烟测试 (Windows) — 用 Python pefile 解析 PE,
+# 不依赖 dumpbin (后者要 VS env, smoke step 没有). 跟 MNN smoke test 同套路.
 #
-# 用法：
+# 用法:
 #   pwsh -File smoke_test_windows.ps1 -LibPath "C:\path\to\OpenCvSharpExtern.dll" [-Arch x64]
-#
-# 测试内容：
-#   1. 静态检查：用 dumpbin /exports 验证关键导出符号存在（所有架构）
-#   2. 运行时：用 PowerShell Add-Type P/Invoke 实际调用 core_Mat_sizeof()
-#              仅限 x64 / arm64（64 位）；x86 DLL 无法在 64 位 PowerShell 进程中加载，跳过
 
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$LibPath,
-
-    # 目标架构：x64 / x86 / arm64，用于决定是否执行运行时测试
+    [Parameter(Mandatory=$true)] [string]$LibPath,
     [string]$Arch = "x64"
 )
 
 $ErrorActionPreference = "Stop"
 
-$REQUIRED_SYMBOLS = @(
-    "core_Mat_sizeof",
-    "core_Mat_new1",
-    "imgproc_resize",
-    "videoio_VideoCapture_new1"
-)
-
-# ── 辅助函数 ──────────────────────────────────────────────────
-function Write-Header($text) {
-    Write-Host "── $text $('─' * [Math]::Max(0, 48 - $text.Length))"
-}
-
-function Exit-Fail($msg) {
-    Write-Host ""
-    Write-Host "❌  测试失败：$msg"
+if (-not (Test-Path $LibPath)) {
+    Write-Host "::error::文件不存在: $LibPath"
     exit 1
 }
 
-# ── 基本检查 ──────────────────────────────────────────────────
+# 用 pip pefile (无 VS env 依赖, 跨 host arch 工作)
+python -m pip install --quiet pefile
+
+# 内联 Python 跑符号检查 + ctypes 加载
 $LibPath = [System.IO.Path]::GetFullPath($LibPath)
-if (-not (Test-Path $LibPath)) {
-    Exit-Fail "文件不存在: $LibPath"
-}
+$env:PYTHONIOENCODING = "utf-8"
+& python -c @"
+import os, sys, ctypes, platform
+sys.stdout.reconfigure(encoding='utf-8') if hasattr(sys.stdout,'reconfigure') else None
 
-$fileSize = (Get-Item $LibPath).Length
-Write-Host ""
-Write-Host "===================================================="
-Write-Host "  OpenCvSharpExtern 冒烟测试"
-Write-Host "  文件: $LibPath"
-Write-Host "  架构: $Arch"
-Write-Host "  大小: $("{0:N0}" -f $fileSize) bytes"
-Write-Host "===================================================="
-Write-Host ""
+import pefile
+dll = r'$LibPath'
+arch = '$Arch'
 
-# ── 1. 静态符号检查（dumpbin /exports）────────────────────────
-Write-Header "符号检查 (dumpbin /exports)"
+print('=' * 64)
+print('  OpenCvSharpExtern Smoke Test')
+print(f'  File: {dll}')
+print(f'  Arch: {arch}')
+print(f'  Size: {os.path.getsize(dll):,} bytes')
+print('=' * 64)
 
-try {
-    $exports = & dumpbin /exports "$LibPath" 2>&1 | Out-String
-} catch {
-    Exit-Fail "dumpbin 执行失败（需要 MSVC 环境）: $_"
-}
+pe = pefile.PE(dll, fast_load=True)
+pe.parse_data_directories(directories=[
+    pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']
+])
+syms = []
+if hasattr(pe, 'DIRECTORY_ENTRY_EXPORT'):
+    for s in pe.DIRECTORY_ENTRY_EXPORT.symbols:
+        syms.append(s.name.decode(errors='replace') if s.name else f'#{s.ordinal}')
 
-$allSymOk = $true
-foreach ($sym in $REQUIRED_SYMBOLS) {
-    if ($exports -match [regex]::Escape($sym)) {
-        Write-Host "  ✓  $sym"
-    } else {
-        Write-Host "  ✗  $sym  ← 缺失！"
-        $allSymOk = $false
-    }
-}
+REQUIRED = ['core_Mat_sizeof', 'core_Mat_new1', 'imgproc_resize', 'videoio_VideoCapture_new1']
+print()
+print('-- Required symbols --')
+missing = []
+for r in REQUIRED:
+    if r in syms:
+        print(f'  + {r}')
+    else:
+        print(f'  - {r}  MISSING')
+        missing.append(r)
+if missing:
+    print(f'::error::missing symbols: {missing}')
+    sys.exit(1)
 
-if (-not $allSymOk) {
-    Exit-Fail "部分导出符号缺失，请检查编译配置"
-}
+# Subsystem
+sub_maj = pe.OPTIONAL_HEADER.MajorSubsystemVersion
+sub_min = pe.OPTIONAL_HEADER.MinorSubsystemVersion
+print(f'-- PE subsystem: {sub_maj}.{sub_min:02d} --')
+if arch in ('x64','x86'):
+    expected = (6,1) if arch == 'x64' else (5,1)
+    if (sub_maj, sub_min) > expected:
+        print(f'::error::subsystem {sub_maj}.{sub_min:02d} > expected {expected[0]}.{expected[1]:02d} (Win7 fail)')
+        sys.exit(1)
+    print(f'  + Win7 compatible (<= {expected[0]}.{expected[1]:02d})')
 
-Write-Host ""
+# ctypes load (host arch matches)
+machine_map = {0x8664: 'x64', 0xAA64: 'arm64', 0x14C: 'x86'}
+dll_arch = machine_map.get(pe.FILE_HEADER.Machine, 'unknown')
+host = platform.machine().lower()
+print(f'-- ctypes load (host={host}, dll={dll_arch}) --')
+match = (
+    (dll_arch == 'x64'   and host in ('amd64','x86_64')) or
+    (dll_arch == 'arm64' and host in ('arm64','aarch64')) or
+    (dll_arch == 'x86'   and host == 'x86')
+)
+if match:
+    try:
+        lib = ctypes.CDLL(dll)
+        lib.core_Mat_sizeof.restype = ctypes.c_size_t
+        sz = lib.core_Mat_sizeof()
+        print(f'  + core_Mat_sizeof() = {sz}')
+        if sz <= 0:
+            print('::error::core_Mat_sizeof returned <= 0')
+            sys.exit(1)
+    except OSError as e:
+        print(f'::error::CDLL load failed: {e}')
+        sys.exit(1)
+else:
+    print('  (skip - host arch mismatch)')
 
-# ── 2. 运行时测试（P/Invoke）──────────────────────────────────
-# x86 DLL 无法在 64 位 PowerShell 进程中加载，跳过运行时测试
-if ($Arch -eq "x86") {
-    Write-Header "运行时测试 (P/Invoke)"
-    Write-Host "  ⚠️  x86 (32-bit) DLL 无法在 64 位 PowerShell 进程中加载"
-    Write-Host "  ⚠️  已跳过运行时测试（符号检查已通过，视为合格）"
-    Write-Host ""
-    Write-Host "✅  所有测试通过（x86 仅静态检查）"
-    exit 0
-}
-
-Write-Header "运行时测试 (P/Invoke)"
-
-# 把 DLL 所在目录加入 PATH，让 DllImport 能找到它
-$dllDir = [System.IO.Path]::GetDirectoryName($LibPath)
-$env:PATH = "$dllDir;$env:PATH"
-
-$pinvokeCode = @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class OpenCvExternSmoke {
-    [DllImport("OpenCvSharpExtern.dll", CallingConvention = CallingConvention.Cdecl)]
-    public static extern UIntPtr core_Mat_sizeof();
-
-    [DllImport("OpenCvSharpExtern.dll", CallingConvention = CallingConvention.Cdecl)]
-    public static extern int core_Mat_new1(out IntPtr outPtr);
-}
+print()
+print('+ All smoke tests passed')
 "@
 
-try {
-    Add-Type -TypeDefinition $pinvokeCode -Language CSharp
-} catch {
-    Exit-Fail "Add-Type 编译失败: $_"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "::error::smoke test exit $LASTEXITCODE"
+    exit 1
 }
-
-# 调用 core_Mat_sizeof()
-try {
-    $matSize = [OpenCvExternSmoke]::core_Mat_sizeof().ToUInt64()
-    Write-Host "  core_Mat_sizeof()  = $matSize bytes"
-    if ($matSize -le 0) {
-        Exit-Fail "core_Mat_sizeof 返回值应为正整数"
-    }
-    Write-Host "  ✓  core_Mat_sizeof 调用成功"
-} catch {
-    Exit-Fail "core_Mat_sizeof 调用异常: $_"
-}
-
-# 调用 core_Mat_new1()
-try {
-    $outPtr = [IntPtr]::Zero
-    $ret = [OpenCvExternSmoke]::core_Mat_new1([ref]$outPtr)
-    Write-Host "  ✓  core_Mat_new1 调用成功（ret=$ret, ptr=$outPtr）"
-} catch {
-    Exit-Fail "core_Mat_new1 调用异常: $_"
-}
-
-Write-Host ""
-Write-Host "✅  所有测试通过"
-exit 0
