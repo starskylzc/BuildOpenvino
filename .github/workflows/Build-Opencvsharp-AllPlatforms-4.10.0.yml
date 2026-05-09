@@ -147,7 +147,7 @@ jobs:
           OPENCV_VERSION=${{ env.OPENCV_VERSION }} \
           OPENCVSHARP_REF=${{ env.OPENCVSHARP_REF }} \
           BUILD_LIST=${{ env.BUILD_LIST }} \
-            .github/scripts/build_macos_slice.sh arm64 11.0
+            .github/scripts/build_macos_slice.sh arm64 12.0
 
       - name: Smoke test (macOS arm64)
         shell: bash
