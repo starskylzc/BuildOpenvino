@@ -132,38 +132,10 @@ ARCH_FLAGS=()
 TOOLCHAIN_ARGS=()
 case "$ARCH" in
     x86_64)
-        if [ "$RID" = "linux-x64-musa" ]; then
-            # linux-x64-musa: 单一 libMNN.so 含真 MUSA backend (NATIVE 模式).
-            # 跑在 mthreads/musa:rc4.3.0-devel-ubuntu22.04-amd64 image 内.
-            # 实际 SDK 路径: /usr/local/musa-4.3.0 (含 cmake/FindMUSA.cmake, lib/libmusart.so 等).
-            # 把 mthreads 的 FindMUSA.cmake 路径喂给 CMAKE_MODULE_PATH, 让 MNN
-            # musa_compat/CMakeLists.txt 的 find_package(MUSA QUIET) 找到, 进入 native 分支.
-            MUSA_SDK_DIR=/usr/local/musa-4.3.0
-            ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF \
-                         -DMNN_MUSA=ON -DMNN_MUSA_NATIVE=ON -DMNN_MUSA_COMPAT_STUB=OFF \
-                         -DCMAKE_MODULE_PATH="$MUSA_SDK_DIR/cmake" \
-                         -DCMAKE_PREFIX_PATH="$MUSA_SDK_DIR")
-            export MUSA_HOME="$MUSA_SDK_DIR"
-            export PATH="$MUSA_SDK_DIR/bin:$PATH"
-
-            echo ">>> MUSA SDK at: $MUSA_SDK_DIR"
-            ls "$MUSA_SDK_DIR/cmake/" "$MUSA_SDK_DIR/lib/libmusart.so" 2>/dev/null | head -10
-
-            # MNN 3.5.0 bug: MusaBackend.cpp:156 'getDescribe(tensor)->type' 应是 'quant->type'
-            sed -i 's|TensorUtils::getDescribe(tensor)->type == DataType_DT_INT8|quant->type == DataType_DT_INT8|g' \
-                "$MNN_SOURCE/source/backend/musa/core/MusaBackend.cpp"
-            echo ">>> Patched MusaBackend.cpp:156 (MNN 3.5.0 upstream bug fix)"
-
-            # MNN 3.5.0 bug: source/backend/musa/CMakeLists.txt 在 native MUSA 模式下仍 include
-            # MNN 的 stub musa_runtime.h, 跟 mthreads 真 SDK header 冲突 (typedef/enum redefinition).
-            # native 模式下应只用 mthreads 的 ${MUSA_INCLUDE_DIRS}, 不该再 include stub。
-            sed -i '/3rd_party\/musa_compat\/include/d' \
-                "$MNN_SOURCE/source/backend/musa/CMakeLists.txt"
-            echo ">>> Patched source/backend/musa/CMakeLists.txt: removed stub include in native build"
-        else
-            # linux-x64 (无 MUSA): 单一 libMNN.so (CPU+OpenCL+Express embed).
-            ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF)
-        fi
+        # linux-x64: 单一 libMNN.so (CPU+OpenCL+Express embed).
+        # MUSA 不集成: MNN 上游 MUSA backend 跟核心 API 长期脱节, 3.5.0 release 上无法编通,
+        # 摩尔线程客户走 OpenCL 兜底 (MTT GPU 也支持 OpenCL).
+        ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF)
         ;;
     aarch64)
         # linux-arm64: 单一 libMNN.so (CPU+ARM82+OpenCL embed)。
