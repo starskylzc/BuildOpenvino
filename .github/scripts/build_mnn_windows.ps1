@@ -144,10 +144,12 @@ switch ($ARCH) {
         # Win10 ARM 起才有 Win on ARM, 不需要 YY-Thunks; 启用 ARM82 + KleidiAI fp16 加速
         $cmakeArchExtra += @('-DMNN_ARM82=ON', '-DMNN_KLEIDIAI=ON')
 
-        # ── win-arm64 上 MNN 3.5.0 有两个 MSVC 兼容 bug 要 patch ──
-        # Patch 1: MNN/CMakeLists.txt 显式 'cmake_policy(SET CMP0091 NEW)' 让 cmake 给 ASM target
-        #   自动设 MSVC_RUNTIME_LIBRARY=MultiThreadedDLL,armasm64 不识别 → configure 失败。
-        #   仅 arm64 改成 OLD;x64/x86 不动(他们靠 NEW 让 MNN_WIN_RUNTIME_MT=ON 设 /MT 工作)。
+        # ── win-arm64 上 MNN 3.5.0 与 MSVC ARM64 不兼容,要做两件事 ──
+        #
+        # 1) Patch MNN/CMakeLists.txt: 'cmake_policy(SET CMP0091 NEW)' → OLD。
+        #    NEW 模式下 cmake 给 ASM target 自动设 MSVC_RUNTIME_LIBRARY="MultiThreadedDLL",
+        #    armasm64.exe 不识别此属性 → configure 失败。仅 arm64 改成 OLD;
+        #    x64/x86 不动(他们靠 NEW 让 MNN_WIN_RUNTIME_MT=ON 设 /MT 工作)。
         $mnnCMakeLists = Join-Path $MNN_SOURCE 'CMakeLists.txt'
         if (Test-Path $mnnCMakeLists) {
             $orig = Get-Content $mnnCMakeLists -Raw
@@ -158,30 +160,41 @@ switch ($ARCH) {
             }
         }
 
-        # Patch 2: source/cv/SkNx_neon.h 用 GCC NEON extension (uint32x4_t << / __n128 *),
-        #   MSVC ARM64 的 cl.exe 不识别 vector 类型 operator overload (C2676)。
-        #   方案: 给 SkNx.h 和 Matrix_CV.cpp 的 NEON 入口加 '&& !defined(_MSC_VER)' 守卫,
-        #   MSVC 走 scalar fallback (MNNCV 模块仅用作 ImageProcess 辅助,我们项目不调,
-        #   .NET binding 直接喂 NCHW float 给 MNN inference,scalar fallback 无性能影响)。
-        $skNx = Join-Path $MNN_SOURCE 'source\cv\SkNx.h'
-        if (Test-Path $skNx) {
-            $orig = Get-Content $skNx -Raw
-            $patched = $orig -replace '#if defined\(MNN_USE_NEON\)([\r\n]+\s+#include "SkNx_neon\.h")', '#if defined(MNN_USE_NEON) && !defined(_MSC_VER)$1'
-            if ($patched -ne $orig) {
-                Set-Content $skNx -Value $patched -NoNewline
-                Write-Host ">>> Patched SkNx.h: NEON include guarded by !_MSC_VER"
-            }
+        # 2) 切换到 clang-cl 编 C/C++:
+        #    cl.exe ARM64 不支持 GCC NEON extensions —
+        #      SkNx_neon.h 用 'uint32x4_t << n' 运算符
+        #      Matrix_CV.cpp 用 '__n128 *' 运算符
+        #      Vec.hpp 用 'int32x4_t[i]' 下标
+        #    全是 GCC/Clang 才有的 vector 语法糖,MSVC 必须用显式 intrinsic (vshlq/vmulq/vgetq_lane).
+        #    Patch 这些 header 加 '!_MSC_VER' 守卫等于关掉所有 ARM NEON 优化 (违背简报锁定的
+        #    MNN_ARM82+KleidiAI),不可接受。
+        #    替代方案:用 clang-cl(LLVM clang 在 MSVC-compatible 模式),它接受 cl.exe flag
+        #    但前端是 clang,完整支持 GCC NEON extensions + vector subscript.
+        #    GHA windows-11-arm runner 的 VS 2022 预装 LLVM ARM64 工具集.
+        $vsRoot = Split-Path (Split-Path (Split-Path $vcvarsall -Parent) -Parent) -Parent
+        $clangCl = $null
+        foreach ($cand in @(
+            (Join-Path $vsRoot 'VC\Tools\Llvm\ARM64\bin\clang-cl.exe'),
+            (Join-Path $vsRoot 'VC\Tools\Llvm\bin\clang-cl.exe'),
+            'C:\Program Files\LLVM\bin\clang-cl.exe'
+        )) {
+            if ($cand -and (Test-Path $cand)) { $clangCl = $cand; break }
         }
-        $matrixCv = Join-Path $MNN_SOURCE 'source\cv\Matrix_CV.cpp'
-        if (Test-Path $matrixCv) {
-            $orig = Get-Content $matrixCv -Raw
-            $patched = $orig -replace '(?m)^#ifdef MNN_USE_NEON\s*$', '#if defined(MNN_USE_NEON) && !defined(_MSC_VER)'
-            if ($patched -ne $orig) {
-                Set-Content $matrixCv -Value $patched -NoNewline
-                Write-Host ">>> Patched Matrix_CV.cpp: NEON path guarded by !_MSC_VER"
-            }
+        if (-not $clangCl) {
+            $cmd = Get-Command clang-cl -ErrorAction SilentlyContinue
+            if ($cmd) { $clangCl = $cmd.Source }
         }
-        # 不强制 SUBSYSTEM (Win10 ARM64 默认 10.0)
+        if (-not $clangCl) {
+            throw "clang-cl not found on windows-11-arm runner; cannot compile MNN's NEON extensions with cl.exe. Searched VS Llvm/ARM64, VS Llvm/, C:\Program Files\LLVM\, PATH."
+        }
+        Write-Host ">>> Using clang-cl for C/C++: $clangCl"
+        & $clangCl --version | Select-Object -First 1
+        $cmakeArchExtra += @(
+            "-DCMAKE_C_COMPILER=$clangCl",
+            "-DCMAKE_CXX_COMPILER=$clangCl"
+        )
+        # ASM 仍走 armasm64.exe (cl 配套),CMP0091=OLD 已避免 MSVC_RUNTIME_LIBRARY 抽象。
+        # 不强制 SUBSYSTEM (Win10 ARM64 默认 10.0).
     }
     default { throw "Unsupported ARCH: $ARCH" }
 }
