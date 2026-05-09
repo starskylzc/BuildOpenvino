@@ -68,6 +68,7 @@ on:
           - osx-x64
           - osx-arm64
           - linux-x64
+          - linux-x64-musa
           - linux-arm64
           - linux-loongarch64
           # ── 聚合档 ──
@@ -121,6 +122,9 @@ jobs:
           OSX_X64='{"platform":"macos","rid":"osx-x64","arch":"x86_64","runner":"macos-15-intel","docker_image":"","deploy_target":"10.15","xcode_version":"","artifact_name":"mnn-3.5.0-osx-x64"}'
           OSX_ARM64='{"platform":"macos","rid":"osx-arm64","arch":"arm64","runner":"macos-14","docker_image":"","deploy_target":"12.0","xcode_version":"15.2","artifact_name":"mnn-3.5.0-osx-arm64"}'
           LINUX_X64='{"platform":"linux","rid":"linux-x64","arch":"x86_64","runner":"ubuntu-22.04","docker_image":"ubuntu:18.04","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-x64"}'
+          # linux-x64-musa: 单独 artifact, 用 mthreads 官方 docker (公开 image, llama.cpp 已使用) 编 MNN_MUSA=ON
+          # 这是给装了摩尔线程驱动的客户机的专用 libMNN.so (link libmusart.so), 不能给非 MTT 客户机
+          LINUX_X64_MUSA='{"platform":"linux","rid":"linux-x64-musa","arch":"x86_64","runner":"ubuntu-22.04","docker_image":"mthreads/musa:rc4.3.0-devel-ubuntu22.04-amd64","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-x64-musa"}'
           # linux-arm64 用 ubuntu:20.04 (glibc 2.31, GCC 9 + 装 gcc-10) — 麒麟 V10 ARM 是 glibc 2.31。
           # ubuntu:18.04 默认 GCC 7 不支持 KleidiAI 用的 SVE2/i8mm/sve 指令 (-march=armv8.2-a+sve2 报 invalid feature modifier)。
           LINUX_ARM64='{"platform":"linux","rid":"linux-arm64","arch":"aarch64","runner":"ubuntu-24.04-arm","docker_image":"arm64v8/ubuntu:20.04","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-arm64"}'
@@ -134,12 +138,13 @@ jobs:
             osx-x64)            M="[$OSX_X64]" ;;
             osx-arm64)          M="[$OSX_ARM64]" ;;
             linux-x64)          M="[$LINUX_X64]" ;;
+            linux-x64-musa)     M="[$LINUX_X64_MUSA]" ;;
             linux-arm64)        M="[$LINUX_ARM64]" ;;
             linux-loongarch64)  M="[$LINUX_LA64]" ;;
             windows-only)       M="[$WIN_X64,$WIN_X86,$WIN_ARM64]" ;;
             macos-only)         M="[$OSX_X64,$OSX_ARM64]" ;;
-            linux-only)         M="[$LINUX_X64,$LINUX_ARM64,$LINUX_LA64]" ;;
-            all|*)              M="[$WIN_X64,$WIN_X86,$WIN_ARM64,$OSX_X64,$OSX_ARM64,$LINUX_X64,$LINUX_ARM64,$LINUX_LA64]" ;;
+            linux-only)         M="[$LINUX_X64,$LINUX_X64_MUSA,$LINUX_ARM64,$LINUX_LA64]" ;;
+            all|*)              M="[$WIN_X64,$WIN_X86,$WIN_ARM64,$OSX_X64,$OSX_ARM64,$LINUX_X64,$LINUX_X64_MUSA,$LINUX_ARM64,$LINUX_LA64]" ;;
           esac
           echo "matrix={\"include\":$M}" >> "$GITHUB_OUTPUT"
           echo ">>> matrix=$M"

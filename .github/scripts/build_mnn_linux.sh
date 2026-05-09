@@ -132,9 +132,16 @@ ARCH_FLAGS=()
 TOOLCHAIN_ARGS=()
 case "$ARCH" in
     x86_64)
-        # linux-x64: 单一 libMNN.so (CPU+OpenCL+Express embed)。
-        # GHA 无 MUSA SDK 编不了 MUSA backend, 当前不出 MUSA 版本。
-        ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF)
+        if [ "$RID" = "linux-x64-musa" ]; then
+            # linux-x64-musa: 单一 libMNN.so (CPU+OpenCL+MUSA+Express embed)。
+            # 跑在 mthreads/musa:rc4.3.0 docker image 内 (image 自带 MUSA SDK + mcc compiler).
+            # 链接 libmusart.so → 只能在装了摩尔线程驱动的客户机加载, 非 MTT 机器禁用此 .so.
+            ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF \
+                         -DMNN_MUSA=ON -DMNN_MUSA_NATIVE=ON)
+        else
+            # linux-x64 (无 MUSA): 单一 libMNN.so (CPU+OpenCL+Express embed).
+            ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF)
+        fi
         ;;
     aarch64)
         # linux-arm64: 单一 libMNN.so (CPU+ARM82+OpenCL embed)。
