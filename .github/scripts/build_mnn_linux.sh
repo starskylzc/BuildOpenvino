@@ -132,12 +132,9 @@ ARCH_FLAGS=()
 TOOLCHAIN_ARGS=()
 case "$ARCH" in
     x86_64)
-        # linux-x64: SEP_BUILD=ON 严格按简报 §7。
-        # 主 libMNN.so (无 GPU 库依赖) + libMNN_CL.so (OpenCL backend) + libMNN_Express.so
-        # (高级 API)。后续在摩尔线程开发机用 MNN_MUSA=ON 单独编 libMNN_MUSA.so 直接 drop-in,
-        # 不影响主库/非摩尔线程客户 (libmusart.so 隔离在 MUSA backend.so 里)。
-        # GHA 当前无 MUSA SDK, 不编 libMNN_MUSA.so — slot 留给后续。
-        ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=ON)
+        # linux-x64: 单一 libMNN.so (CPU+OpenCL+Express embed)。
+        # GHA 无 MUSA SDK 编不了 MUSA backend, 当前不出 MUSA 版本。
+        ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF)
         ;;
     aarch64)
         # linux-arm64: 单一 libMNN.so (CPU+ARM82+OpenCL embed)。
