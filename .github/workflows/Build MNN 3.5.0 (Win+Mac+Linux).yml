@@ -316,7 +316,10 @@ jobs:
         if: matrix.platform == 'windows' && matrix.arch == 'x64'
         shell: pwsh
         run: |
-          & "$pwd\build-tools\.github\scripts\smoke_test_mnn_windows.ps1" "$pwd\artifacts\MNN.dll"
+          # pefile 跨平台解析 PE, 不依赖 VS env (dumpbin)
+          pip install --quiet pefile
+          python "$pwd\build-tools\.github\scripts\smoke_test_mnn_windows.py" "$pwd\artifacts\MNN.dll"
+          if ($LASTEXITCODE -ne 0) { throw "smoke test failed: $LASTEXITCODE" }
 
       - name: Smoke test (macOS)
         if: matrix.platform == 'macos'

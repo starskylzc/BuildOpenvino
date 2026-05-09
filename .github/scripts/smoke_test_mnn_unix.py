@@ -34,10 +34,9 @@ def check_symbols(lib_path: str) -> bool:
         print(f"  nm 失败: {e.stderr.strip()}")
         return False
 
-    # MNN 的 C++ 符号 demangle 后包含 "MNN::" 或 ItaniumABI 命名 "_ZN3MNN" / "_ZNK3MNN"
-    # macOS Mach-O 格式前缀是 "__ZN3MNN" (多一个下划线)
-    mnn_pat = re.compile(r"(_Z+N\w*3MNN|MNN::|MNNCreate|MNNForward)")
-    mnn_count = sum(1 for line in out.splitlines() if mnn_pat.search(line))
+    # MNN 名字空间符号在 Itanium ABI mangle 里都包含 "3MNN" (length-prefixed),
+    # 在 demangled 形式包含 "MNN::". 直接 substring 'MNN' 最稳妥(系统库通常没有 MNN 字符)。
+    mnn_count = sum(1 for line in out.splitlines() if "MNN" in line)
     total = sum(1 for line in out.splitlines() if line.strip())
     print(f"  导出符号总数:    {total}")
     print(f"  MNN namespace:  {mnn_count}")
