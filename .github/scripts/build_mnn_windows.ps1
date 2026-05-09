@@ -88,7 +88,6 @@ $cmakeCommon = @(
     '-G', 'Ninja',
     "-DCMAKE_BUILD_TYPE=$BUILD_TYPE",
     '-DMNN_BUILD_SHARED_LIBS=ON',
-    '-DMNN_WIN_RUNTIME_MT=ON',
     '-DMNN_OPENCL=ON',
     '-DMNN_USE_SYSTEM_LIB=OFF',
     '-DMNN_BUILD_TOOLS=ON',
@@ -97,6 +96,8 @@ $cmakeCommon = @(
     '-DMNN_BUILD_BENCHMARK=OFF',
     '-DMNN_BUILD_CONVERTER=OFF'
 )
+# /MT 静态 MSVC: 仅 x64/x86 (Win7 兼容, 免 VC++ Redist 依赖)
+# arm64 不开 — Win10+ 才有 ARM64 Win, 而且 ARM64 ASM 编译器不接受 MSVC_RUNTIME_LIBRARY=MultiThreaded
 
 # Per-arch SIMD + Win7 linker flags
 $cmakeArchExtra = @()
@@ -105,7 +106,7 @@ $linkerExeExtra = ''
 
 switch ($ARCH) {
     'x64' {
-        $cmakeArchExtra += @('-DMNN_AVX2=ON', '-DMNN_USE_SSE=ON')
+        $cmakeArchExtra += @('-DMNN_WIN_RUNTIME_MT=ON', '-DMNN_AVX2=ON', '-DMNN_USE_SSE=ON')
         if (-not $YY_THUNKS_OBJ -or -not (Test-Path $YY_THUNKS_OBJ)) {
             throw "YY_THUNKS_OBJ env missing or file not found: $YY_THUNKS_OBJ"
         }
@@ -115,7 +116,7 @@ switch ($ARCH) {
         $linkerExeExtra    = "`"$YY_THUNKS_OBJ`" /SUBSYSTEM:CONSOLE,6.1"
     }
     'x86' {
-        $cmakeArchExtra += @('-DMNN_USE_SSE=ON', '-DMNN_AVX2=OFF')
+        $cmakeArchExtra += @('-DMNN_WIN_RUNTIME_MT=ON', '-DMNN_USE_SSE=ON', '-DMNN_AVX2=OFF')
         if (-not $YY_THUNKS_OBJ -or -not (Test-Path $YY_THUNKS_OBJ)) {
             throw "YY_THUNKS_OBJ env missing or file not found: $YY_THUNKS_OBJ"
         }

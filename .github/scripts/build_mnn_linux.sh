@@ -61,6 +61,7 @@ if [ -z "$CROSS_COMPILE" ]; then
         ninja-build \
         python3 \
         git \
+        file \
         build-essential \
         pkg-config \
         wget \

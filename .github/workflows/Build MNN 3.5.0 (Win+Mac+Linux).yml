@@ -292,14 +292,19 @@ jobs:
         if: matrix.platform == 'linux' && matrix.rid == 'linux-loongarch64'
         shell: bash
         run: |
-          # Ubuntu 24.04 自带 gcc-loongarch64-linux-gnu (apt 包名 gcc-13-loongarch64-linux-gnu 或 gcc-loongarch64-linux-gnu)
+          # Ubuntu 24.04 noble 没有无版本号的 gcc-loongarch64-linux-gnu meta package,
+          # 只有 gcc-13-loongarch64-linux-gnu (binary 名 loongarch64-linux-gnu-gcc-13)。
+          # 装好后 symlink 到无版本号路径,让 cmake toolchain file 能找到。
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            gcc-loongarch64-linux-gnu g++-loongarch64-linux-gnu \
-            cmake ninja-build || \
-          sudo apt-get install -y --no-install-recommends \
-            gcc-13-loongarch64-linux-gnu g++-13-loongarch64-linux-gnu \
+            gcc-13-loongarch64-linux-gnu \
+            g++-13-loongarch64-linux-gnu \
+            file \
             cmake ninja-build
+          sudo ln -sf "$(command -v loongarch64-linux-gnu-gcc-13)" /usr/local/bin/loongarch64-linux-gnu-gcc
+          sudo ln -sf "$(command -v loongarch64-linux-gnu-g++-13)" /usr/local/bin/loongarch64-linux-gnu-g++
+          loongarch64-linux-gnu-gcc --version | head -1
+          loongarch64-linux-gnu-g++ --version | head -1
           chmod +x build-tools/.github/scripts/build_mnn_linux.sh
           BUILD_TYPE='${{ inputs.build_type }}' \
           RID='${{ matrix.rid }}' \
