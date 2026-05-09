@@ -255,7 +255,8 @@ if ($ARCH -eq 'x64' -or $ARCH -eq 'x86') {
     $expectedSubsysMinor = if ($ARCH -eq 'x64') { 1 } else { 1 }
     Write-Host ">>> 校验 PE subsystem version >= $expectedSubsysMajor.0$expectedSubsysMinor (Win7=6.01, XP=5.01)"
     $dumpbinOut = & dumpbin /headers (Join-Path $OUT_DIR 'MNN.dll') 2>&1 | Out-String
-    if ($dumpbinOut -match 'subsystem version\s+(\d+)\.(\d+)') {
+    # dumpbin /headers 输出格式: '            6.01 subsystem version' (值在前, key 在后)
+    if ($dumpbinOut -match '(\d+)\.(\d+)\s+subsystem version') {
         $actualMaj = [int]$matches[1]
         $actualMin = [int]$matches[2]
         Write-Host "    实际 subsystem: $actualMaj.$($actualMin.ToString('00'))"
