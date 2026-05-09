@@ -153,6 +153,13 @@ case "$ARCH" in
             sed -i 's|TensorUtils::getDescribe(tensor)->type == DataType_DT_INT8|quant->type == DataType_DT_INT8|g' \
                 "$MNN_SOURCE/source/backend/musa/core/MusaBackend.cpp"
             echo ">>> Patched MusaBackend.cpp:156 (MNN 3.5.0 upstream bug fix)"
+
+            # MNN 3.5.0 bug: source/backend/musa/CMakeLists.txt 在 native MUSA 模式下仍 include
+            # MNN 的 stub musa_runtime.h, 跟 mthreads 真 SDK header 冲突 (typedef/enum redefinition).
+            # native 模式下应只用 mthreads 的 ${MUSA_INCLUDE_DIRS}, 不该再 include stub。
+            sed -i '/3rd_party\/musa_compat\/include/d' \
+                "$MNN_SOURCE/source/backend/musa/CMakeLists.txt"
+            echo ">>> Patched source/backend/musa/CMakeLists.txt: removed stub include in native build"
         else
             # linux-x64 (无 MUSA): 单一 libMNN.so (CPU+OpenCL+Express embed).
             ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF)
