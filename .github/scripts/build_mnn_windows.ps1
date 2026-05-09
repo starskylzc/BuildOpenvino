@@ -141,8 +141,14 @@ switch ($ARCH) {
         $linkerExeExtra    = "`"$YY_THUNKS_OBJ`" /SUBSYSTEM:CONSOLE,5.1"
     }
     'arm64' {
-        # Win10 ARM 起才有 Win on ARM, 不需要 YY-Thunks; 启用 ARM82 + KleidiAI fp16 加速
-        $cmakeArchExtra += @('-DMNN_ARM82=ON', '-DMNN_KLEIDIAI=ON')
+        # Win10 ARM 起才有 Win on ARM, 不需要 YY-Thunks。
+        # ARM82 ON: MNN 自己的 .S 是 GAS 风格, clang-cl 能编 → fp16 加速保留。
+        # KleidiAI OFF (仅 win-arm64 降级): KleidiAI 1.14 的 .S 是 ARMASM 风格 (label_7/ENDP/END),
+        #   clang integrated-assembler 不识别 GAS 风格之外的 mnemonic, 而 MNN 的 cmake glue
+        #   也没把 .S 路由到 armasm64.exe。简报锁定的 'ARM82+KleidiAI' 决策基于 Linux/Mac ARM64
+        #   实测;Win ARM64 上 KleidiAI 没实测过, 暂关到 KleidiAI 上游补 Win ASM 路径或者
+        #   MNN 改 cmake glue 区分 platform 时再开。
+        $cmakeArchExtra += @('-DMNN_ARM82=ON', '-DMNN_KLEIDIAI=OFF')
 
         # ── win-arm64 上 MNN 3.5.0 与 MSVC ARM64 不兼容,要做两件事 ──
         #
