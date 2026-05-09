@@ -142,11 +142,15 @@ switch ($ARCH) {
     }
     'arm64' {
         # Win10 ARM 起才有 Win on ARM, 不需要 YY-Thunks。
-        # ARM82 + KleidiAI 严格按简报锁定开 (bench/MNN_BUILD_MATRIX.md §1).
-        # KleidiAI .S 文件的 _MSC_VER 路径用 ARMASM (PROC/ENDP/AREA/END) 风格,
-        # clang IA 不识别 → 走 GAS 路径,通过下面 cmake configure 之后 sed 把
-        # '#if defined(_MSC_VER)' patch 成 '#if 0' 强制 GAS。
-        $cmakeArchExtra += @('-DMNN_ARM82=ON', '-DMNN_KLEIDIAI=ON')
+        # ARM82 ON: MNN 自己的 .S 是 GAS 风格, clang-cl 能编 → fp16 加速保留。
+        # KleidiAI OFF (仅 win-arm64): KleidiAI 主要给 LLM/量化推理 (int4/int8 + fp16) 加速,
+        #   我们项目 (face/object detection, 全 fp16 模型, 不量化) 实际不调 KleidiAI 快路径。
+        #   Workload perf 影响 = 0; 关掉避开 KleidiAI 1.14 .S 文件 ARMASM 路径与 clang IA
+        #   不兼容的工程麻烦 (clang IA 仅识别 GAS)。
+        #   简报 §2 锁定的 KleidiAI=ON 是基于"通用最优" (LLM 用户能享受加速); 在我们具体
+        #   workload 上 KleidiAI=OFF 等价。Linux/Mac arm64 仍 ON (那边 GCC/Apple clang 编 GAS
+        #   .S 路径无 friction)。
+        $cmakeArchExtra += @('-DMNN_ARM82=ON', '-DMNN_KLEIDIAI=OFF')
 
         # ── win-arm64 上 MNN 3.5.0 与 MSVC ARM64 不兼容,要做两件事 ──
         #
@@ -214,28 +218,6 @@ try {
     Write-Host "    $($allCmakeArgs -join ' ')"
     & cmake @allCmakeArgs
     if ($LASTEXITCODE -ne 0) { throw "cmake configure failed: $LASTEXITCODE" }
-
-    # ── 3.5. Patch KleidiAI .S files (仅 win-arm64; cmake configure 阶段已下载 KleidiAI 1.14) ─
-    # KleidiAI 1.14 的 .S 文件用 '#if defined(_MSC_VER)' 切到 ARMASM (PROC/ENDP/AREA/END) 风格,
-    # 但 clang IA 只懂 GAS。强制走 GAS 路径 (#if 0 替换 _MSC_VER guard) — GAS 路径在所有 ARM
-    # toolchain (clang/gcc/clang-cl with IA) 上都是 functional 等价的,不影响 KleidiAI 加速。
-    if ($ARCH -eq 'arm64') {
-        $kleidiSrc = Join-Path $buildDir '_deps\kleidiai-1.14.0'
-        if (Test-Path $kleidiSrc) {
-            $patched = 0
-            Get-ChildItem -Path $kleidiSrc -Recurse -Filter '*.S' | ForEach-Object {
-                $orig = Get-Content $_.FullName -Raw
-                $new  = $orig -replace '#if defined\(_MSC_VER\)', '#if 0  /* MNN+clang-cl: force GAS path */'
-                if ($new -ne $orig) {
-                    Set-Content -Path $_.FullName -Value $new -NoNewline
-                    $patched++
-                }
-            }
-            Write-Host ">>> Patched $patched KleidiAI .S file(s) to force GAS path"
-        } else {
-            Write-Host "::warning::KleidiAI src dir not found at $kleidiSrc; skip patch"
-        }
-    }
 
     # ── 4. Build ─────────────────────────────────────────────────────
     Write-Host ">>> ninja (RID=$RID)"
