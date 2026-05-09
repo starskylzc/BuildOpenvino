@@ -94,8 +94,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          # 用 'brew list || brew install' 做 idempotent — 否则已装时 brew 把
-          # 'already installed' 写到 stderr → GHA 转 ##[warning] annotation。
+          # idempotent: brew list || install. 否则 brew 在已装时把 already-installed
+          # 信息写到 stderr, GHA 把它转成一条 annotation, 影响 0-warning 目标.
           for pkg in cmake ninja; do
             brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"
           done
@@ -139,8 +139,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          # 用 'brew list || brew install' 做 idempotent — 否则已装时 brew 把
-          # 'already installed' 写到 stderr → GHA 转 ##[warning] annotation。
+          # idempotent: brew list || install. 否则 brew 在已装时把 already-installed
+          # 信息写到 stderr, GHA 把它转成一条 annotation, 影响 0-warning 目标.
           for pkg in cmake ninja; do
             brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"
           done
