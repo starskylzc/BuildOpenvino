@@ -178,9 +178,10 @@ SO="$BUILD_DIR/libMNN.so"
 [ -f "$SO" ] || { echo "::error::libMNN.so not produced"; ls -la "$BUILD_DIR"; exit 1; }
 cp -f "$SO" "$OUT_DIR/"
 
-# SEP_BUILD=ON 时会出多个 backend .so;统一拷 libMNN*.so 全部产物
-# (linux-x64 是 SEP_BUILD=ON, libMNN_CL.so 等会出现; arm64 / loongarch 是 OFF, 只 libMNN.so)
-find "$BUILD_DIR" -maxdepth 2 -name "libMNN*.so" -not -name "libMNN.so" -print -exec cp -f {} "$OUT_DIR/" \; || true
+# SEP_BUILD=ON 时会出多个 backend .so;统一拷 libMNN*.so 全部产物。
+# (linux-x64 是 SEP_BUILD=ON: libMNN_CL.so 在 source/backend/opencl/, libMNN_Express.so 在 express/;
+#  arm64 / loongarch 是 OFF, 只 libMNN.so 不影响)。无 maxdepth, 全树扫描。
+find "$BUILD_DIR" -name "libMNN*.so" -not -name "libMNN.so" -type f -print -exec cp -f {} "$OUT_DIR/" \; || true
 
 for exe in MNNV2Basic.out GetMNNInfo; do
     if [ -f "$BUILD_DIR/$exe" ]; then cp -f "$BUILD_DIR/$exe" "$OUT_DIR/"; fi
