@@ -132,7 +132,11 @@ ARCH_FLAGS=()
 TOOLCHAIN_ARGS=()
 case "$ARCH" in
     x86_64)
-        ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON)
+        # linux-x64: SEP_BUILD=ON 让 OpenCL/Express 等 backend 拆成独立 .so (libMNN_CL.so 等),
+        # 主 libMNN.so 不依赖 GPU 库。这是 MNN 官方推荐部署方式 (bench/MNN_BUILD_MATRIX.md §7),
+        # 留出 libMNN_MUSA.so 后续在摩尔线程开发机单独编完直接 drop-in 的 slot
+        # (GHA 无 MUSA SDK,本 workflow 不编 libMNN_MUSA.so)。
+        ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=ON)
         ;;
     aarch64)
         ARCH_FLAGS+=(-DMNN_ARM82=ON -DMNN_KLEIDIAI=ON)
@@ -174,9 +178,9 @@ SO="$BUILD_DIR/libMNN.so"
 [ -f "$SO" ] || { echo "::error::libMNN.so not produced"; ls -la "$BUILD_DIR"; exit 1; }
 cp -f "$SO" "$OUT_DIR/"
 
-for f in libMNN_CL.so libMNN_Express.so; do
-    if [ -f "$BUILD_DIR/$f" ]; then cp -f "$BUILD_DIR/$f" "$OUT_DIR/"; fi
-done
+# SEP_BUILD=ON 时会出多个 backend .so;统一拷 libMNN*.so 全部产物
+# (linux-x64 是 SEP_BUILD=ON, libMNN_CL.so 等会出现; arm64 / loongarch 是 OFF, 只 libMNN.so)
+find "$BUILD_DIR" -maxdepth 2 -name "libMNN*.so" -not -name "libMNN.so" -print -exec cp -f {} "$OUT_DIR/" \; || true
 
 for exe in MNNV2Basic.out GetMNNInfo; do
     if [ -f "$BUILD_DIR/$exe" ]; then cp -f "$BUILD_DIR/$exe" "$OUT_DIR/"; fi
