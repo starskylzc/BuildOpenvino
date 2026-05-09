@@ -136,8 +136,17 @@ case "$ARCH" in
             # linux-x64-musa: 单一 libMNN.so (CPU+OpenCL+MUSA+Express embed)。
             # 跑在 mthreads/musa:rc4.3.0 docker image 内 (image 自带 MUSA SDK + mcc compiler).
             # 链接 libmusart.so → 只能在装了摩尔线程驱动的客户机加载, 非 MTT 机器禁用此 .so.
+            # COMPAT_STUB=OFF: MNN 默认 STUB=ON, 即使 NATIVE=ON 也走 stub fallback —
+            # 必须显式关 STUB 才让 cmake find_package(MUSA) 找 mthreads SDK.
             ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF \
-                         -DMNN_MUSA=ON -DMNN_MUSA_NATIVE=ON)
+                         -DMNN_MUSA=ON -DMNN_MUSA_NATIVE=ON -DMNN_MUSA_COMPAT_STUB=OFF)
+
+            # MNN 3.5.0 上游 bug: source/backend/musa/core/MusaBackend.cpp:156 漏写
+            # ->quantAttr,'getDescribe(tensor)->type' 应该是 'quant->type'
+            # (quant 在 line 155 已经是 quantAttr.get())。修复后编译过。
+            sed -i 's|TensorUtils::getDescribe(tensor)->type == DataType_DT_INT8|quant->type == DataType_DT_INT8|g' \
+                "$MNN_SOURCE/source/backend/musa/core/MusaBackend.cpp"
+            echo ">>> Patched MusaBackend.cpp:156 (MNN 3.5.0 upstream bug fix)"
         else
             # linux-x64 (无 MUSA): 单一 libMNN.so (CPU+OpenCL+Express embed).
             ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=OFF)
