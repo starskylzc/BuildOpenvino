@@ -1,0 +1,373 @@
+# ============================================================
+# Build MNN 3.5.0 (Win + Mac + Linux)
+#
+# 目的:
+#   一个 workflow 一次性产出 MNN 3.5.0 跨平台 native 二进制,8 个 .NET RID。
+#   对齐 YuYiNoPhotoLib 项目的 8-RID 矩阵 (bench/MNN_BUILD_MATRIX.md):
+#
+#   ┌─────────────────────────┬──────────────┬──────────────────────────┬────────┐
+#   │ RID                     │ OS Floor     │ Backend                  │ MNN.so │
+#   ├─────────────────────────┼──────────────┼──────────────────────────┼────────┤
+#   │ win-x64                 │ Win7 SP1     │ CPU(AVX2) + OpenCL       │ ~6 MB  │
+#   │ win-x86                 │ Win7 SP1     │ CPU(SSE)  + OpenCL       │ ~5 MB  │
+#   │ win-arm64               │ Win10 ARM    │ CPU(ARM82+KleidiAI)+OpenCL│ ~5 MB  │
+#   │ osx-x64                 │ macOS 10.15  │ CPU(AVX2) + Metal+CoreML │ ~5 MB  │
+#   │ osx-arm64               │ macOS 12.0   │ CPU(ARM82) + Metal+CoreML│ ~5 MB  │
+#   │ linux-x64               │ glibc 2.27   │ CPU(AVX2) + OpenCL       │ ~5 MB  │
+#   │ linux-arm64             │ glibc 2.27   │ CPU(ARM82) + OpenCL      │ ~5 MB  │
+#   │ linux-loongarch64       │ Loongnix     │ CPU(通用) + OpenCL       │ ~4 MB  │
+#   └─────────────────────────┴──────────────┴──────────────────────────┴────────┘
+#
+#   不开的 backend (锁定决策, 详见 MNN_BUILD_MATRIX.md §10):
+#     ❌ Vulkan / CUDA / TensorRT  — OpenCL 全覆盖,Vulkan iGPU 实测劣化 8x
+#     ❌ HiAI / QNN / NeuroPilot   — Android NPU,桌面项目无关
+#     ❌ MUSA (linux-x64 only)     — 需 MUSA SDK,GHA 无对应环境;
+#                                     用 MNN_SEP_BUILD=ON 后续单独编 libMNN_MUSA.so,
+#                                     不影响主 libMNN.so 加载 (摩尔线程客户单独分发)
+#
+# Win7 兼容性 (win-x64 / win-x86):
+#   - 链接 YY-Thunks v1.2.1 Win7 obj → Win8+ KERNEL32 API 自动 shim
+#   - /SUBSYSTEM:WINDOWS,6.1 (x64) 或 ,5.1 (x86) → PE 标记最低 OS
+#   - /MT 静态 MSVC → 无 VC++ Redist 依赖
+#   - 真机已验证 (Win7 SP1 + GT 740): CPU + OpenCL 全部跑通
+#
+# Linux glibc 2.27 兼容 (linux-x64 / linux-arm64):
+#   - Docker ubuntu:18.04 容器内编译 → glibc 2.27 锁定
+#   - -static-libstdc++ -static-libgcc → 无 libstdc++.so.6 版本依赖
+#   - 兼容 麒麟 V10 / 统信 UOS V20 / 欧拉 / 通用 Linux
+#
+# Tooling:
+#   - actions/checkout@v6, actions/setup-python@v6, actions/upload-artifact@v7
+#   - microsoft/setup-msbuild@v3 (Windows)
+#   - FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 提前对齐 Node 24 消除 deprecation warning
+# ============================================================
+
+name: Build MNN 3.5.0 (Win + Mac + Linux)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+      target_set:
+        description: 'Which RID(s) to build'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          # ── 单 RID (推荐: 单点失败不影响其他) ──
+          - win-x64
+          - win-x86
+          - win-arm64
+          - osx-x64
+          - osx-arm64
+          - linux-x64
+          - linux-arm64
+          - linux-loongarch64
+          # ── 聚合档 ──
+          - all
+          - windows-only
+          - macos-only
+          - linux-only
+      mnn_ref:
+        description: 'MNN git ref (tag / branch / sha). Default 3.5.0 official tag.'
+        required: false
+        default: '3.5.0'
+        type: string
+      yy_thunks_version:
+        description: 'YY-Thunks release version (Win7/x86 兼容). 默认 v1.2.1 (与 YuYiNoPhotoLib 实测版本一致).'
+        required: false
+        default: 'v1.2.1'
+        type: string
+
+env:
+  # 强制所有 JavaScript action 用 Node 24 (上游 v5/v6 部分仍标 Node 20)。
+  # 2026-06-02 后 GHA 默认 Node 24,此变量提前对齐,消除 deprecation warning。
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  MNN_REF: ${{ inputs.mnn_ref }}
+  YY_THUNKS_VERSION: ${{ inputs.yy_thunks_version }}
+
+jobs:
+  # ============================================================
+  # prepare: 把 inputs.target_set 转成 matrix.include JSON
+  #   - platform:        windows / macos / linux
+  #   - rid:             .NET RID, 也是产物文件夹名
+  #   - arch:            cmake / build.py 用的 arch tag (x64/x86/arm64/x86_64/loongarch64)
+  #   - runner:          GHA 主机
+  #   - docker_image:    Linux 用 (ubuntu:18.04 / arm64v8/ubuntu:18.04 / 留空)
+  #   - deploy_target:   macOS 用 (10.15 / 12.0)
+  #   - xcode_version:   macOS 用 (留空 = runner 默认)
+  #   - artifact_name:   GHA artifact 名称
+  # ============================================================
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        shell: bash
+        run: |
+          # 8 个 RID 完整定义。runner 选型对齐 ORT workflow,Win ARM64 用原生 windows-11-arm,
+          # Mac Intel 用 macos-15-intel(deploy 10.15),Mac Silicon 用 macos-14(deploy 12.0)。
+          WIN_X64='{"platform":"windows","rid":"win-x64","arch":"x64","runner":"windows-2022","docker_image":"","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-win-x64"}'
+          WIN_X86='{"platform":"windows","rid":"win-x86","arch":"x86","runner":"windows-2022","docker_image":"","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-win-x86"}'
+          WIN_ARM64='{"platform":"windows","rid":"win-arm64","arch":"arm64","runner":"windows-11-arm","docker_image":"","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-win-arm64"}'
+          OSX_X64='{"platform":"macos","rid":"osx-x64","arch":"x86_64","runner":"macos-15-intel","docker_image":"","deploy_target":"10.15","xcode_version":"","artifact_name":"mnn-3.5.0-osx-x64"}'
+          OSX_ARM64='{"platform":"macos","rid":"osx-arm64","arch":"arm64","runner":"macos-14","docker_image":"","deploy_target":"12.0","xcode_version":"15.2","artifact_name":"mnn-3.5.0-osx-arm64"}'
+          LINUX_X64='{"platform":"linux","rid":"linux-x64","arch":"x86_64","runner":"ubuntu-22.04","docker_image":"ubuntu:18.04","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-x64"}'
+          LINUX_ARM64='{"platform":"linux","rid":"linux-arm64","arch":"aarch64","runner":"ubuntu-24.04-arm","docker_image":"arm64v8/ubuntu:18.04","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-arm64"}'
+          # LoongArch64 走交叉编译 (GHA 无原生 runner)。Ubuntu 24.04 自带 gcc-loongarch64-linux-gnu。
+          LINUX_LA64='{"platform":"linux","rid":"linux-loongarch64","arch":"loongarch64","runner":"ubuntu-24.04","docker_image":"","deploy_target":"","xcode_version":"","artifact_name":"mnn-3.5.0-linux-loongarch64"}'
+
+          case "${{ inputs.target_set }}" in
+            win-x64)            M="[$WIN_X64]" ;;
+            win-x86)            M="[$WIN_X86]" ;;
+            win-arm64)          M="[$WIN_ARM64]" ;;
+            osx-x64)            M="[$OSX_X64]" ;;
+            osx-arm64)          M="[$OSX_ARM64]" ;;
+            linux-x64)          M="[$LINUX_X64]" ;;
+            linux-arm64)        M="[$LINUX_ARM64]" ;;
+            linux-loongarch64)  M="[$LINUX_LA64]" ;;
+            windows-only)       M="[$WIN_X64,$WIN_X86,$WIN_ARM64]" ;;
+            macos-only)         M="[$OSX_X64,$OSX_ARM64]" ;;
+            linux-only)         M="[$LINUX_X64,$LINUX_ARM64,$LINUX_LA64]" ;;
+            all|*)              M="[$WIN_X64,$WIN_X86,$WIN_ARM64,$OSX_X64,$OSX_ARM64,$LINUX_X64,$LINUX_ARM64,$LINUX_LA64]" ;;
+          esac
+          echo "matrix={\"include\":$M}" >> "$GITHUB_OUTPUT"
+          echo ">>> matrix=$M"
+
+  # ============================================================
+  # build: per-RID 编译 (matrix fan-out)
+  # ============================================================
+  build:
+    name: ${{ matrix.rid }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Checkout BuildOpenvino (本仓 — 拿 build slice 脚本)
+      # ------------------------------------------------------------
+      - name: Checkout BuildOpenvino (this repo, for scripts)
+        uses: actions/checkout@v6
+        with:
+          path: build-tools
+
+      # ------------------------------------------------------------
+      # 2. Checkout MNN (alibaba/MNN @ 指定 ref)
+      # ------------------------------------------------------------
+      - name: Checkout MNN ${{ env.MNN_REF }}
+        uses: actions/checkout@v6
+        with:
+          repository: alibaba/MNN
+          ref: ${{ env.MNN_REF }}
+          path: MNN
+          fetch-depth: 1
+
+      # ------------------------------------------------------------
+      # 3. Setup Python (统一 3.11,Win ARM64 / Mac / Linux 都支持)
+      # ------------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      # ============================================================
+      # 4. Windows-specific
+      # ============================================================
+      - name: Install deps (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          pip install "cmake>=3.28,<4" ninja
+          cmake --version
+          ninja --version
+
+      - name: Setup MSBuild (Windows)
+        if: matrix.platform == 'windows'
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Fetch YY-Thunks ${{ env.YY_THUNKS_VERSION }} (Windows x64/x86 only)
+        if: matrix.platform == 'windows' && (matrix.arch == 'x64' || matrix.arch == 'x86')
+        shell: pwsh
+        run: |
+          $ver = "${{ env.YY_THUNKS_VERSION }}"
+          $url = "https://github.com/Chuyu-Team/YY-Thunks/releases/download/$ver/YY-Thunks-Objs.zip"
+          Write-Host ">>> Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile yy-thunks.zip -UseBasicParsing
+          Expand-Archive yy-thunks.zip -DestinationPath yy-thunks -Force
+
+          # YY-Thunks zip 内目录结构: objs/<arch>/YY_Thunks_for_Win7.obj
+          $arch = "${{ matrix.arch }}"
+          $obj = Join-Path (Resolve-Path yy-thunks) "objs\$arch\YY_Thunks_for_Win7.obj"
+          if (-not (Test-Path $obj)) {
+            Write-Host "::error::YY_Thunks_for_Win7.obj not found at $obj"
+            Get-ChildItem yy-thunks -Recurse | Select-Object FullName
+            exit 1
+          }
+          $size = (Get-Item $obj).Length
+          Write-Host "✅ YY-Thunks Win7 obj: $obj ($size bytes)"
+          # 透出绝对路径给后续 build 步骤
+          "YY_THUNKS_OBJ=$obj" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build MNN (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $env:BUILD_TYPE  = "${{ inputs.build_type }}"
+          $env:MNN_SOURCE  = "$pwd\MNN"
+          $env:OUT_DIR     = "$pwd\artifacts"
+          $env:RID         = "${{ matrix.rid }}"
+          $env:ARCH        = "${{ matrix.arch }}"
+          & "$pwd\build-tools\.github\scripts\build_mnn_windows.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "Build failed: $LASTEXITCODE" }
+
+      # ============================================================
+      # 5. macOS-specific
+      # ============================================================
+      - name: Select Xcode (macOS)
+        if: matrix.platform == 'macos' && matrix.xcode_version != ''
+        shell: bash
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_${{ matrix.xcode_version }}.app/Contents/Developer
+          xcodebuild -version
+          xcrun --show-sdk-version
+
+      - name: Install deps (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          # CMake 4.x policy 改动会让 MNN 子模块的旧 cmake_minimum_required 报错,
+          # 锁 cmake < 4 同 ORT workflow 的策略。
+          pip install "cmake>=3.28,<4"
+          if ! command -v ninja &>/dev/null; then brew install ninja; fi
+          cmake --version
+          ninja --version
+
+      - name: Build MNN (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          chmod +x build-tools/.github/scripts/build_mnn_macos.sh
+          BUILD_TYPE='${{ inputs.build_type }}' \
+          MNN_SOURCE="$PWD/MNN" \
+          OUT_DIR="$PWD/artifacts" \
+          RID='${{ matrix.rid }}' \
+          ARCH='${{ matrix.arch }}' \
+          DEPLOY_TARGET='${{ matrix.deploy_target }}' \
+            build-tools/.github/scripts/build_mnn_macos.sh
+
+      # ============================================================
+      # 6. Linux-specific (x64 / arm64 走 Docker, loongarch64 走交叉编译)
+      # ============================================================
+      - name: Build MNN (Linux x64 / arm64, in Docker ubuntu:18.04 for glibc 2.27)
+        if: matrix.platform == 'linux' && matrix.docker_image != ''
+        shell: bash
+        run: |
+          chmod +x build-tools/.github/scripts/build_mnn_linux.sh
+          docker run --rm \
+            -v "${{ github.workspace }}:/ws" \
+            -w /ws \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e TZ=UTC \
+            -e BUILD_TYPE='${{ inputs.build_type }}' \
+            -e RID='${{ matrix.rid }}' \
+            -e ARCH='${{ matrix.arch }}' \
+            -e MNN_SOURCE=/ws/MNN \
+            -e OUT_DIR=/ws/artifacts \
+            "${{ matrix.docker_image }}" \
+            bash build-tools/.github/scripts/build_mnn_linux.sh
+
+      - name: Build MNN (Linux loongarch64 cross-compile)
+        if: matrix.platform == 'linux' && matrix.rid == 'linux-loongarch64'
+        shell: bash
+        run: |
+          # Ubuntu 24.04 自带 gcc-loongarch64-linux-gnu (apt 包名 gcc-13-loongarch64-linux-gnu 或 gcc-loongarch64-linux-gnu)
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-loongarch64-linux-gnu g++-loongarch64-linux-gnu \
+            cmake ninja-build || \
+          sudo apt-get install -y --no-install-recommends \
+            gcc-13-loongarch64-linux-gnu g++-13-loongarch64-linux-gnu \
+            cmake ninja-build
+          chmod +x build-tools/.github/scripts/build_mnn_linux.sh
+          BUILD_TYPE='${{ inputs.build_type }}' \
+          RID='${{ matrix.rid }}' \
+          ARCH='${{ matrix.arch }}' \
+          MNN_SOURCE="$PWD/MNN" \
+          OUT_DIR="$PWD/artifacts" \
+          CROSS_COMPILE=loongarch64 \
+            build-tools/.github/scripts/build_mnn_linux.sh
+
+      # ============================================================
+      # 7. Smoke test (load + 调一个 MNN C API,只在 host arch 匹配时跑)
+      # ============================================================
+      - name: Smoke test (Windows x64 — host arch matches)
+        if: matrix.platform == 'windows' && matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          & "$pwd\build-tools\.github\scripts\smoke_test_mnn_windows.ps1" "$pwd\artifacts\MNN.dll"
+
+      - name: Smoke test (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          # macos-15-intel 是 x86_64,macos-14 是 arm64; 都跟 deploy arch 一致,可加载。
+          python3 build-tools/.github/scripts/smoke_test_mnn_unix.py "$PWD/artifacts/libMNN.dylib"
+
+      - name: Smoke test (Linux x64 — host arch matches)
+        if: matrix.platform == 'linux' && matrix.rid == 'linux-x64'
+        shell: bash
+        run: |
+          # Docker 容器内已经能 ldd,这里只在 GHA host (ubuntu-22.04 x86_64) 再加载一次确认 ABI OK。
+          python3 build-tools/.github/scripts/smoke_test_mnn_unix.py "$PWD/artifacts/libMNN.so"
+
+      - name: Smoke test (Linux arm64 — host arch matches)
+        if: matrix.platform == 'linux' && matrix.rid == 'linux-arm64'
+        shell: bash
+        run: |
+          python3 build-tools/.github/scripts/smoke_test_mnn_unix.py "$PWD/artifacts/libMNN.so"
+
+      - name: Inspect cross-compiled artifact (loongarch64, no host load)
+        if: matrix.platform == 'linux' && matrix.rid == 'linux-loongarch64'
+        shell: bash
+        run: |
+          file "$PWD/artifacts/libMNN.so"
+          ls -lh artifacts/
+
+      # ============================================================
+      # 8. Write version.txt + Upload artifact
+      # ============================================================
+      - name: Write version.txt
+        shell: bash
+        run: |
+          cat > artifacts/version.txt <<EOF
+          MNN Version:    ${{ env.MNN_REF }}
+          RID:            ${{ matrix.rid }}
+          Platform:       ${{ matrix.platform }}
+          Arch:           ${{ matrix.arch }}
+          Runner:         ${{ matrix.runner }}
+          Docker Image:   ${{ matrix.docker_image }}
+          Deploy Target:  ${{ matrix.deploy_target }}
+          Build Type:     ${{ inputs.build_type }}
+          YY-Thunks:      ${{ env.YY_THUNKS_VERSION }} (win-x64/win-x86 only)
+          EOF
+          ls -lh artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifacts/
+          retention-days: 90
+          if-no-files-found: error
