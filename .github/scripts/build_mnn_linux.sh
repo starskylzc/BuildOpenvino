@@ -139,10 +139,14 @@ case "$ARCH" in
         ARCH_FLAGS+=(-DMNN_AVX2=ON -DMNN_USE_SSE=ON -DMNN_SEP_BUILD=ON)
         ;;
     aarch64)
-        ARCH_FLAGS+=(-DMNN_ARM82=ON -DMNN_KLEIDIAI=ON)
+        # linux-arm64: 简报 §4 期望单一 libMNN.so (OpenCL + ARM82 embed)。
+        # MNN_SEP_BUILD 在 Linux 默认 ON, 必须显式 OFF 才能合并;否则会出多个 .so 不符简报。
+        ARCH_FLAGS+=(-DMNN_ARM82=ON -DMNN_KLEIDIAI=ON -DMNN_SEP_BUILD=OFF)
         ;;
     loongarch64)
         # 龙芯 3A5000+: 无 ARM82/AVX2 等 SIMD 优化, 通用 C++ + OpenCL 兜底
+        # 简报 §4 期望单一 libMNN.so, 显式关 SEP_BUILD (默认 ON)
+        ARCH_FLAGS+=(-DMNN_SEP_BUILD=OFF)
         # 写 cmake toolchain file (交叉编译)
         TC="$BUILD_DIR/loongarch64-toolchain.cmake"
         cat > "$TC" <<'TCEOF'
