@@ -144,20 +144,41 @@ switch ($ARCH) {
         # Win10 ARM 起才有 Win on ARM, 不需要 YY-Thunks; 启用 ARM82 + KleidiAI fp16 加速
         $cmakeArchExtra += @('-DMNN_ARM82=ON', '-DMNN_KLEIDIAI=ON')
 
-        # MNN 的 CMakeLists.txt 显式 'cmake_policy(SET CMP0091 NEW)' 强制开 MSVC_RUNTIME_LIBRARY abstraction,
-        # 命令行 -DCMAKE_POLICY_DEFAULT_CMP0091=OLD 被 override。NEW 模式下 cmake 给所有 target(包括 ASM)
-        # 自动设 MSVC_RUNTIME_LIBRARY="MultiThreadedDLL" 默认值,armasm64.exe 不识别 → configure 失败。
-        # 修法: 在 cmake configure 前 sed patch MNN/CMakeLists.txt 把 NEW 改成 OLD(仅 arm64 上 patch,
-        # 不影响 x64/x86 — 他们靠 NEW 让 MNN_WIN_RUNTIME_MT=ON 设 /MT 工作)。
+        # ── win-arm64 上 MNN 3.5.0 有两个 MSVC 兼容 bug 要 patch ──
+        # Patch 1: MNN/CMakeLists.txt 显式 'cmake_policy(SET CMP0091 NEW)' 让 cmake 给 ASM target
+        #   自动设 MSVC_RUNTIME_LIBRARY=MultiThreadedDLL,armasm64 不识别 → configure 失败。
+        #   仅 arm64 改成 OLD;x64/x86 不动(他们靠 NEW 让 MNN_WIN_RUNTIME_MT=ON 设 /MT 工作)。
         $mnnCMakeLists = Join-Path $MNN_SOURCE 'CMakeLists.txt'
         if (Test-Path $mnnCMakeLists) {
             $orig = Get-Content $mnnCMakeLists -Raw
             $patched = $orig -replace 'cmake_policy\(SET CMP0091 NEW\)', 'cmake_policy(SET CMP0091 OLD)'
             if ($patched -ne $orig) {
                 Set-Content $mnnCMakeLists -Value $patched -NoNewline
-                Write-Host ">>> Patched MNN/CMakeLists.txt: CMP0091 NEW -> OLD (arm64 ASM compat)"
-            } else {
-                Write-Host "::warning::CMP0091 NEW pattern not found in MNN/CMakeLists.txt; cmake may still fail"
+                Write-Host ">>> Patched MNN/CMakeLists.txt: CMP0091 NEW -> OLD"
+            }
+        }
+
+        # Patch 2: source/cv/SkNx_neon.h 用 GCC NEON extension (uint32x4_t << / __n128 *),
+        #   MSVC ARM64 的 cl.exe 不识别 vector 类型 operator overload (C2676)。
+        #   方案: 给 SkNx.h 和 Matrix_CV.cpp 的 NEON 入口加 '&& !defined(_MSC_VER)' 守卫,
+        #   MSVC 走 scalar fallback (MNNCV 模块仅用作 ImageProcess 辅助,我们项目不调,
+        #   .NET binding 直接喂 NCHW float 给 MNN inference,scalar fallback 无性能影响)。
+        $skNx = Join-Path $MNN_SOURCE 'source\cv\SkNx.h'
+        if (Test-Path $skNx) {
+            $orig = Get-Content $skNx -Raw
+            $patched = $orig -replace '#if defined\(MNN_USE_NEON\)([\r\n]+\s+#include "SkNx_neon\.h")', '#if defined(MNN_USE_NEON) && !defined(_MSC_VER)$1'
+            if ($patched -ne $orig) {
+                Set-Content $skNx -Value $patched -NoNewline
+                Write-Host ">>> Patched SkNx.h: NEON include guarded by !_MSC_VER"
+            }
+        }
+        $matrixCv = Join-Path $MNN_SOURCE 'source\cv\Matrix_CV.cpp'
+        if (Test-Path $matrixCv) {
+            $orig = Get-Content $matrixCv -Raw
+            $patched = $orig -replace '(?m)^#ifdef MNN_USE_NEON\s*$', '#if defined(MNN_USE_NEON) && !defined(_MSC_VER)'
+            if ($patched -ne $orig) {
+                Set-Content $matrixCv -Value $patched -NoNewline
+                Write-Host ">>> Patched Matrix_CV.cpp: NEON path guarded by !_MSC_VER"
             }
         }
         # 不强制 SUBSYSTEM (Win10 ARM64 默认 10.0)
