@@ -82,6 +82,22 @@ Get-Content $tmp | ForEach-Object {
 Remove-Item $tmp -Force
 Write-Host ">>> VS env loaded for arch=$ARCH (cl.exe = $((Get-Command cl.exe -ErrorAction SilentlyContinue).Source))"
 
+# 强制使用 pip 装的 cmake (>=3.28,<4),不用系统 cmake 4.x:
+# windows-11-arm runner 系统 cmake 4.x 给 ASM target 强加 MSVC_RUNTIME_LIBRARY 属性,
+# armasm64.exe 不识别,导致 cmake configure 失败 (实测 win-arm64 卡死在这)。
+# x64/x86 上系统 cmake 4.x 工作 OK,但统一切到 pip cmake 一致更稳。
+$pipCmakePath = python -c "import sysconfig, os; p = os.path.join(sysconfig.get_path('scripts'), 'cmake.exe'); print(p if os.path.exists(p) else '')"
+$pipCmakePath = ($pipCmakePath | Out-String).Trim()
+if ($pipCmakePath -and (Test-Path $pipCmakePath)) {
+    $pipCmakeDir = Split-Path $pipCmakePath -Parent
+    $env:PATH = "$pipCmakeDir;$env:PATH"
+    Write-Host ">>> Using pip cmake: $pipCmakePath"
+    & $pipCmakePath --version | Select-Object -First 1
+} else {
+    Write-Host "::warning::pip cmake 未找到,用系统 cmake (arm64 可能因 cmake 4.x ASM bug 失败)"
+    & cmake --version | Select-Object -First 1
+}
+
 # ── 2. 组装 cmake 参数 ───────────────────────────────────────────────
 # 公共参数 (所有 RID 共用)
 $cmakeCommon = @(
