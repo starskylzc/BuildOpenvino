@@ -19,6 +19,11 @@ import os
 import platform
 import sys
 
+# Win runner 默认 stdout codec 是 cp1252, 中文字符会 UnicodeEncodeError. 强制 UTF-8.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 try:
     import pefile  # type: ignore[import-not-found]
 except ImportError:

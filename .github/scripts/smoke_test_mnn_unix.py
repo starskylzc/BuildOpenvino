@@ -21,6 +21,11 @@ import re
 import subprocess
 import sys
 
+# 防御 Windows runner 中文 stdout codec 报错 (Linux/Mac 默认 UTF-8 但保险)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 
 def check_symbols(lib_path: str) -> bool:
     is_macos = sys.platform == "darwin"
