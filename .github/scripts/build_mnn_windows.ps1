@@ -210,6 +210,32 @@ switch ($ARCH) {
 if ($linkerSharedExtra) { $cmakeArchExtra += "-DCMAKE_SHARED_LINKER_FLAGS=$linkerSharedExtra" }
 if ($linkerExeExtra)    { $cmakeArchExtra += "-DCMAKE_EXE_LINKER_FLAGS=$linkerExeExtra" }
 
+# ── 2.5 Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target ──────────
+# 把 mnnwrap.cpp 编进 MNN.dll,clients 部署 1 个 native/RID(免单独 mnnwrap.dll)
+$mnnwrapDir = Join-Path $PSScriptRoot '..\..\mnnwrap' | Resolve-Path -ErrorAction SilentlyContinue
+if (-not $mnnwrapDir -or -not (Test-Path "$mnnwrapDir\mnnwrap.cpp")) {
+    Write-Host "::warning::mnnwrap source not found at $($PSScriptRoot)\..\..\mnnwrap; skipping mnnwrap integration"
+} else {
+    $mnnwrapDirEsc = ($mnnwrapDir.Path -replace '\\', '/')
+    $injection = @"
+
+# === YuYiNoPhotoLib mnnwrap injection (auto-appended by BuildOpenvino) ===
+target_sources(MNN PRIVATE "$mnnwrapDirEsc/mnnwrap.cpp")
+target_include_directories(MNN PRIVATE "$mnnwrapDirEsc")
+target_compile_definitions(MNN PRIVATE MNNWRAP_BUILDING)
+if(MSVC)
+  target_compile_options(MNN PRIVATE /utf-8 /wd4819)
+endif()
+"@
+    $mnnCMakeLists = Join-Path $MNN_SOURCE 'CMakeLists.txt'
+    if ((Get-Content $mnnCMakeLists -Raw) -notmatch 'mnnwrap injection') {
+        Add-Content -Path $mnnCMakeLists -Value $injection -Encoding utf8
+        Write-Host ">>> Appended mnnwrap injection to MNN/CMakeLists.txt (mnnwrap dir: $mnnwrapDirEsc)"
+    } else {
+        Write-Host ">>> mnnwrap injection already present in MNN/CMakeLists.txt"
+    }
+}
+
 # ── 3. Configure ─────────────────────────────────────────────────────
 Push-Location $buildDir
 try {

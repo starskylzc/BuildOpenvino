@@ -165,6 +165,35 @@ TCEOF
 esac
 
 # ====================================================================
+# 2.5. Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target
+# ====================================================================
+# 把 mnnwrap.cpp 编进 libMNN.so,clients 部署 1 个 native/RID(免单独 libmnnwrap.so)
+# 注:Docker(ubuntu:18.04)模式下 BASH_SOURCE 路径在容器视角,host 挂载的 /ws 才能访问 mnnwrap/
+#    所以同时 fallback 到 /ws/mnnwrap(linux-x64/arm64)。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MNNWRAP_DIR=""
+for cand in "$SCRIPT_DIR/../../mnnwrap" "/ws/mnnwrap" "$PWD/build-tools/mnnwrap" "$PWD/mnnwrap"; do
+  if [ -f "$cand/mnnwrap.cpp" ]; then
+    MNNWRAP_DIR="$(cd "$cand" && pwd)"
+    break
+  fi
+done
+if [ -n "$MNNWRAP_DIR" ]; then
+  if ! grep -q 'mnnwrap injection' "$MNN_SOURCE/CMakeLists.txt"; then
+    cat >> "$MNN_SOURCE/CMakeLists.txt" <<EOF
+
+# === YuYiNoPhotoLib mnnwrap injection (auto-appended by BuildOpenvino) ===
+target_sources(MNN PRIVATE "$MNNWRAP_DIR/mnnwrap.cpp")
+target_include_directories(MNN PRIVATE "$MNNWRAP_DIR")
+target_compile_definitions(MNN PRIVATE MNNWRAP_BUILDING)
+EOF
+    echo ">>> Appended mnnwrap injection to MNN/CMakeLists.txt (mnnwrap dir: $MNNWRAP_DIR)"
+  fi
+else
+  echo "::warning::mnnwrap source not found in any of: $SCRIPT_DIR/../../mnnwrap, /ws/mnnwrap, $PWD/build-tools/mnnwrap; skipping mnnwrap integration"
+fi
+
+# ====================================================================
 # 3. Configure + Build
 # ====================================================================
 echo ">>> cmake configure (RID=$RID)"

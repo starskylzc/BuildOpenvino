@@ -57,6 +57,25 @@ case "$ARCH" in
   *) echo "::error::Unsupported ARCH: $ARCH"; exit 1 ;;
 esac
 
+# ── Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target ─────────────
+# 把 mnnwrap.cpp 编进 libMNN.dylib,clients 部署 1 个 native/RID(免单独 libmnnwrap.dylib)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MNNWRAP_DIR="$(cd "$SCRIPT_DIR/../../mnnwrap" 2>/dev/null && pwd || true)"
+if [ -n "$MNNWRAP_DIR" ] && [ -f "$MNNWRAP_DIR/mnnwrap.cpp" ]; then
+  if ! grep -q 'mnnwrap injection' "$MNN_SOURCE/CMakeLists.txt"; then
+    cat >> "$MNN_SOURCE/CMakeLists.txt" <<EOF
+
+# === YuYiNoPhotoLib mnnwrap injection (auto-appended by BuildOpenvino) ===
+target_sources(MNN PRIVATE "$MNNWRAP_DIR/mnnwrap.cpp")
+target_include_directories(MNN PRIVATE "$MNNWRAP_DIR")
+target_compile_definitions(MNN PRIVATE MNNWRAP_BUILDING)
+EOF
+    echo ">>> Appended mnnwrap injection to MNN/CMakeLists.txt (mnnwrap dir: $MNNWRAP_DIR)"
+  fi
+else
+  echo "::warning::mnnwrap source not found near $SCRIPT_DIR; skipping mnnwrap integration"
+fi
+
 # ── Configure ────────────────────────────────────────────────────────
 echo ">>> cmake configure (RID=$RID)"
 cmake -S "$MNN_SOURCE" -B "$BUILD_DIR" -G Ninja \
