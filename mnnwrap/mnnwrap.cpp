@@ -361,6 +361,17 @@ MNNWRAP_API int32_t yuyi_mnn_module_forward(YuYiMnnModuleHandle m) {
     }
     auto outs = m->mod->onForward(m->inputs);
     if (outs.empty() && !m->outputNames.empty()) return MNNWRAP_ERR_FORWARD;
+
+    // GPU backend (OpenCL/Metal/CUDA/Vulkan) 内部用 NC4HW4 packed 格式,
+    // readMap<float> 直接读得到 NC4HW4 顺序的数据 — 上层 C# 解析按 NCHW 当
+    // [B,N,C] 处理时通道全错(YOLO obj_raw 的 score/bbox 字段都会乱)。
+    // 强制 _Convert 到 NCHW,统一输出布局给所有 backend(CPU 也是 NCHW,
+    // _Convert noop 通过)。
+    for (auto& v : outs) {
+        if (v.get() != nullptr) {
+            v = _Convert(v, NCHW);
+        }
+    }
     m->outputs = std::move(outs);
     return MNNWRAP_OK;
 }
