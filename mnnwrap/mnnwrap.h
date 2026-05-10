@@ -95,6 +95,27 @@ typedef struct {
 /// 库版本字符串("3.5.0" 等)。
 MNNWRAP_API const char* yuyi_backend_version(void);
 
+// ----------------------------- 日志路由 -----------------------------
+// 把 native 层 MNN_ERROR 路由到上层管控 (默认无注册 → 静默)。注册回调后,
+// MNN_ERROR 的 format + args 在 native 端 vsnprintf 进 buf 后调回调,
+// 上层 (C#) 决定写文件还是丢弃。stdout / stderr 都不会被 native 直接污染。
+
+/// 日志回调签名: msg 是 NUL-terminated UTF-8 字串,生命周期仅限调用期间.
+typedef void (*YuYiBackendLogCallback)(const char* msg);
+
+/// 注册 native 错误回调。传 NULL 取消注册 (回到静默状态)。
+MNNWRAP_API void yuyi_backend_set_log_callback(YuYiBackendLogCallback cb);
+
+/// **内部** — 被 patched MNNDefine.h 的 MNN_ERROR 宏调用,不需要从 .NET 直接调。
+/// 实现位于 mnnwrap.cpp,format + args vsnprintf 后转发给注册的回调。
+/// 因为要被 MNN .cpp 经 MNNDefine.h 看见声明,这里以 extern "C" 暴露
+/// (没标 MNNWRAP_API,不进 dumpbin /exports — 内部链接符号即可)。
+#ifdef __cplusplus
+extern "C"
+#endif
+void yuyi_backend_native_log(const char* fmt, ...);
+
+
 /// MNN 编译期开启的 backend 类型集合 — 调用者传 buf 接收 MnnWrapForwardType 枚举数组,
 /// 返回 backend 数量。可用于 .NET 探测当前 native 是否支持 OpenCL / Metal 等。
 MNNWRAP_API int32_t yuyi_backend_available_backends(int32_t* outBuf, int32_t bufLen);

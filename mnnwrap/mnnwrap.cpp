@@ -21,6 +21,9 @@
 #include <MNN/expr/NeuralNetWorkOp.hpp>
 #include <MNN/Interpreter.hpp>
 
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -29,6 +32,41 @@
 
 using namespace MNN;
 using namespace MNN::Express;
+
+// ============================== 日志回调路由 ==============================
+// MNN 上游 MNN_ERROR 宏被 patch_mnn_silence_print.py 重定向为
+// yuyi_backend_native_log(format, ...)。本编译单元提供其实现 + 一个可注册
+// 的回调指针。默认 nullptr → 静默(production 默认)。C# 端注册回调
+// 把消息塞进 AsyncLogger,文件/UI 自决,不污染 stdout / stderr。
+
+namespace {
+    std::atomic<YuYiBackendLogCallback> g_native_log_cb{nullptr};
+}
+
+extern "C" MNNWRAP_API void yuyi_backend_set_log_callback(YuYiBackendLogCallback cb) {
+    g_native_log_cb.store(cb, std::memory_order_release);
+}
+
+extern "C" void yuyi_backend_native_log(const char* fmt, ...) {
+    auto cb = g_native_log_cb.load(std::memory_order_acquire);
+    if (cb == nullptr) {
+        return;  // 没人监听 → 完全静默,format 都不算
+    }
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return;
+    }
+    // 去尾换行 — MNN 的 format 通常带 "\n",日志层自己加换行更整齐
+    int len = (n < (int)sizeof(buf) - 1) ? n : (int)sizeof(buf) - 1;
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+        buf[--len] = '\0';
+    }
+    cb(buf);
+}
 
 // ============================== 内部结构 ==============================
 
