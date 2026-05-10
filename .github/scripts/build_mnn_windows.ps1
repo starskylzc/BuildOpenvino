@@ -100,10 +100,13 @@ if ($pipCmakePath -and (Test-Path $pipCmakePath)) {
 
 # ── 2. 组装 cmake 参数 ───────────────────────────────────────────────
 # 公共参数 (所有 RID 共用)
+# MNN_SEP_BUILD=OFF: 单一 MNN.dll 含 MNN+Express+Backends,mnnwrap.cpp 注入到 MNN target
+# 时才能链到 Module::load 等 Express 符号(默认 ON 会把 Express 拆到 MNN_Express.dll)
 $cmakeCommon = @(
     '-G', 'Ninja',
     "-DCMAKE_BUILD_TYPE=$BUILD_TYPE",
     '-DMNN_BUILD_SHARED_LIBS=ON',
+    '-DMNN_SEP_BUILD=OFF',
     '-DMNN_OPENCL=ON',
     '-DMNN_USE_SYSTEM_LIB=OFF',
     '-DMNN_BUILD_TOOLS=ON',
@@ -217,15 +220,14 @@ if (-not $mnnwrapDir -or -not (Test-Path "$mnnwrapDir\mnnwrap.cpp")) {
     Write-Host "::warning::mnnwrap source not found at $($PSScriptRoot)\..\..\mnnwrap; skipping mnnwrap integration"
 } else {
     $mnnwrapDirEsc = ($mnnwrapDir.Path -replace '\\', '/')
+    # 注:不加 /utf-8 编译选项 — MNN 自己已设 /source-charset:utf-8(详见 cmake/MNNCompileOption),
+    #     重复给 cl.exe 会触发 D8016 "/source-charset:utf-8 和 /utf-8 不兼容" 编译错误。
     $injection = @"
 
 # === YuYiNoPhotoLib mnnwrap injection (auto-appended by BuildOpenvino) ===
 target_sources(MNN PRIVATE "$mnnwrapDirEsc/mnnwrap.cpp")
 target_include_directories(MNN PRIVATE "$mnnwrapDirEsc")
 target_compile_definitions(MNN PRIVATE MNNWRAP_BUILDING)
-if(MSVC)
-  target_compile_options(MNN PRIVATE /utf-8 /wd4819)
-endif()
 "@
     $mnnCMakeLists = Join-Path $MNN_SOURCE 'CMakeLists.txt'
     if ((Get-Content $mnnCMakeLists -Raw) -notmatch 'mnnwrap injection') {

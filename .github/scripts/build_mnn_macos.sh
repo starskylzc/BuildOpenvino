@@ -77,6 +77,8 @@ else
 fi
 
 # ── Configure ────────────────────────────────────────────────────────
+# MNN_SEP_BUILD=OFF: 单一 libMNN.dylib 含 MNN+Express+Backends,mnnwrap.cpp 注入到
+# MNN target 时才能链到 MNN::Express::Module::load 等(默认 ON 会拆到 libMNN_Express.dylib)
 echo ">>> cmake configure (RID=$RID)"
 cmake -S "$MNN_SOURCE" -B "$BUILD_DIR" -G Ninja \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
@@ -85,6 +87,7 @@ cmake -S "$MNN_SOURCE" -B "$BUILD_DIR" -G Ninja \
   -DCMAKE_OSX_SYSROOT=macosx \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DMNN_BUILD_SHARED_LIBS=ON \
+  -DMNN_SEP_BUILD=OFF \
   -DMNN_METAL=ON \
   -DMNN_COREML=ON \
   -DMNN_BUILD_TOOLS=ON \
