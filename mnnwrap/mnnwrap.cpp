@@ -8,10 +8,16 @@
 
 #include <MNN/MNNDefine.h>
 #include <MNN/MNNForwardType.h>
+// 必须 #define MNN_USER_SET_DEVICE 才能看到 MNNDeviceContext 结构体
+// (它在 MNNSharedContext.h 内被 #ifdef MNN_USER_SET_DEVICE guard,
+//  跟 OpenCLBackend.hpp 里的 #define 一致)
+#define MNN_USER_SET_DEVICE
+#include <MNN/MNNSharedContext.h>
 #include <MNN/expr/Module.hpp>
 #include <MNN/expr/Expr.hpp>
 #include <MNN/expr/ExprCreator.hpp>
 #include <MNN/expr/Executor.hpp>
+#include <MNN/expr/ExecutorScope.hpp>
 #include <MNN/expr/NeuralNetWorkOp.hpp>
 #include <MNN/Interpreter.hpp>
 
@@ -27,7 +33,13 @@ using namespace MNN::Express;
 // ============================== 内部结构 ==============================
 
 struct YuYiMnnRuntime_s {
+    // 每个 RuntimeManager 配独立 Executor + 独立 MNNDeviceContext。
+    // GPU 路径用 MNNDeviceContext.platformId 显式指定 OpenCL platform,
+    // 绕开 MNN OpenCLRuntime 的 envPlatId getenv 路径 + globalContext 缓存
+    // (那条路径 process 级共享,会让选 iGPU 实际跑 dGPU)。
+    std::shared_ptr<Executor> executor;
     std::shared_ptr<Executor::RuntimeManager> rt;
+    MNNDeviceContext devCtx;   // 持有 backendConfig.sharedContext 指向的内容
     MNNForwardType actualType = MNN_FORWARD_CPU;
     std::mutex lock;
 };
@@ -153,20 +165,47 @@ MNNWRAP_API YuYiMnnRuntimeHandle yuyi_mnn_runtime_create(const YuYiMnnRuntimeCon
     }
     sc.backendConfig = &bc;
 
-    std::shared_ptr<Executor::RuntimeManager> rt(
-        Executor::RuntimeManager::createRuntimeManager(sc),
-        Executor::RuntimeManager::destroy);
-    if (!rt) return nullptr;
-
-    // GPU device id 在 MNN 中不通过 Hint 设置:
-    //   - OpenCL: 走环境变量 MNN_OPENCL_PLATFORM_ID(见 bench 脚本实测,P/Invoke 调用前 setenv)
-    //   - CUDA: 走 BackendConfig.sharedContext(本项目编译矩阵未启用 CUDA)
-    // 调用方应该在创建 runtime 之前设好 env var(C# 用 Environment.SetEnvironmentVariable)。
-    (void)cfg->gpuDeviceId;
-
+    // ── 提前分配 runtime handle,持有 MNNDeviceContext + Executor 生命周期 ──
     auto* h = new YuYiMnnRuntime_s();
-    h->rt = std::move(rt);
     h->actualType = sc.type;
+
+    // ── GPU 路径:用 MNNDeviceContext.platformId 直接指定 OpenCL platform ──
+    // 通过 BackendConfig.sharedContext 传给 MNN,OpenCLBackend.cpp 直接用这个
+    // platformId 给 OpenCLRuntime ctor,**完全绕开 envPlatId getenv 路径** +
+    // **跨 RuntimeManager 共享 cl::Context 全局缓存的副作用**。
+    // 比 setenv("MNN_OPENCL_PLATFORM_ID")可靠:env 是 process 单例,多 GPU 切换
+    // 时容易踩 once-only 陷阱;sharedContext 是 per-RuntimeManager 显式参数。
+    if (sc.type == MNN_FORWARD_OPENCL || sc.type == MNN_FORWARD_CUDA) {
+        h->devCtx.platformId   = (uint32_t)(cfg->gpuDeviceId >= 0 ? cfg->gpuDeviceId : 0);
+        h->devCtx.deviceId     = 0;
+        h->devCtx.platformSize = 0;     // 0 = MNN 自动探测平台数量
+        h->devCtx.contextPtr   = nullptr; // null = MNN 内部 clCreateContext(用我们指定的 platform)
+        bc.sharedContext = (void*)&h->devCtx;
+    }
+
+    // ── 独立 Executor + ExecutorScope:绕开全局 Executor 的 mRuntimeInfo
+    // 按 forwardType 缓存 runtime(导致两 OpenCL RuntimeManager 共享同 runtime)。
+    // newExecutor 内部 onCreate 时 sharedContext 还没传(via newExecutor 不接受 sc),
+    // 所以 newExecutor 创的 runtime 仍可能用默认 platform — 但下面 createRuntimeManager
+    // 会用 ScheduleConfig 重建 runtime,带 sharedContext.platformId,真正生效。
+    std::shared_ptr<Executor> executor = Executor::newExecutor(sc.type, bc, sc.numThread);
+    if (!executor) {
+        delete h;
+        return nullptr;
+    }
+    std::shared_ptr<Executor::RuntimeManager> rt;
+    {
+        ExecutorScope scope(executor);
+        rt.reset(Executor::RuntimeManager::createRuntimeManager(sc),
+                 Executor::RuntimeManager::destroy);
+    }
+    if (!rt) {
+        delete h;
+        return nullptr;
+    }
+
+    h->executor = std::move(executor);
+    h->rt = std::move(rt);
     return h;
 }
 
@@ -243,6 +282,9 @@ MNNWRAP_API YuYiMnnModuleHandle yuyi_mnn_module_load_from_memory(
 
     Module* raw = nullptr;
     if (rt != nullptr && rt->rt != nullptr) {
+        // 在 runtime 关联的独立 Executor scope 下 load,Module 内部的 Express graph
+        // 编译走该 Executor 的 runtime 缓存,而非全局单例。
+        ExecutorScope scope(rt->executor);
         raw = Module::load({}, {}, buffer, size, rt->rt, &cfg);
     } else {
         raw = Module::load({}, {}, buffer, size, &cfg);
@@ -264,6 +306,7 @@ MNNWRAP_API YuYiMnnModuleHandle yuyi_mnn_module_load_from_file(
 
     Module* raw = nullptr;
     if (rt != nullptr && rt->rt != nullptr) {
+        ExecutorScope scope(rt->executor);
         raw = Module::load({}, {}, filePath, rt->rt, &cfg);
     } else {
         raw = Module::load({}, {}, filePath, &cfg);
@@ -358,6 +401,12 @@ MNNWRAP_API int32_t yuyi_mnn_module_forward(YuYiMnnModuleHandle m) {
     // 校验所有 input 都被设置
     for (size_t i = 0; i < m->inputs.size(); ++i) {
         if (m->inputs[i].get() == nullptr) return MNNWRAP_ERR_INVALID;
+    }
+    // forward 走 owning runtime 的独立 Executor scope,确保 Express 计算用对的 GPU
+    // (避免落到全局单例缓存的"第一个 OpenCL platform"runtime)
+    std::unique_ptr<ExecutorScope> scope;
+    if (m->owningRt != nullptr && m->owningRt->executor) {
+        scope.reset(new ExecutorScope(m->owningRt->executor));
     }
     auto outs = m->mod->onForward(m->inputs);
     if (outs.empty() && !m->outputNames.empty()) return MNNWRAP_ERR_FORWARD;
