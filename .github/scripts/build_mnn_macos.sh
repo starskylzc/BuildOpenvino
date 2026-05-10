@@ -64,6 +64,11 @@ if [ -f "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" ]; then
   python3 "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" "$MNN_SOURCE" || \
     echo "::warning::OpenCLRuntime patch failed (exit $?)"
 fi
+# Silence MNN_PRINT to keep stdout clean
+if [ -f "$SCRIPT_DIR_FOR_PATCH/patch_mnn_silence_print.py" ]; then
+  python3 "$SCRIPT_DIR_FOR_PATCH/patch_mnn_silence_print.py" "$MNN_SOURCE" || \
+    echo "::warning::MNN_PRINT silence patch failed (exit $?)"
+fi
 
 # ── Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target ─────────────
 # 把 mnnwrap.cpp 编进 libMNN.dylib,clients 部署 1 个 native/RID(免单独 libmnnwrap.dylib)

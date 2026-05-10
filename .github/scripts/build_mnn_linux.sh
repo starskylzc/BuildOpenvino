@@ -171,17 +171,19 @@ esac
 # /python3,fallback python(docker ubuntu:18.04 一般 python2 默认,但 GHA
 # Linux runner 装了 python3),都试一下。
 SCRIPT_DIR_FOR_PATCH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" ]; then
+_run_py_patch() {
+  local script="$1"
+  if [ ! -f "$script" ]; then return 0; fi
   if command -v python3 >/dev/null 2>&1; then
-    python3 "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" "$MNN_SOURCE" || \
-      echo "::warning::OpenCLRuntime patch failed"
+    python3 "$script" "$MNN_SOURCE" || echo "::warning::patch failed: $(basename "$script")"
   elif command -v python >/dev/null 2>&1; then
-    python "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" "$MNN_SOURCE" || \
-      echo "::warning::OpenCLRuntime patch failed"
+    python "$script" "$MNN_SOURCE" || echo "::warning::patch failed: $(basename "$script")"
   else
-    echo "::warning::no python found, skipping OpenCLRuntime patch"
+    echo "::warning::no python found, skipping $(basename "$script")"
   fi
-fi
+}
+_run_py_patch "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py"
+_run_py_patch "$SCRIPT_DIR_FOR_PATCH/patch_mnn_silence_print.py"
 
 # ====================================================================
 # 2.5. Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target

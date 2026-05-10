@@ -222,6 +222,13 @@ if (Test-Path $patchScript) {
     if ($LASTEXITCODE -ne 0) { Write-Host "::warning::OpenCLRuntime patch failed (exit $LASTEXITCODE)" }
 }
 
+# ── Patch MNN_PRINT to no-op (silence native stdout leaks) ─────────────
+$silenceScript = Join-Path $PSScriptRoot 'patch_mnn_silence_print.py'
+if (Test-Path $silenceScript) {
+    & python $silenceScript $MNN_SOURCE
+    if ($LASTEXITCODE -ne 0) { Write-Host "::warning::MNN_PRINT silence patch failed (exit $LASTEXITCODE)" }
+}
+
 # ── 2.5 Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target ──────────
 # 把 mnnwrap.cpp 编进 MNN.dll,clients 部署 1 个 native/RID(免单独 mnnwrap.dll)
 $mnnwrapDir = Join-Path $PSScriptRoot '..\..\mnnwrap' | Resolve-Path -ErrorAction SilentlyContinue
