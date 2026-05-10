@@ -62,6 +62,7 @@ extern "C" MNNWRAP_API void yuyi_backend_native_log(const char* fmt, ...) {
     }
     // 去尾换行 — MNN 的 format 通常带 "\n",日志层自己加换行更整齐
     int len = (n < (int)sizeof(buf) - 1) ? n : (int)sizeof(buf) - 1;
+    buf[len] = '\0';   // 显式 NUL 终止 — vsnprintf 在 truncation 时 glibc 各版本行为不一致
     while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
         buf[--len] = '\0';
     }
@@ -77,7 +78,11 @@ struct YuYiMnnRuntime_s {
     // (那条路径 process 级共享,会让选 iGPU 实际跑 dGPU)。
     std::shared_ptr<Executor> executor;
     std::shared_ptr<Executor::RuntimeManager> rt;
-    MNNDeviceContext devCtx;   // 持有 backendConfig.sharedContext 指向的内容
+    // backendConfig + devCtx 都做成 runtime 成员 — MNN createRuntimeManager
+    // 内部对 ScheduleConfig 做 shallow copy,如果 bc 在栈上 + MNN 后续读它就是 UAF。
+    // 持久化为成员之后地址稳定,可被 sharedContext 安全引用。
+    BackendConfig backendConfig;
+    MNNDeviceContext devCtx;
     MNNForwardType actualType = MNN_FORWARD_CPU;
     std::mutex lock;
 };
@@ -179,12 +184,18 @@ MNNWRAP_API int32_t yuyi_backend_available_backends(int32_t* outBuf, int32_t buf
 MNNWRAP_API YuYiMnnRuntimeHandle yuyi_backend_runtime_create(const YuYiMnnRuntimeConfig* cfg) {
     if (cfg == nullptr) return nullptr;
 
+    // ── 提前分配 runtime handle,持有 MNNDeviceContext + Executor + BackendConfig 生命周期 ──
+    // 关键:bc / devCtx 是 runtime 成员而不是栈变量 — MNN 内部对 sharedContext 指针保留,
+    // 栈对象会 UAF。
+    auto* h = new YuYiMnnRuntime_s();
+
     ScheduleConfig sc;
     sc.type       = toMnnForward(cfg->forwardType);
     sc.numThread  = cfg->numThread > 0 ? cfg->numThread : 1;
     sc.backupType = MNN_FORWARD_CPU;
+    h->actualType = sc.type;
 
-    BackendConfig bc;
+    BackendConfig& bc = h->backendConfig;
     switch (cfg->precision) {
         case MNNWRAP_PRECISION_HIGH:     bc.precision = BackendConfig::Precision_High; break;
         case MNNWRAP_PRECISION_LOW:      bc.precision = BackendConfig::Precision_Low; break;
@@ -202,10 +213,6 @@ MNNWRAP_API YuYiMnnRuntimeHandle yuyi_backend_runtime_create(const YuYiMnnRuntim
         default:                 bc.power = BackendConfig::Power_Normal; break;
     }
     sc.backendConfig = &bc;
-
-    // ── 提前分配 runtime handle,持有 MNNDeviceContext + Executor 生命周期 ──
-    auto* h = new YuYiMnnRuntime_s();
-    h->actualType = sc.type;
 
     // ── GPU 路径:用 MNNDeviceContext.platformId 直接指定 OpenCL platform ──
     // 通过 BackendConfig.sharedContext 传给 MNN,OpenCLBackend.cpp 直接用这个
