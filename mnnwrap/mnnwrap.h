@@ -108,12 +108,9 @@ MNNWRAP_API void yuyi_backend_set_log_callback(YuYiBackendLogCallback cb);
 
 /// **内部** — 被 patched MNNDefine.h 的 MNN_ERROR 宏调用,不需要从 .NET 直接调。
 /// 实现位于 mnnwrap.cpp,format + args vsnprintf 后转发给注册的回调。
-/// 因为要被 MNN .cpp 经 MNNDefine.h 看见声明,这里以 extern "C" 暴露
-/// (没标 MNNWRAP_API,不进 dumpbin /exports — 内部链接符号即可)。
-#ifdef __cplusplus
-extern "C"
-#endif
-void yuyi_backend_native_log(const char* fmt, ...);
+/// 必须 dllexport 因为 MNN tools (MNNV2Basic.exe 等) 自己也通过 MNNDefine.h
+/// 看到 MNN_ERROR -> yuyi_backend_native_log 调用,链接时要从 MNN.dll 导入。
+MNNWRAP_API void yuyi_backend_native_log(const char* fmt, ...);
 
 
 /// MNN 编译期开启的 backend 类型集合 — 调用者传 buf 接收 MnnWrapForwardType 枚举数组,

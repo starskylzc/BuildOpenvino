@@ -47,7 +47,7 @@ extern "C" MNNWRAP_API void yuyi_backend_set_log_callback(YuYiBackendLogCallback
     g_native_log_cb.store(cb, std::memory_order_release);
 }
 
-extern "C" void yuyi_backend_native_log(const char* fmt, ...) {
+extern "C" MNNWRAP_API void yuyi_backend_native_log(const char* fmt, ...) {
     auto cb = g_native_log_cb.load(std::memory_order_acquire);
     if (cb == nullptr) {
         return;  // 没人监听 → 完全静默,format 都不算
