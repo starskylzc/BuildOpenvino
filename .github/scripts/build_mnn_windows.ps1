@@ -265,16 +265,17 @@ finally {
     Pop-Location
 }
 
-# ── 5. 收产物 ────────────────────────────────────────────────────────
+# ── 5. 收产物 + 匿名化重命名 ─────────────────────────────────────────
+# MNN.dll → Backend.dll;PE 文件名是 dlopen/LoadLibraryW 的入口,改文件名即足够
+# (DT_NAME 在 Linux/Mach-O 才有,PE32 没有内置库名)。
 $mnnDll = Join-Path $buildDir 'MNN.dll'
 if (-not (Test-Path $mnnDll)) {
     Write-Host "::error::MNN.dll not produced at $mnnDll"
     Get-ChildItem $buildDir -Filter '*.dll' -Recurse | Select-Object FullName, Length
     throw "MNN.dll missing"
 }
-Copy-Item $mnnDll $OUT_DIR -Force
-$mnnLib = Join-Path $buildDir 'MNN.lib'
-if (Test-Path $mnnLib) { Copy-Item $mnnLib $OUT_DIR -Force }
+$backendDll = Join-Path $OUT_DIR 'Backend.dll'
+Copy-Item $mnnDll $backendDll -Force
 
 # Tools (sanity 用,不是分发主产物;有 .exe 就拷,免得空跑 smoke test)
 foreach ($exe in @('MNNV2Basic.out.exe', 'GetMNNInfo.exe')) {
@@ -282,10 +283,10 @@ foreach ($exe in @('MNNV2Basic.out.exe', 'GetMNNInfo.exe')) {
     if (Test-Path $p) { Copy-Item $p $OUT_DIR -Force }
 }
 
-# 复制 PDB (RelWithDebInfo)
+# 复制 PDB (RelWithDebInfo);改名为 Backend.pdb 保持一致
 if ($BUILD_TYPE -eq 'RelWithDebInfo') {
-    Get-ChildItem $buildDir -Filter 'MNN*.pdb' -ErrorAction SilentlyContinue |
-        ForEach-Object { Copy-Item $_.FullName $OUT_DIR -Force }
+    $mnnPdb = Join-Path $buildDir 'MNN.pdb'
+    if (Test-Path $mnnPdb) { Copy-Item $mnnPdb (Join-Path $OUT_DIR 'Backend.pdb') -Force }
 }
 
 # ── 6. 验证 PE subsystem version (Win7 兼容性硬指标) ─────────────────
@@ -293,7 +294,7 @@ if ($ARCH -eq 'x64' -or $ARCH -eq 'x86') {
     $expectedSubsysMajor = if ($ARCH -eq 'x64') { 6 } else { 5 }
     $expectedSubsysMinor = if ($ARCH -eq 'x64') { 1 } else { 1 }
     Write-Host ">>> 校验 PE subsystem version >= $expectedSubsysMajor.0$expectedSubsysMinor (Win7=6.01, XP=5.01)"
-    $dumpbinOut = & dumpbin /headers (Join-Path $OUT_DIR 'MNN.dll') 2>&1 | Out-String
+    $dumpbinOut = & dumpbin /headers $backendDll 2>&1 | Out-String
     # dumpbin /headers 输出格式: '            6.01 subsystem version' (值在前, key 在后)
     if ($dumpbinOut -match '(\d+)\.(\d+)\s+subsystem version') {
         $actualMaj = [int]$matches[1]
@@ -311,4 +312,4 @@ if ($ARCH -eq 'x64' -or $ARCH -eq 'x86') {
 Write-Host ""
 Write-Host ">>> Artifacts in $OUT_DIR :"
 Get-ChildItem $OUT_DIR | Format-Table Name, Length -AutoSize
-Write-Host "✅ MNN Windows build done: $RID"
+Write-Host "✅ Backend Windows build done: $RID"

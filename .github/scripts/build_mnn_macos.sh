@@ -109,33 +109,33 @@ cmake -S "$MNN_SOURCE" -B "$BUILD_DIR" -G Ninja \
 echo ">>> ninja (RID=$RID)"
 cmake --build "$BUILD_DIR" --parallel
 
-# ── 收产物 ───────────────────────────────────────────────────────────
+# ── 收产物 + 匿名化重命名 ─────────────────────────────────────────────
+# libMNN.dylib → libBackend.dylib;同时改 LC_ID_DYLIB(install_name)避免
+# dlopen 后 _dyld_register_func_for_add_image 报告原名,泄露引擎身份。
 DYLIB="$BUILD_DIR/libMNN.dylib"
 [ -f "$DYLIB" ] || { echo "::error::libMNN.dylib not produced"; ls -la "$BUILD_DIR"; exit 1; }
-cp -f "$DYLIB" "$OUT_DIR/"
+OUT_DYLIB="$OUT_DIR/libBackend.dylib"
+cp -f "$DYLIB" "$OUT_DYLIB"
+install_name_tool -id "@rpath/libBackend.dylib" "$OUT_DYLIB"
+codesign --force --sign - "$OUT_DYLIB" 2>/dev/null || true   # ad-hoc re-sign 后 install_name_tool
 
-# Metal 后端的辅助 .metallib (运行时 dlopen,缺了 Metal 路径就用不了)
-for f in libMNN_CL.dylib libMNN_Express.dylib libMNN_Vulkan.dylib mnn.metallib; do
-  if [ -f "$BUILD_DIR/$f" ]; then cp -f "$BUILD_DIR/$f" "$OUT_DIR/"; fi
-done
-
-# Tools (sanity)
+# Tools (sanity);保持原名(只在调试时用,不进 NuGet)
 for exe in MNNV2Basic.out GetMNNInfo; do
   if [ -f "$BUILD_DIR/$exe" ]; then cp -f "$BUILD_DIR/$exe" "$OUT_DIR/"; fi
 done
 
 # ── 验证 deploy target + arch ────────────────────────────────────────
 echo ">>> 校验 binary"
-file "$OUT_DIR/libMNN.dylib"
-lipo -info "$OUT_DIR/libMNN.dylib" | grep -q "$ARCH" \
+file "$OUT_DYLIB"
+lipo -info "$OUT_DYLIB" | grep -q "$ARCH" \
   || { echo "::error::arch mismatch"; exit 1; }
 
 # 读 LC_BUILD_VERSION 或 LC_VERSION_MIN_MACOSX (旧格式)
-MINOS=$(otool -l "$OUT_DIR/libMNN.dylib" | awk '
+MINOS=$(otool -l "$OUT_DYLIB" | awk '
   $1=="cmd" && $2=="LC_BUILD_VERSION" { in_blk=1 }
   in_blk && $1=="minos" { print $2; exit }')
 if [ -z "$MINOS" ]; then
-  MINOS=$(otool -l "$OUT_DIR/libMNN.dylib" | awk '
+  MINOS=$(otool -l "$OUT_DYLIB" | awk '
     $1=="cmd" && $2=="LC_VERSION_MIN_MACOSX" { in_blk=1 }
     in_blk && $1=="version" { print $2; exit }')
 fi
@@ -146,4 +146,4 @@ fi
 echo "✅ arch + minos OK ($ARCH / $MINOS)"
 
 ls -lh "$OUT_DIR/"
-echo "✅ MNN macOS build done: $RID"
+echo "✅ Backend macOS build done: $RID"

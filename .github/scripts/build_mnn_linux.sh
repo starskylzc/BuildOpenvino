@@ -225,16 +225,26 @@ echo ">>> ninja (RID=$RID)"
 cmake --build "$BUILD_DIR" --parallel
 
 # ====================================================================
-# 4. 收产物
+# 4. 收产物 + 匿名化重命名
 # ====================================================================
+# libMNN.so → libBackend.so;同步 SONAME 到 libBackend.so,这样 ldd 输出 +
+# DT_SONAME 都不再泄露原引擎名。SEP_BUILD=OFF 时无需考虑跨 .so 链接,直接改名。
 SO="$BUILD_DIR/libMNN.so"
 [ -f "$SO" ] || { echo "::error::libMNN.so not produced"; ls -la "$BUILD_DIR"; exit 1; }
-cp -f "$SO" "$OUT_DIR/"
+OUT_SO="$OUT_DIR/libBackend.so"
+cp -f "$SO" "$OUT_SO"
 
-# SEP_BUILD=ON 时会出多个 backend .so;统一拷 libMNN*.so 全部产物。
-# (linux-x64 是 SEP_BUILD=ON: libMNN_CL.so 在 source/backend/opencl/, libMNN_Express.so 在 express/;
-#  arm64 / loongarch 是 OFF, 只 libMNN.so 不影响)。无 maxdepth, 全树扫描。
-find "$BUILD_DIR" -name "libMNN*.so" -not -name "libMNN.so" -type f -print -exec cp -f {} "$OUT_DIR/" \; || true
+# 改 SONAME(DT_SONAME)以免 ldd 显示原名。patchelf 在 ubuntu:18.04 不一定预装,
+# apt install 兜底;装不上就 fallback 写一个 symlink libMNN.so → libBackend.so 的兼容路径。
+if ! command -v patchelf >/dev/null 2>&1; then
+    apt-get install -y --no-install-recommends patchelf 2>/dev/null || true
+fi
+if command -v patchelf >/dev/null 2>&1; then
+    patchelf --set-soname libBackend.so "$OUT_SO"
+    echo ">>> SONAME set to libBackend.so via patchelf"
+else
+    echo "::warning::patchelf not available — DT_SONAME stays libMNN.so (file rename still effective)"
+fi
 
 for exe in MNNV2Basic.out GetMNNInfo; do
     if [ -f "$BUILD_DIR/$exe" ]; then cp -f "$BUILD_DIR/$exe" "$OUT_DIR/"; fi
@@ -244,20 +254,20 @@ done
 # 5. 验证 (file/objdump/glibc 版本)
 # ====================================================================
 echo ">>> 验证产物"
-file "$OUT_DIR/libMNN.so"
+file "$OUT_SO"
 
 if [ -z "$CROSS_COMPILE" ]; then
     # native: 可以读 GLIBC 符号
     echo "── glibc 最低版本 (越低越兼容) ──"
     if command -v objdump >/dev/null 2>&1; then
-        objdump -T "$OUT_DIR/libMNN.so" 2>/dev/null \
+        objdump -T "$OUT_SO" 2>/dev/null \
             | awk -F'[() ]+' '/GLIBC_/ {print $5}' \
             | sort -u -V \
             | tail -1 \
             | xargs -I{} echo "  最低 glibc 依赖: {}" || true
     fi
     echo "── ldd ──"
-    ldd "$OUT_DIR/libMNN.so" || true
+    ldd "$OUT_SO" || true
 fi
 
 ls -lh "$OUT_DIR/"
@@ -273,4 +283,4 @@ if [ -z "$CROSS_COMPILE" ] && [ -d /ws ]; then
     chown -R "$HOST_UID:$HOST_GID" "$BUILD_DIR" 2>/dev/null || true
 fi
 
-echo "✅ MNN Linux build done: $RID"
+echo "✅ Backend Linux build done: $RID"

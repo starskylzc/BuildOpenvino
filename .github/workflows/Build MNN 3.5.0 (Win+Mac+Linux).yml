@@ -325,7 +325,7 @@ jobs:
         run: |
           # pefile 跨平台解析 PE, 不依赖 VS env (dumpbin)
           pip install --quiet pefile
-          python "$pwd\build-tools\.github\scripts\smoke_test_mnn_windows.py" "$pwd\artifacts\MNN.dll"
+          python "$pwd\build-tools\.github\scripts\smoke_test_mnn_windows.py" "$pwd\artifacts\Backend.dll"
           if ($LASTEXITCODE -ne 0) { throw "smoke test failed: $LASTEXITCODE" }
 
       - name: Smoke test (macOS)
@@ -333,26 +333,26 @@ jobs:
         shell: bash
         run: |
           # macos-15-intel 是 x86_64,macos-14 是 arm64; 都跟 deploy arch 一致,可加载。
-          python3 build-tools/.github/scripts/smoke_test_mnn_unix.py "$PWD/artifacts/libMNN.dylib"
+          python3 build-tools/.github/scripts/smoke_test_mnn_unix.py "$PWD/artifacts/libBackend.dylib"
 
       - name: Smoke test (Linux x64 — host arch matches)
         if: matrix.platform == 'linux' && matrix.rid == 'linux-x64'
         shell: bash
         run: |
           # Docker 容器内已经能 ldd,这里只在 GHA host (ubuntu-22.04 x86_64) 再加载一次确认 ABI OK。
-          python3 build-tools/.github/scripts/smoke_test_mnn_unix.py "$PWD/artifacts/libMNN.so"
+          python3 build-tools/.github/scripts/smoke_test_mnn_unix.py "$PWD/artifacts/libBackend.so"
 
       - name: Smoke test (Linux arm64 — host arch matches)
         if: matrix.platform == 'linux' && matrix.rid == 'linux-arm64'
         shell: bash
         run: |
-          python3 build-tools/.github/scripts/smoke_test_mnn_unix.py "$PWD/artifacts/libMNN.so"
+          python3 build-tools/.github/scripts/smoke_test_mnn_unix.py "$PWD/artifacts/libBackend.so"
 
       - name: Inspect cross-compiled artifact (loongarch64, no host load)
         if: matrix.platform == 'linux' && matrix.rid == 'linux-loongarch64'
         shell: bash
         run: |
-          file "$PWD/artifacts/libMNN.so"
+          file "$PWD/artifacts/libBackend.so"
           ls -lh artifacts/
 
       # ============================================================
