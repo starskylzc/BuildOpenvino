@@ -411,14 +411,45 @@ MNNWRAP_API int32_t yuyi_backend_module_forward(YuYiMnnModuleHandle m) {
     auto outs = m->mod->onForward(m->inputs);
     if (outs.empty() && !m->outputNames.empty()) return MNNWRAP_ERR_FORWARD;
 
-    // GPU backend (OpenCL/Metal/CUDA/Vulkan) 内部用 NC4HW4 packed 格式,
-    // readMap<float> 直接读得到 NC4HW4 顺序的数据 — 上层 C# 解析按 NCHW 当
-    // [B,N,C] 处理时通道全错(YOLO obj_raw 的 score/bbox 字段都会乱)。
-    // 强制 _Convert 到 NCHW,统一输出布局给所有 backend(CPU 也是 NCHW,
-    // _Convert noop 通过)。
+    // ── GPU output 布局规整 ─────────────────────────────────────────────
+    // MNN GPU backend 内部把所有 tensor 都包装成 NC4HW4 (channel 维 4 对齐),
+    // readMap<float> 拿到的是 packed 顺序 — 必须 _Convert 到 NCHW 才能给 C#
+    // 端按 row-major 解析。
+    //
+    // 4D (face 三尺度 score/bbox/landmarks):_Convert 路径成熟,直接 OK。
+    //
+    // 3D (obj_raw [1,8400,6] / similar detection anchor 输出):MNN 内部
+    // tensorShapeFormat() 把 3D 强制 coerce 为 4D [N, C=dim1, H=dim2, W=1]
+    // 喂给 NC4HW4 -> NCHW 解包 kernel。Intel UHD OpenCL Buffer mode 在 W=1 这种
+    // 退化形状上 work-group 步长有 bug(实测 bbox 整体偏移),NVIDIA dGPU 同
+    // kernel 巧合上无症状。
+    //
+    // 修复:对非 4D 输出,显式 _Reshape 到 [d0, d1, ..., 1, ..., 1] 4D(末维补 1),
+    // 让 _Convert 走的是「真 4D」语义而不是「coerce-from-non-4D」语义,
+    // 并 preserve 原 dim → C# 端 GetOutputShape 仍看到 3D 原形(_Reshape 不改
+    // 总元素数,_Convert 做完再 _Reshape 回原 dim)。
+    auto reshapeTo4D = [](const std::vector<int>& d) {
+        std::vector<int> out{1, 1, 1, 1};
+        for (size_t i = 0; i < d.size() && i < 4; ++i) out[i] = d[i];
+        return out;
+    };
     for (auto& v : outs) {
-        if (v.get() != nullptr) {
-            v = _Convert(v, NCHW);
+        if (v.get() == nullptr) continue;
+        auto info = v->getInfo();
+        if (info == nullptr) continue;
+        if (info->order == NCHW && info->dim.size() != 4) {
+            // CPU path: order 已经是 NCHW 且非 4D — 无 NC4HW4 packing,跳过 _Convert.
+            continue;
+        }
+        const auto origDim = info->dim;
+        if (origDim.size() != 4) {
+            // 1D/2D/3D/5D+: reshape 到 4D 走标准 image convert 路径
+            v = _Reshape(v, reshapeTo4D(origDim), NCHW);
+        }
+        v = _Convert(v, NCHW);
+        if (origDim.size() != 4) {
+            // squeeze 回原 dim,让 output_shape API 返回 [1, 8400, 6] 等原形
+            v = _Reshape(v, origDim, NCHW);
         }
     }
     m->outputs = std::move(outs);
