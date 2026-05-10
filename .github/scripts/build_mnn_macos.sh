@@ -57,6 +57,14 @@ case "$ARCH" in
   *) echo "::error::Unsupported ARCH: $ARCH"; exit 1 ;;
 esac
 
+# ── Patch MNN OpenCLRuntime.cpp: globalContext → per-platform map ────
+# 防多 GPU 切换时 cl::Context 误复用。
+SCRIPT_DIR_FOR_PATCH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" ]; then
+  python3 "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" "$MNN_SOURCE" || \
+    echo "::warning::OpenCLRuntime patch failed (exit $?)"
+fi
+
 # ── Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target ─────────────
 # 把 mnnwrap.cpp 编进 libMNN.dylib,clients 部署 1 个 native/RID(免单独 libmnnwrap.dylib)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

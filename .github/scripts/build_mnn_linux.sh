@@ -165,6 +165,25 @@ TCEOF
 esac
 
 # ====================================================================
+# 2.4. Patch MNN OpenCLRuntime.cpp: globalContext → per-platform map
+# ====================================================================
+# 防多 GPU 切换时 cl::Context 误复用。注:Linux build 在 docker 内可能没
+# /python3,fallback python(docker ubuntu:18.04 一般 python2 默认,但 GHA
+# Linux runner 装了 python3),都试一下。
+SCRIPT_DIR_FOR_PATCH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" "$MNN_SOURCE" || \
+      echo "::warning::OpenCLRuntime patch failed"
+  elif command -v python >/dev/null 2>&1; then
+    python "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" "$MNN_SOURCE" || \
+      echo "::warning::OpenCLRuntime patch failed"
+  else
+    echo "::warning::no python found, skipping OpenCLRuntime patch"
+  fi
+fi
+
+# ====================================================================
 # 2.5. Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target
 # ====================================================================
 # 把 mnnwrap.cpp 编进 libMNN.so,clients 部署 1 个 native/RID(免单独 libmnnwrap.so)

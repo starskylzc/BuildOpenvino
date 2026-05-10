@@ -213,6 +213,15 @@ switch ($ARCH) {
 if ($linkerSharedExtra) { $cmakeArchExtra += "-DCMAKE_SHARED_LINKER_FLAGS=$linkerSharedExtra" }
 if ($linkerExeExtra)    { $cmakeArchExtra += "-DCMAKE_EXE_LINKER_FLAGS=$linkerExeExtra" }
 
+# ── 2.4 Patch MNN OpenCLRuntime.cpp: globalContext → per-platform map ─
+# 防多 GPU 切换时 cl::Context 误复用(用户选 iGPU 实际跑 dGPU)。详见
+# patch_mnn_opencl_runtime.py 注释。
+$patchScript = Join-Path $PSScriptRoot 'patch_mnn_opencl_runtime.py'
+if (Test-Path $patchScript) {
+    & python $patchScript $MNN_SOURCE
+    if ($LASTEXITCODE -ne 0) { Write-Host "::warning::OpenCLRuntime patch failed (exit $LASTEXITCODE)" }
+}
+
 # ── 2.5 Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target ──────────
 # 把 mnnwrap.cpp 编进 MNN.dll,clients 部署 1 个 native/RID(免单独 mnnwrap.dll)
 $mnnwrapDir = Join-Path $PSScriptRoot '..\..\mnnwrap' | Resolve-Path -ErrorAction SilentlyContinue
