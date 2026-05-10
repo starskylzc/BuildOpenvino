@@ -237,6 +237,9 @@ if (-not $mnnwrapDir -or -not (Test-Path "$mnnwrapDir\mnnwrap.cpp")) {
 target_sources(MNN PRIVATE "$mnnwrapDirEsc/mnnwrap.cpp")
 target_include_directories(MNN PRIVATE "$mnnwrapDirEsc")
 target_compile_definitions(MNN PRIVATE MNNWRAP_BUILDING)
+# 匿名化产物名: 让 linker 直接产 Backend.dll, IMAGE_EXPORT_DIRECTORY.Name 也写
+# "Backend.dll" 而非 "MNN.dll" (post-build 文件改名只改路径,不改 PE 内嵌字段)。
+set_target_properties(MNN PROPERTIES OUTPUT_NAME "Backend")
 "@
     $mnnCMakeLists = Join-Path $MNN_SOURCE 'CMakeLists.txt'
     if ((Get-Content $mnnCMakeLists -Raw) -notmatch 'mnnwrap injection') {
@@ -265,17 +268,17 @@ finally {
     Pop-Location
 }
 
-# ── 5. 收产物 + 匿名化重命名 ─────────────────────────────────────────
-# MNN.dll → Backend.dll;PE 文件名是 dlopen/LoadLibraryW 的入口,改文件名即足够
-# (DT_NAME 在 Linux/Mach-O 才有,PE32 没有内置库名)。
-$mnnDll = Join-Path $buildDir 'MNN.dll'
-if (-not (Test-Path $mnnDll)) {
-    Write-Host "::error::MNN.dll not produced at $mnnDll"
+# ── 5. 收产物 (linker 已直出 Backend.dll, 跟 OUTPUT_NAME=Backend 对齐) ──
+# 改名走 CMake set_target_properties OUTPUT_NAME, 这样 IMAGE_EXPORT_DIRECTORY.Name +
+# .lib 中的内部引用都是 Backend, dumpbin /exports 不再泄露 "for MNN.dll"。
+$backendDllSrc = Join-Path $buildDir 'Backend.dll'
+if (-not (Test-Path $backendDllSrc)) {
+    Write-Host "::error::Backend.dll not produced at $backendDllSrc"
     Get-ChildItem $buildDir -Filter '*.dll' -Recurse | Select-Object FullName, Length
-    throw "MNN.dll missing"
+    throw "Backend.dll missing"
 }
+Copy-Item $backendDllSrc $OUT_DIR -Force
 $backendDll = Join-Path $OUT_DIR 'Backend.dll'
-Copy-Item $mnnDll $backendDll -Force
 
 # Tools (sanity 用,不是分发主产物;有 .exe 就拷,免得空跑 smoke test)
 foreach ($exe in @('MNNV2Basic.out.exe', 'GetMNNInfo.exe')) {
@@ -283,10 +286,10 @@ foreach ($exe in @('MNNV2Basic.out.exe', 'GetMNNInfo.exe')) {
     if (Test-Path $p) { Copy-Item $p $OUT_DIR -Force }
 }
 
-# 复制 PDB (RelWithDebInfo);改名为 Backend.pdb 保持一致
+# 复制 PDB (RelWithDebInfo)
 if ($BUILD_TYPE -eq 'RelWithDebInfo') {
-    $mnnPdb = Join-Path $buildDir 'MNN.pdb'
-    if (Test-Path $mnnPdb) { Copy-Item $mnnPdb (Join-Path $OUT_DIR 'Backend.pdb') -Force }
+    $pdb = Join-Path $buildDir 'Backend.pdb'
+    if (Test-Path $pdb) { Copy-Item $pdb $OUT_DIR -Force }
 }
 
 # ── 6. 验证 PE subsystem version (Win7 兼容性硬指标) ─────────────────

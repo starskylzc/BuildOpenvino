@@ -205,6 +205,9 @@ if [ -n "$MNNWRAP_DIR" ]; then
 target_sources(MNN PRIVATE "$MNNWRAP_DIR/mnnwrap.cpp")
 target_include_directories(MNN PRIVATE "$MNNWRAP_DIR")
 target_compile_definitions(MNN PRIVATE MNNWRAP_BUILDING)
+# 匿名化产物名: linker 直出 libBackend.so + DT_SONAME=libBackend.so,
+# ldd / readelf -d 都不再泄露原引擎名。
+set_target_properties(MNN PROPERTIES OUTPUT_NAME "Backend")
 EOF
     echo ">>> Appended mnnwrap injection to MNN/CMakeLists.txt (mnnwrap dir: $MNNWRAP_DIR)"
   fi
@@ -225,26 +228,14 @@ echo ">>> ninja (RID=$RID)"
 cmake --build "$BUILD_DIR" --parallel
 
 # ====================================================================
-# 4. 收产物 + 匿名化重命名
+# 4. 收产物 (linker 已直出 libBackend.so, OUTPUT_NAME=Backend 对齐 SONAME)
 # ====================================================================
-# libMNN.so → libBackend.so;同步 SONAME 到 libBackend.so,这样 ldd 输出 +
-# DT_SONAME 都不再泄露原引擎名。SEP_BUILD=OFF 时无需考虑跨 .so 链接,直接改名。
-SO="$BUILD_DIR/libMNN.so"
-[ -f "$SO" ] || { echo "::error::libMNN.so not produced"; ls -la "$BUILD_DIR"; exit 1; }
+# CMake 在 SHARED target 上自动设 SONAME=lib${OUTPUT_NAME}.so → libBackend.so,
+# 不再需要 patchelf 后处理. ldd / readelf -d 都不会泄露原引擎名.
+SO="$BUILD_DIR/libBackend.so"
+[ -f "$SO" ] || { echo "::error::libBackend.so not produced"; ls -la "$BUILD_DIR"; exit 1; }
+cp -f "$SO" "$OUT_DIR/"
 OUT_SO="$OUT_DIR/libBackend.so"
-cp -f "$SO" "$OUT_SO"
-
-# 改 SONAME(DT_SONAME)以免 ldd 显示原名。patchelf 在 ubuntu:18.04 不一定预装,
-# apt install 兜底;装不上就 fallback 写一个 symlink libMNN.so → libBackend.so 的兼容路径。
-if ! command -v patchelf >/dev/null 2>&1; then
-    apt-get install -y --no-install-recommends patchelf 2>/dev/null || true
-fi
-if command -v patchelf >/dev/null 2>&1; then
-    patchelf --set-soname libBackend.so "$OUT_SO"
-    echo ">>> SONAME set to libBackend.so via patchelf"
-else
-    echo "::warning::patchelf not available — DT_SONAME stays libMNN.so (file rename still effective)"
-fi
 
 for exe in MNNV2Basic.out GetMNNInfo; do
     if [ -f "$BUILD_DIR/$exe" ]; then cp -f "$BUILD_DIR/$exe" "$OUT_DIR/"; fi

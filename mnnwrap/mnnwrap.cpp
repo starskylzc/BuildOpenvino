@@ -105,11 +105,11 @@ static size_t copyToBuf(const std::string& s, char* buf, size_t bufSize) {
 
 extern "C" {
 
-MNNWRAP_API const char* yuyi_mnn_version(void) {
+MNNWRAP_API const char* yuyi_backend_version(void) {
     return getVersion();
 }
 
-MNNWRAP_API int32_t yuyi_mnn_available_backends(int32_t* outBuf, int32_t bufLen) {
+MNNWRAP_API int32_t yuyi_backend_available_backends(int32_t* outBuf, int32_t bufLen) {
     // 探测 RuntimeManager 创建是否成功来判断 backend 可用性
     // 实际 wrapper 调用方拿到这个列表后,可以决定 fallback 链
     static const MNNForwardType candidates[] = {
@@ -138,7 +138,7 @@ MNNWRAP_API int32_t yuyi_mnn_available_backends(int32_t* outBuf, int32_t bufLen)
     return cnt;
 }
 
-MNNWRAP_API YuYiMnnRuntimeHandle yuyi_mnn_runtime_create(const YuYiMnnRuntimeConfig* cfg) {
+MNNWRAP_API YuYiMnnRuntimeHandle yuyi_backend_runtime_create(const YuYiMnnRuntimeConfig* cfg) {
     if (cfg == nullptr) return nullptr;
 
     ScheduleConfig sc;
@@ -209,40 +209,40 @@ MNNWRAP_API YuYiMnnRuntimeHandle yuyi_mnn_runtime_create(const YuYiMnnRuntimeCon
     return h;
 }
 
-MNNWRAP_API int32_t yuyi_mnn_runtime_set_cache(YuYiMnnRuntimeHandle rt, const char* cacheFilePath) {
+MNNWRAP_API int32_t yuyi_backend_runtime_set_cache(YuYiMnnRuntimeHandle rt, const char* cacheFilePath) {
     if (rt == nullptr || rt->rt == nullptr || cacheFilePath == nullptr) return MNNWRAP_ERR_INVALID;
     std::lock_guard<std::mutex> g(rt->lock);
     rt->rt->setCache(std::string(cacheFilePath));
     return MNNWRAP_OK;
 }
 
-MNNWRAP_API int32_t yuyi_mnn_runtime_update_cache(YuYiMnnRuntimeHandle rt) {
+MNNWRAP_API int32_t yuyi_backend_runtime_update_cache(YuYiMnnRuntimeHandle rt) {
     if (rt == nullptr || rt->rt == nullptr) return MNNWRAP_ERR_INVALID;
     std::lock_guard<std::mutex> g(rt->lock);
     rt->rt->updateCache();
     return MNNWRAP_OK;
 }
 
-MNNWRAP_API int32_t yuyi_mnn_runtime_set_hint(YuYiMnnRuntimeHandle rt, int32_t hintId, int32_t value) {
+MNNWRAP_API int32_t yuyi_backend_runtime_set_hint(YuYiMnnRuntimeHandle rt, int32_t hintId, int32_t value) {
     if (rt == nullptr || rt->rt == nullptr) return MNNWRAP_ERR_INVALID;
     std::lock_guard<std::mutex> g(rt->lock);
     rt->rt->setHint(static_cast<Interpreter::HintMode>(hintId), value);
     return MNNWRAP_OK;
 }
 
-MNNWRAP_API int32_t yuyi_mnn_runtime_set_mode(YuYiMnnRuntimeHandle rt, int32_t modeValue) {
+MNNWRAP_API int32_t yuyi_backend_runtime_set_mode(YuYiMnnRuntimeHandle rt, int32_t modeValue) {
     if (rt == nullptr || rt->rt == nullptr) return MNNWRAP_ERR_INVALID;
     std::lock_guard<std::mutex> g(rt->lock);
     rt->rt->setMode(static_cast<Interpreter::SessionMode>(modeValue));
     return MNNWRAP_OK;
 }
 
-MNNWRAP_API int32_t yuyi_mnn_runtime_actual_forward_type(YuYiMnnRuntimeHandle rt) {
+MNNWRAP_API int32_t yuyi_backend_runtime_actual_forward_type(YuYiMnnRuntimeHandle rt) {
     if (rt == nullptr) return MNNWRAP_ERR_INVALID;
     return fromMnnForward(rt->actualType);
 }
 
-MNNWRAP_API void yuyi_mnn_runtime_destroy(YuYiMnnRuntimeHandle rt) {
+MNNWRAP_API void yuyi_backend_runtime_destroy(YuYiMnnRuntimeHandle rt) {
     if (rt == nullptr) return;
     delete rt;
 }
@@ -268,7 +268,7 @@ static YuYiMnnModuleHandle createModuleFromVars(
     return m;
 }
 
-MNNWRAP_API YuYiMnnModuleHandle yuyi_mnn_module_load_from_memory(
+MNNWRAP_API YuYiMnnModuleHandle yuyi_backend_module_load_from_memory(
     YuYiMnnRuntimeHandle rt,
     const uint8_t* buffer, size_t size,
     int32_t dynamic, int32_t shapeMutable, int32_t rearrange)
@@ -292,7 +292,7 @@ MNNWRAP_API YuYiMnnModuleHandle yuyi_mnn_module_load_from_memory(
     return createModuleFromVars(rt, raw);
 }
 
-MNNWRAP_API YuYiMnnModuleHandle yuyi_mnn_module_load_from_file(
+MNNWRAP_API YuYiMnnModuleHandle yuyi_backend_module_load_from_file(
     YuYiMnnRuntimeHandle rt,
     const char* filePath,
     int32_t dynamic, int32_t shapeMutable, int32_t rearrange)
@@ -314,7 +314,7 @@ MNNWRAP_API YuYiMnnModuleHandle yuyi_mnn_module_load_from_file(
     return createModuleFromVars(rt, raw);
 }
 
-MNNWRAP_API void yuyi_mnn_module_destroy(YuYiMnnModuleHandle m) {
+MNNWRAP_API void yuyi_backend_module_destroy(YuYiMnnModuleHandle m) {
     if (m == nullptr) return;
     // 显式释放 outputs/inputs 引用,再释放 Module
     {
@@ -325,27 +325,27 @@ MNNWRAP_API void yuyi_mnn_module_destroy(YuYiMnnModuleHandle m) {
     delete m;
 }
 
-MNNWRAP_API int32_t yuyi_mnn_module_input_count(YuYiMnnModuleHandle m) {
+MNNWRAP_API int32_t yuyi_backend_module_input_count(YuYiMnnModuleHandle m) {
     if (m == nullptr) return MNNWRAP_ERR_INVALID;
     return (int32_t)m->inputNames.size();
 }
 
-MNNWRAP_API int32_t yuyi_mnn_module_output_count(YuYiMnnModuleHandle m) {
+MNNWRAP_API int32_t yuyi_backend_module_output_count(YuYiMnnModuleHandle m) {
     if (m == nullptr) return MNNWRAP_ERR_INVALID;
     return (int32_t)m->outputNames.size();
 }
 
-MNNWRAP_API size_t yuyi_mnn_module_input_name(YuYiMnnModuleHandle m, int32_t idx, char* buf, size_t bufSize) {
+MNNWRAP_API size_t yuyi_backend_module_input_name(YuYiMnnModuleHandle m, int32_t idx, char* buf, size_t bufSize) {
     if (m == nullptr || idx < 0 || idx >= (int32_t)m->inputNames.size()) return 0;
     return copyToBuf(m->inputNames[idx], buf, bufSize);
 }
 
-MNNWRAP_API size_t yuyi_mnn_module_output_name(YuYiMnnModuleHandle m, int32_t idx, char* buf, size_t bufSize) {
+MNNWRAP_API size_t yuyi_backend_module_output_name(YuYiMnnModuleHandle m, int32_t idx, char* buf, size_t bufSize) {
     if (m == nullptr || idx < 0 || idx >= (int32_t)m->outputNames.size()) return 0;
     return copyToBuf(m->outputNames[idx], buf, bufSize);
 }
 
-MNNWRAP_API int32_t yuyi_mnn_module_input_shape(YuYiMnnModuleHandle m, int32_t idx, int32_t* shapeBuf, int32_t bufLen) {
+MNNWRAP_API int32_t yuyi_backend_module_input_shape(YuYiMnnModuleHandle m, int32_t idx, int32_t* shapeBuf, int32_t bufLen) {
     if (m == nullptr || m->mod == nullptr) return -1;
     const Module::Info* info = m->mod->getInfo();
     if (info == nullptr || idx < 0 || idx >= (int32_t)info->inputs.size()) return -1;
@@ -358,7 +358,7 @@ MNNWRAP_API int32_t yuyi_mnn_module_input_shape(YuYiMnnModuleHandle m, int32_t i
     return rank;
 }
 
-MNNWRAP_API int32_t yuyi_mnn_module_set_input_float(
+MNNWRAP_API int32_t yuyi_backend_module_set_input_float(
     YuYiMnnModuleHandle m, int32_t inputIdx,
     const int32_t* shape, int32_t shapeLen,
     const float* data, size_t elemCount)
@@ -394,7 +394,7 @@ MNNWRAP_API int32_t yuyi_mnn_module_set_input_float(
     return MNNWRAP_OK;
 }
 
-MNNWRAP_API int32_t yuyi_mnn_module_forward(YuYiMnnModuleHandle m) {
+MNNWRAP_API int32_t yuyi_backend_module_forward(YuYiMnnModuleHandle m) {
     if (m == nullptr || m->mod == nullptr) return MNNWRAP_ERR_INVALID;
     std::lock_guard<std::mutex> g(m->lock);
 
@@ -425,7 +425,7 @@ MNNWRAP_API int32_t yuyi_mnn_module_forward(YuYiMnnModuleHandle m) {
     return MNNWRAP_OK;
 }
 
-MNNWRAP_API int32_t yuyi_mnn_module_output_shape(YuYiMnnModuleHandle m, int32_t idx, int32_t* shapeBuf, int32_t bufLen) {
+MNNWRAP_API int32_t yuyi_backend_module_output_shape(YuYiMnnModuleHandle m, int32_t idx, int32_t* shapeBuf, int32_t bufLen) {
     if (m == nullptr || idx < 0 || idx >= (int32_t)m->outputs.size()) return -1;
     auto var = m->outputs[idx];
     if (var.get() == nullptr) return -1;
@@ -439,7 +439,7 @@ MNNWRAP_API int32_t yuyi_mnn_module_output_shape(YuYiMnnModuleHandle m, int32_t 
     return rank;
 }
 
-MNNWRAP_API int64_t yuyi_mnn_module_output_size(YuYiMnnModuleHandle m, int32_t idx) {
+MNNWRAP_API int64_t yuyi_backend_module_output_size(YuYiMnnModuleHandle m, int32_t idx) {
     if (m == nullptr || idx < 0 || idx >= (int32_t)m->outputs.size()) return -1;
     auto var = m->outputs[idx];
     if (var.get() == nullptr) return -1;
@@ -450,7 +450,7 @@ MNNWRAP_API int64_t yuyi_mnn_module_output_size(YuYiMnnModuleHandle m, int32_t i
     return total;
 }
 
-MNNWRAP_API int64_t yuyi_mnn_module_output_data_float(
+MNNWRAP_API int64_t yuyi_backend_module_output_data_float(
     YuYiMnnModuleHandle m, int32_t idx, float* dst, size_t dstElemCount)
 {
     if (m == nullptr || dst == nullptr || idx < 0 || idx >= (int32_t)m->outputs.size()) return -1;
@@ -469,7 +469,7 @@ MNNWRAP_API int64_t yuyi_mnn_module_output_data_float(
     return copyN;
 }
 
-MNNWRAP_API void yuyi_mnn_module_clear_cache(YuYiMnnModuleHandle m) {
+MNNWRAP_API void yuyi_backend_module_clear_cache(YuYiMnnModuleHandle m) {
     if (m == nullptr || m->mod == nullptr) return;
     std::lock_guard<std::mutex> g(m->lock);
     m->mod->clearCache();

@@ -77,6 +77,9 @@ if [ -n "$MNNWRAP_DIR" ] && [ -f "$MNNWRAP_DIR/mnnwrap.cpp" ]; then
 target_sources(MNN PRIVATE "$MNNWRAP_DIR/mnnwrap.cpp")
 target_include_directories(MNN PRIVATE "$MNNWRAP_DIR")
 target_compile_definitions(MNN PRIVATE MNNWRAP_BUILDING)
+# 匿名化产物名: linker 直出 libBackend.dylib + LC_ID_DYLIB=@rpath/libBackend.dylib.
+# otool -D / otool -L 都不再泄露原引擎名.
+set_target_properties(MNN PROPERTIES OUTPUT_NAME "Backend")
 EOF
     echo ">>> Appended mnnwrap injection to MNN/CMakeLists.txt (mnnwrap dir: $MNNWRAP_DIR)"
   fi
@@ -109,15 +112,13 @@ cmake -S "$MNN_SOURCE" -B "$BUILD_DIR" -G Ninja \
 echo ">>> ninja (RID=$RID)"
 cmake --build "$BUILD_DIR" --parallel
 
-# ── 收产物 + 匿名化重命名 ─────────────────────────────────────────────
-# libMNN.dylib → libBackend.dylib;同时改 LC_ID_DYLIB(install_name)避免
-# dlopen 后 _dyld_register_func_for_add_image 报告原名,泄露引擎身份。
-DYLIB="$BUILD_DIR/libMNN.dylib"
-[ -f "$DYLIB" ] || { echo "::error::libMNN.dylib not produced"; ls -la "$BUILD_DIR"; exit 1; }
+# ── 收产物 (linker 已直出 libBackend.dylib, OUTPUT_NAME=Backend 对齐 LC_ID_DYLIB) ─
+# CMake 在 SHARED target 上自动设 install_name = @rpath/lib${OUTPUT_NAME}.dylib,
+# 链接阶段就写好,无需 install_name_tool 后处理 + 重新签名.
+DYLIB="$BUILD_DIR/libBackend.dylib"
+[ -f "$DYLIB" ] || { echo "::error::libBackend.dylib not produced"; ls -la "$BUILD_DIR"; exit 1; }
+cp -f "$DYLIB" "$OUT_DIR/"
 OUT_DYLIB="$OUT_DIR/libBackend.dylib"
-cp -f "$DYLIB" "$OUT_DYLIB"
-install_name_tool -id "@rpath/libBackend.dylib" "$OUT_DYLIB"
-codesign --force --sign - "$OUT_DYLIB" 2>/dev/null || true   # ad-hoc re-sign 后 install_name_tool
 
 # Tools (sanity);保持原名(只在调试时用,不进 NuGet)
 for exe in MNNV2Basic.out GetMNNInfo; do

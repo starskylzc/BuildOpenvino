@@ -93,21 +93,21 @@ typedef struct {
 // ----------------------------- API -----------------------------
 
 /// 库版本字符串("3.5.0" 等)。
-MNNWRAP_API const char* yuyi_mnn_version(void);
+MNNWRAP_API const char* yuyi_backend_version(void);
 
 /// MNN 编译期开启的 backend 类型集合 — 调用者传 buf 接收 MnnWrapForwardType 枚举数组,
 /// 返回 backend 数量。可用于 .NET 探测当前 native 是否支持 OpenCL / Metal 等。
-MNNWRAP_API int32_t yuyi_mnn_available_backends(int32_t* outBuf, int32_t bufLen);
+MNNWRAP_API int32_t yuyi_backend_available_backends(int32_t* outBuf, int32_t bufLen);
 
 /// 创建 RuntimeManager(可被多个 Module 共享,显著节省内存 / 缓存复用)。
 /// 返回 handle 或 NULL(失败)。
-MNNWRAP_API YuYiMnnRuntimeHandle yuyi_mnn_runtime_create(const YuYiMnnRuntimeConfig* cfg);
+MNNWRAP_API YuYiMnnRuntimeHandle yuyi_backend_runtime_create(const YuYiMnnRuntimeConfig* cfg);
 
 /// 设置 cache 文件路径(用于自动 tune cache,GPU schedule 复用),create_module 之前调。
-MNNWRAP_API int32_t yuyi_mnn_runtime_set_cache(YuYiMnnRuntimeHandle rt, const char* cacheFilePath);
+MNNWRAP_API int32_t yuyi_backend_runtime_set_cache(YuYiMnnRuntimeHandle rt, const char* cacheFilePath);
 
 /// 触发 cache 写盘(在所有 module 加载完后调)。
-MNNWRAP_API int32_t yuyi_mnn_runtime_update_cache(YuYiMnnRuntimeHandle rt);
+MNNWRAP_API int32_t yuyi_backend_runtime_update_cache(YuYiMnnRuntimeHandle rt);
 
 // HintMode 整数对齐 MNN::Interpreter::HintMode(详见 Interpreter.hpp)
 //   0 MAX_TUNING_NUMBER       GPU async tuning op 数量
@@ -120,7 +120,7 @@ MNNWRAP_API int32_t yuyi_mnn_runtime_update_cache(YuYiMnnRuntimeHandle rt);
 //   9 OP_ENCODER_NUMBER_FOR_COMMIT  Metal/CUDA op 提交批量
 //  13 INIT_THREAD_NUMBER      模型并行加载线程数,默认 0=单线程加载
 //  16 CPU_ENABLE_KLEIDIAI     ARM KleidiAI
-MNNWRAP_API int32_t yuyi_mnn_runtime_set_hint(YuYiMnnRuntimeHandle rt, int32_t hintId, int32_t value);
+MNNWRAP_API int32_t yuyi_backend_runtime_set_hint(YuYiMnnRuntimeHandle rt, int32_t hintId, int32_t value);
 
 // SessionMode 整数对齐 MNN::Interpreter::SessionMode:
 //   0/1   Session_Debug / Session_Release
@@ -132,69 +132,69 @@ MNNWRAP_API int32_t yuyi_mnn_runtime_set_hint(YuYiMnnRuntimeHandle rt, int32_t h
 //   12/13 Session_Codegen_Disable / Session_Codegen_Enable
 //   14/15 Session_Resize_Check / Session_Resize_Fix
 //   16/17 Module_Forward_Separate / Module_Forward_Combine
-MNNWRAP_API int32_t yuyi_mnn_runtime_set_mode(YuYiMnnRuntimeHandle rt, int32_t modeValue);
+MNNWRAP_API int32_t yuyi_backend_runtime_set_mode(YuYiMnnRuntimeHandle rt, int32_t modeValue);
 
 /// 实际使用的 forward type(GPU 失败 fallback CPU 后的真实值)。返回 MnnWrapForwardType 或负数错误。
-MNNWRAP_API int32_t yuyi_mnn_runtime_actual_forward_type(YuYiMnnRuntimeHandle rt);
+MNNWRAP_API int32_t yuyi_backend_runtime_actual_forward_type(YuYiMnnRuntimeHandle rt);
 
 /// 销毁 runtime。所有 module 必须先销毁。
-MNNWRAP_API void yuyi_mnn_runtime_destroy(YuYiMnnRuntimeHandle rt);
+MNNWRAP_API void yuyi_backend_runtime_destroy(YuYiMnnRuntimeHandle rt);
 
 /// **主路径**: 从内存解密的 byte[] 加载 module。runtime 可为 NULL(创建独立 runtime)。
 /// dynamic=0 静态(更快,推荐),shapeMutable=0 输入形状固定(更省内存)。
 /// 返回 handle 或 NULL。
-MNNWRAP_API YuYiMnnModuleHandle yuyi_mnn_module_load_from_memory(
+MNNWRAP_API YuYiMnnModuleHandle yuyi_backend_module_load_from_memory(
     YuYiMnnRuntimeHandle rt,
     const uint8_t* buffer, size_t size,
     int32_t dynamic, int32_t shapeMutable, int32_t rearrange);
 
 /// 从文件路径加载 module(诊断 / 测试用,生产走 from_memory)。
-MNNWRAP_API YuYiMnnModuleHandle yuyi_mnn_module_load_from_file(
+MNNWRAP_API YuYiMnnModuleHandle yuyi_backend_module_load_from_file(
     YuYiMnnRuntimeHandle rt,
     const char* filePath,
     int32_t dynamic, int32_t shapeMutable, int32_t rearrange);
 
 /// 销毁 module。
-MNNWRAP_API void yuyi_mnn_module_destroy(YuYiMnnModuleHandle m);
+MNNWRAP_API void yuyi_backend_module_destroy(YuYiMnnModuleHandle m);
 
 /// 输入张量个数。
-MNNWRAP_API int32_t yuyi_mnn_module_input_count(YuYiMnnModuleHandle m);
+MNNWRAP_API int32_t yuyi_backend_module_input_count(YuYiMnnModuleHandle m);
 /// 输出张量个数。
-MNNWRAP_API int32_t yuyi_mnn_module_output_count(YuYiMnnModuleHandle m);
+MNNWRAP_API int32_t yuyi_backend_module_output_count(YuYiMnnModuleHandle m);
 
 /// 取第 idx 个输入名字(UTF-8,NUL-terminated)。返回**包含 NUL 的字节数**(包括需要的);
 /// buf=NULL 或 bufSize=0 时仅返回需要长度,不写。
-MNNWRAP_API size_t yuyi_mnn_module_input_name(YuYiMnnModuleHandle m, int32_t idx, char* buf, size_t bufSize);
-MNNWRAP_API size_t yuyi_mnn_module_output_name(YuYiMnnModuleHandle m, int32_t idx, char* buf, size_t bufSize);
+MNNWRAP_API size_t yuyi_backend_module_input_name(YuYiMnnModuleHandle m, int32_t idx, char* buf, size_t bufSize);
+MNNWRAP_API size_t yuyi_backend_module_output_name(YuYiMnnModuleHandle m, int32_t idx, char* buf, size_t bufSize);
 
 /// 取第 idx 个输入的形状(rank 维度数)。shapeBuf 接收 rank 个 int32(若 bufLen >= rank);
 /// 返回 rank;rank>bufLen 时返回 rank 但不写满。-1 表示 idx 越界。
-MNNWRAP_API int32_t yuyi_mnn_module_input_shape(YuYiMnnModuleHandle m, int32_t idx, int32_t* shapeBuf, int32_t bufLen);
+MNNWRAP_API int32_t yuyi_backend_module_input_shape(YuYiMnnModuleHandle m, int32_t idx, int32_t* shapeBuf, int32_t bufLen);
 
 /// **核心**: 设置第 inputIdx 个输入的 NCHW float32 数据。shape 给当前形状(动态尺寸),
 /// 若 shape=NULL 则保留模型原 shape;data 为 caller buffer,wrapper 内部拷贝。
-MNNWRAP_API int32_t yuyi_mnn_module_set_input_float(
+MNNWRAP_API int32_t yuyi_backend_module_set_input_float(
     YuYiMnnModuleHandle m,
     int32_t inputIdx,
     const int32_t* shape, int32_t shapeLen,
     const float* data, size_t elemCount);
 
 /// **核心**: 跑一帧推理。返回 MNNWRAP_OK 或负数错误。
-MNNWRAP_API int32_t yuyi_mnn_module_forward(YuYiMnnModuleHandle m);
+MNNWRAP_API int32_t yuyi_backend_module_forward(YuYiMnnModuleHandle m);
 
 /// 取第 outputIdx 输出的 shape。返回 rank;-1 越界。
-MNNWRAP_API int32_t yuyi_mnn_module_output_shape(YuYiMnnModuleHandle m, int32_t idx, int32_t* shapeBuf, int32_t bufLen);
+MNNWRAP_API int32_t yuyi_backend_module_output_shape(YuYiMnnModuleHandle m, int32_t idx, int32_t* shapeBuf, int32_t bufLen);
 
 /// 取第 outputIdx 输出的 float 元素数(rank shape 各维相乘)。-1 越界 / 0 = 空。
-MNNWRAP_API int64_t yuyi_mnn_module_output_size(YuYiMnnModuleHandle m, int32_t idx);
+MNNWRAP_API int64_t yuyi_backend_module_output_size(YuYiMnnModuleHandle m, int32_t idx);
 
 /// 把第 outputIdx 输出的 float 数据拷到 caller buffer。dstElemCount 必须 ≥ output_size,否则截断到 dstElemCount。
 /// 返回实际写入的元素数;<0 错误。
-MNNWRAP_API int64_t yuyi_mnn_module_output_data_float(
+MNNWRAP_API int64_t yuyi_backend_module_output_data_float(
     YuYiMnnModuleHandle m, int32_t idx, float* dst, size_t dstElemCount);
 
 /// 释放 module 的中间缓存(慢但省内存,通常不需要在热路径调)。
-MNNWRAP_API void yuyi_mnn_module_clear_cache(YuYiMnnModuleHandle m);
+MNNWRAP_API void yuyi_backend_module_clear_cache(YuYiMnnModuleHandle m);
 
 #ifdef __cplusplus
 }
