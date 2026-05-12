@@ -85,10 +85,25 @@ typedef struct {
     int32_t precision;       // MnnWrapPrecision
     int32_t memory;          // MnnWrapMemoryMode
     int32_t power;           // MnnWrapPowerMode
-    int32_t gpuDeviceId;     // OpenCL platform_id / CUDA device_id;0 默认
-    int32_t reserved0;       // 4-byte pad,保持 32-byte 对齐
-    int32_t reserved1;
+    int32_t gpuPlatformId;   // OpenCL clGetPlatformIDs() 下标;OpenCL 路径必填
+    int32_t gpuDeviceId;     // OpenCL clGetDeviceIDs(platform, GPU) 下标;OpenCL 路径必填
+    int32_t reserved0;       // 占位,保持 32-byte 对齐
 } YuYiMnnRuntimeConfig;
+
+// ----------------------------- OpenCL 设备枚举 -----------------------------
+// 描述一块通过 OpenCL ICD loader 看到的 GPU device,给上层(C# HwProbe)做候选决策用。
+// platformIndex + deviceIndex 之后会原样塞回 YuYiMnnRuntimeConfig.gpuPlatformId/gpuDeviceId,
+// 实现"枚举什么 → 启动什么"硬绑定,不再依赖 DXGI / Vulkan 等其它视角索引的猜测。
+typedef struct {
+    uint32_t platformIndex;     // clGetPlatformIDs 下标
+    uint32_t deviceIndex;       // clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU) 下标
+    uint32_t vendorId;          // CL_DEVICE_VENDOR_ID — 0x10DE NVIDIA,0x8086 Intel,0x1002 AMD
+    uint32_t hostUnifiedMemory; // CL_DEVICE_HOST_UNIFIED_MEMORY,1=集成显卡(共享内存),0=独立显卡
+    uint64_t globalMemBytes;    // CL_DEVICE_GLOBAL_MEM_SIZE
+    char     name[128];         // CL_DEVICE_NAME,UTF-8,NUL 结尾
+    char     vendor[64];        // CL_DEVICE_VENDOR,UTF-8,NUL 结尾
+    char     driverVersion[64]; // CL_DRIVER_VERSION,UTF-8,NUL 结尾
+} YuyiClDevice;
 
 // ----------------------------- API -----------------------------
 
@@ -116,6 +131,14 @@ MNNWRAP_API void yuyi_backend_native_log(const char* fmt, ...);
 /// MNN 编译期开启的 backend 类型集合 — 调用者传 buf 接收 MnnWrapForwardType 枚举数组,
 /// 返回 backend 数量。可用于 .NET 探测当前 native 是否支持 OpenCL / Metal 等。
 MNNWRAP_API int32_t yuyi_backend_available_backends(int32_t* outBuf, int32_t bufLen);
+
+/// 枚举本机所有可见的 OpenCL GPU device(经 ICD loader 看到的全部 platform × CL_DEVICE_TYPE_GPU 笛卡尔积)。
+/// 通过 LoadLibrary / dlopen 动态加载 OpenCL ICD loader,**无 link-time 依赖**:
+///   - OpenCL.dll / libOpenCL.so.1 缺失 → 返回 0(系统无任何 OpenCL 支持)
+///   - 平台数为 0 / 平台下无 GPU device → 返回 0
+/// 返回值 = 设备总数(无论 bufLen 多大都返回总数);outBuf 写入前 min(总数, bufLen) 条。
+/// 调用方典型用法:先传 outBuf=NULL/bufLen=0 拿总数 → 分配 → 再调一次拿明细。
+MNNWRAP_API int32_t yuyi_backend_list_opencl_devices(YuyiClDevice* outBuf, int32_t bufLen);
 
 /// 创建 RuntimeManager(可被多个 Module 共享,显著节省内存 / 缓存复用)。
 /// 返回 handle 或 NULL(失败)。

@@ -30,6 +30,15 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32) || defined(_WIN64)
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <windows.h>
+#else
+  #include <dlfcn.h>
+#endif
+
 using namespace MNN;
 using namespace MNN::Express;
 
@@ -144,12 +153,155 @@ static size_t copyToBuf(const std::string& s, char* buf, size_t bufSize) {
     return need;
 }
 
+// ============================== OpenCL ICD 动态枚举 ==============================
+// 不在 link 期依赖 OpenCL SDK / OpenCL.dll 必存在 — 通过 LoadLibrary/dlopen 在运行期
+// 探测 ICD loader。生产路径(NVIDIA / Intel / AMD / 国产 OpenCL driver)都会装
+// OpenCL.dll / libOpenCL.so.1;装了我们枚举,没装就返回 0 候选,wrapper 自身依然
+// 可正常加载与运行(只有 GPU 后端选项变空,MNN 自然走 CPU)。
+//
+// 仅枚举 CL_DEVICE_TYPE_GPU,跳过 CL_DEVICE_TYPE_CPU(那是 ICD 自带的软 CPU 渲染器,
+// 没意义)。
+namespace clenum {
+
+// 必要 OpenCL 常量(避免引 cl.h header,直接照抄数值)。
+constexpr uint32_t CL_SUCCESS                       = 0;
+constexpr uint32_t CL_DEVICE_TYPE_GPU               = (1u << 2);
+constexpr uint32_t CL_DEVICE_NAME                   = 0x102B;
+constexpr uint32_t CL_DEVICE_VENDOR                 = 0x102C;
+constexpr uint32_t CL_DRIVER_VERSION                = 0x102D;
+constexpr uint32_t CL_DEVICE_VENDOR_ID              = 0x1001;
+constexpr uint32_t CL_DEVICE_GLOBAL_MEM_SIZE        = 0x101F;
+constexpr uint32_t CL_DEVICE_HOST_UNIFIED_MEMORY    = 0x1035;
+
+typedef int32_t  (*pfn_clGetPlatformIDs)(uint32_t, void**, uint32_t*);
+typedef int32_t  (*pfn_clGetDeviceIDs)(void*, uint64_t, uint32_t, void**, uint32_t*);
+typedef int32_t  (*pfn_clGetDeviceInfo)(void*, uint32_t, size_t, void*, size_t*);
+
+struct IcdFns {
+    void* lib = nullptr;
+    pfn_clGetPlatformIDs getPlatformIDs = nullptr;
+    pfn_clGetDeviceIDs   getDeviceIDs   = nullptr;
+    pfn_clGetDeviceInfo  getDeviceInfo  = nullptr;
+
+    bool resolve() {
+#if defined(_WIN32) || defined(_WIN64)
+        lib = (void*)LoadLibraryW(L"OpenCL.dll");
+        if (lib == nullptr) return false;
+        getPlatformIDs = (pfn_clGetPlatformIDs)GetProcAddress((HMODULE)lib, "clGetPlatformIDs");
+        getDeviceIDs   = (pfn_clGetDeviceIDs)  GetProcAddress((HMODULE)lib, "clGetDeviceIDs");
+        getDeviceInfo  = (pfn_clGetDeviceInfo) GetProcAddress((HMODULE)lib, "clGetDeviceInfo");
+#else
+        // Linux 上 libOpenCL.so.1 是 ICD loader 的 SONAME(ocl-icd-libopencl1 / KhronosGroup OpenCL-ICD-Loader)
+        // .so 不带版本号有时找不到,优先 .so.1
+        lib = dlopen("libOpenCL.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (lib == nullptr) {
+            lib = dlopen("libOpenCL.so", RTLD_NOW | RTLD_LOCAL);
+        }
+        if (lib == nullptr) return false;
+        getPlatformIDs = (pfn_clGetPlatformIDs)dlsym(lib, "clGetPlatformIDs");
+        getDeviceIDs   = (pfn_clGetDeviceIDs)  dlsym(lib, "clGetDeviceIDs");
+        getDeviceInfo  = (pfn_clGetDeviceInfo) dlsym(lib, "clGetDeviceInfo");
+#endif
+        return getPlatformIDs && getDeviceIDs && getDeviceInfo;
+    }
+
+    void release() {
+        if (lib == nullptr) return;
+#if defined(_WIN32) || defined(_WIN64)
+        FreeLibrary((HMODULE)lib);
+#else
+        dlclose(lib);
+#endif
+        lib = nullptr;
+    }
+};
+
+static void fillString(void* dev, uint32_t param, char* dst, size_t dstCap, pfn_clGetDeviceInfo getInfo) {
+    if (dstCap == 0 || dst == nullptr) return;
+    dst[0] = '\0';
+    size_t need = 0;
+    if (getInfo(dev, param, 0, nullptr, &need) != CL_SUCCESS || need == 0) return;
+    if (need > dstCap) need = dstCap;  // 截断,保留 NUL 位
+    if (getInfo(dev, param, need, dst, nullptr) != CL_SUCCESS) {
+        dst[0] = '\0';
+        return;
+    }
+    dst[dstCap - 1] = '\0';  // 显式 NUL 终止
+}
+
+} // namespace clenum
+
 // ============================== API ==============================
 
 extern "C" {
 
 MNNWRAP_API const char* yuyi_backend_version(void) {
     return getVersion();
+}
+
+MNNWRAP_API int32_t yuyi_backend_list_opencl_devices(YuyiClDevice* outBuf, int32_t bufLen) {
+    using namespace clenum;
+    IcdFns icd;
+    if (!icd.resolve()) {
+        return 0;  // 没装 OpenCL ICD loader → 视作无任何 GPU device
+    }
+
+    int32_t writtenOrTotal = 0;
+    do {
+        uint32_t platCount = 0;
+        if (icd.getPlatformIDs(0, nullptr, &platCount) != CL_SUCCESS || platCount == 0) {
+            break;
+        }
+        std::vector<void*> platforms(platCount, nullptr);
+        if (icd.getPlatformIDs(platCount, platforms.data(), nullptr) != CL_SUCCESS) {
+            break;
+        }
+
+        for (uint32_t p = 0; p < platCount; ++p) {
+            uint32_t devCount = 0;
+            // 平台下没 GPU device 时 CL_DEVICE_NOT_FOUND 是正常情况(纯 CPU ICD),跳过
+            if (icd.getDeviceIDs(platforms[p], CL_DEVICE_TYPE_GPU, 0, nullptr, &devCount) != CL_SUCCESS
+                || devCount == 0) {
+                continue;
+            }
+            std::vector<void*> devices(devCount, nullptr);
+            if (icd.getDeviceIDs(platforms[p], CL_DEVICE_TYPE_GPU, devCount, devices.data(), nullptr) != CL_SUCCESS) {
+                continue;
+            }
+
+            for (uint32_t d = 0; d < devCount; ++d) {
+                if (outBuf != nullptr && writtenOrTotal < bufLen) {
+                    YuyiClDevice& slot = outBuf[writtenOrTotal];
+                    std::memset(&slot, 0, sizeof(slot));
+                    slot.platformIndex = p;
+                    slot.deviceIndex   = d;
+
+                    uint32_t vendorId = 0;
+                    icd.getDeviceInfo(devices[d], CL_DEVICE_VENDOR_ID,
+                                      sizeof(vendorId), &vendorId, nullptr);
+                    slot.vendorId = vendorId;
+
+                    uint32_t hostUnified = 0;
+                    icd.getDeviceInfo(devices[d], CL_DEVICE_HOST_UNIFIED_MEMORY,
+                                      sizeof(hostUnified), &hostUnified, nullptr);
+                    slot.hostUnifiedMemory = hostUnified;
+
+                    uint64_t globalMem = 0;
+                    icd.getDeviceInfo(devices[d], CL_DEVICE_GLOBAL_MEM_SIZE,
+                                      sizeof(globalMem), &globalMem, nullptr);
+                    slot.globalMemBytes = globalMem;
+
+                    fillString(devices[d], CL_DEVICE_NAME,     slot.name,          sizeof(slot.name),          icd.getDeviceInfo);
+                    fillString(devices[d], CL_DEVICE_VENDOR,   slot.vendor,        sizeof(slot.vendor),        icd.getDeviceInfo);
+                    fillString(devices[d], CL_DRIVER_VERSION,  slot.driverVersion, sizeof(slot.driverVersion), icd.getDeviceInfo);
+                }
+                ++writtenOrTotal;
+            }
+        }
+    } while (false);
+
+    icd.release();
+    return writtenOrTotal;
 }
 
 MNNWRAP_API int32_t yuyi_backend_available_backends(int32_t* outBuf, int32_t bufLen) {
@@ -214,15 +366,22 @@ MNNWRAP_API YuYiMnnRuntimeHandle yuyi_backend_runtime_create(const YuYiMnnRuntim
     }
     sc.backendConfig = &bc;
 
-    // ── GPU 路径:用 MNNDeviceContext.platformId 直接指定 OpenCL platform ──
-    // 通过 BackendConfig.sharedContext 传给 MNN,OpenCLBackend.cpp 直接用这个
-    // platformId 给 OpenCLRuntime ctor,**完全绕开 envPlatId getenv 路径** +
+    // ── OpenCL 路径:用 MNNDeviceContext.{platformId,deviceId} 显式选卡 ──
+    // 通过 BackendConfig.sharedContext 传给 MNN,OpenCLBackend.cpp 直接用这两个值
+    // 给 OpenCLRuntime ctor,**完全绕开 envPlatId getenv 路径** +
     // **跨 RuntimeManager 共享 cl::Context 全局缓存的副作用**。
-    // 比 setenv("MNN_OPENCL_PLATFORM_ID")可靠:env 是 process 单例,多 GPU 切换
-    // 时容易踩 once-only 陷阱;sharedContext 是 per-RuntimeManager 显式参数。
-    if (sc.type == MNN_FORWARD_OPENCL || sc.type == MNN_FORWARD_CUDA) {
-        h->devCtx.platformId   = (uint32_t)(cfg->gpuDeviceId >= 0 ? cfg->gpuDeviceId : 0);
-        h->devCtx.deviceId     = 0;
+    //
+    // 注意 platformId / deviceId 分别是 clGetPlatformIDs 与 clGetDeviceIDs 的下标 —
+    // 上层(HwProbe)枚举什么就传什么,实现"枚举见到什么 → 启动什么"的硬绑定。
+    // 历史曾把 platformId 当作"GPU 物理序号"硬编码 deviceId=0,在同厂商多卡 +
+    // 跨厂商 ICD 排列上都会选错卡;现在 deviceId 也走配置不再写死。
+    //
+    // CUDA / Vulkan / NN 等其它 GPU forward type 当前未被任何 profile 派发(参
+    // MnnBackend.ResolveForwardType),wrapper 这里也不再为它们填 sharedContext,
+    // 避免无关 backend 的 platformId 语义混淆。需要 CUDA 时单独走 CUDA 分支即可。
+    if (sc.type == MNN_FORWARD_OPENCL) {
+        h->devCtx.platformId   = (uint32_t)(cfg->gpuPlatformId >= 0 ? cfg->gpuPlatformId : 0);
+        h->devCtx.deviceId     = (uint32_t)(cfg->gpuDeviceId   >= 0 ? cfg->gpuDeviceId   : 0);
         h->devCtx.platformSize = 0;     // 0 = MNN 自动探测平台数量
         h->devCtx.contextPtr   = nullptr; // null = MNN 内部 clCreateContext(用我们指定的 platform)
         bc.sharedContext = (void*)&h->devCtx;
