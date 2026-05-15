@@ -167,23 +167,42 @@ esac
 # ====================================================================
 # 2.4. Patch MNN OpenCLRuntime.cpp: globalContext → per-platform map
 # ====================================================================
-# 防多 GPU 切换时 cl::Context 误复用。注:Linux build 在 docker 内可能没
-# /python3,fallback python(docker ubuntu:18.04 一般 python2 默认,但 GHA
-# Linux runner 装了 python3),都试一下。
+# 防多 GPU 切换时 cl::Context 误复用(用户选 dGPU 实际跑 iGPU)。
+#
+# ⚠ HARD-FAIL — 历史教训:patch 字符串与 MNN 源码 whitespace drift 时 src.replace
+# 静默不替换, patch.py 退码 2; 老脚本只 warn → 产物是 vanilla MNN, globalContext
+# 还是单例 → 多 GPU 选卡全废。patch 失败必须挂 build。
+#
+# opencl_runtime patch: 多卡选卡必须的, hard-fail。
+# silence_print patch: 仅静默 stdout, fail 不影响功能, 保留 warn 即可。
 SCRIPT_DIR_FOR_PATCH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_run_py_patch() {
+_run_py_critical_patch() {
+  local script="$1"
+  if [ ! -f "$script" ]; then
+    echo "::error::critical patch not found: $script"; exit 1
+  fi
+  local py=""
+  if   command -v python3 >/dev/null 2>&1; then py=python3
+  elif command -v python  >/dev/null 2>&1; then py=python
+  else echo "::error::no python found, cannot run critical patch $(basename "$script")"; exit 1; fi
+  "$py" "$script" "$MNN_SOURCE" || {
+    echo "::error::critical patch failed: $(basename "$script") — 多半是 MNN 上游格式 drift, 对齐 patch 的 old_decl 后再试"
+    exit 1
+  }
+}
+_run_py_optional_patch() {
   local script="$1"
   if [ ! -f "$script" ]; then return 0; fi
   if command -v python3 >/dev/null 2>&1; then
-    python3 "$script" "$MNN_SOURCE" || echo "::warning::patch failed: $(basename "$script")"
+    python3 "$script" "$MNN_SOURCE" || echo "::warning::optional patch failed: $(basename "$script")"
   elif command -v python >/dev/null 2>&1; then
-    python "$script" "$MNN_SOURCE" || echo "::warning::patch failed: $(basename "$script")"
+    python "$script" "$MNN_SOURCE" || echo "::warning::optional patch failed: $(basename "$script")"
   else
     echo "::warning::no python found, skipping $(basename "$script")"
   fi
 }
-_run_py_patch "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py"
-_run_py_patch "$SCRIPT_DIR_FOR_PATCH/patch_mnn_silence_print.py"
+_run_py_critical_patch "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py"
+_run_py_optional_patch "$SCRIPT_DIR_FOR_PATCH/patch_mnn_silence_print.py"
 
 # ====================================================================
 # 2.5. Inject YuYiNoPhotoLib mnnwrap C ABI into MNN target

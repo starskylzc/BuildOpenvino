@@ -214,12 +214,19 @@ if ($linkerSharedExtra) { $cmakeArchExtra += "-DCMAKE_SHARED_LINKER_FLAGS=$linke
 if ($linkerExeExtra)    { $cmakeArchExtra += "-DCMAKE_EXE_LINKER_FLAGS=$linkerExeExtra" }
 
 # ── 2.4 Patch MNN OpenCLRuntime.cpp: globalContext → per-platform map ─
-# 防多 GPU 切换时 cl::Context 误复用(用户选 iGPU 实际跑 dGPU)。详见
+# 防多 GPU 切换时 cl::Context 误复用(用户选 dGPU 实际跑 iGPU)。详见
 # patch_mnn_opencl_runtime.py 注释。
+#
+# ⚠ HARD-FAIL — 历史教训:patch 字符串与 MNN 源码 whitespace drift 时 src.replace
+# 静默不替换, patch.py 退码 2; 老脚本只 warn → 产物是 vanilla MNN, globalContext
+# 还是单例 → 多 GPU 选卡全废。patch 失败必须挂 build。
 $patchScript = Join-Path $PSScriptRoot 'patch_mnn_opencl_runtime.py'
-if (Test-Path $patchScript) {
-    & python $patchScript $MNN_SOURCE
-    if ($LASTEXITCODE -ne 0) { Write-Host "::warning::OpenCLRuntime patch failed (exit $LASTEXITCODE)" }
+if (-not (Test-Path $patchScript)) {
+    throw "patch_mnn_opencl_runtime.py 找不到: $patchScript — multi-GPU 选卡逻辑无法启用, 拒绝出 broken 产物"
+}
+& python $patchScript $MNN_SOURCE
+if ($LASTEXITCODE -ne 0) {
+    throw "OpenCLRuntime patch failed (exit $LASTEXITCODE) — 多半是 MNN 上游格式 drift, 对齐 patch_mnn_opencl_runtime.py 的 old_decl 后再试"
 }
 
 # ── Patch MNN_PRINT to no-op (silence native stdout leaks) ─────────────

@@ -29,12 +29,14 @@ if "globalContextMap" in src:
     print("OpenCLRuntime.cpp already patched (globalContextMap present); skip")
     sys.exit(0)
 
-# Original (verbatim from MNN 3.5.0 source):
+# Original (verbatim from MNN 3.5.0 source — 关闭 } 在列 0, 不是 8 空格缩进。
+# 历史版本曾 8 空格缩进 (MNN ~2.x), 3.5.0 上游清理过格式. 这条 patch 走 exact-substring
+# 替换, 任何 whitespace drift 都会 silent fail, 务必跟实际源码 byte-for-byte 对齐):
 old_decl = """static std::weak_ptr<::cl::Context> globalContext;
 static std::mutex gCLContextMutex;
 static std::shared_ptr<::cl::Context> getGlobalContext(){
     return globalContext.lock();
-        }
+}
 
 static void setGlobalContext(std::shared_ptr<cl::Context> Context){
     std::lock_guard<std::mutex> lck(gCLContextMutex);
