@@ -29,14 +29,17 @@ if "globalContextMap" in src:
     print("OpenCLRuntime.cpp already patched (globalContextMap present); skip")
     sys.exit(0)
 
-# Original (verbatim from MNN 3.5.0 source — 关闭 } 在列 0, 不是 8 空格缩进。
-# 历史版本曾 8 空格缩进 (MNN ~2.x), 3.5.0 上游清理过格式. 这条 patch 走 exact-substring
-# 替换, 任何 whitespace drift 都会 silent fail, 务必跟实际源码 byte-for-byte 对齐):
+# Original (verbatim from MNN 3.5.0 source) — 注意 getGlobalContext 的关闭 } 在
+# **列 8** (8 空格缩进), 不是列 0! MNN 上游格式怪异保留至今. 验证方式:
+#   curl -fsSL https://raw.githubusercontent.com/alibaba/MNN/3.5.0/source/backend/opencl/core/runtime/OpenCLRuntime.cpp | sed -n '29,31p' | cat -A
+# 这条 patch 走 exact-substring 替换, 任何 whitespace drift 都会 silent fail (历史
+# 教训:之前误把 8 空格改成列 0, CI 直接 hard-fail 整批挂 build, build_mnn_*.{ps1,sh}
+# 的 _critical_patch 把这个 fail 暴露出来不让坏产物溜出)。
 old_decl = """static std::weak_ptr<::cl::Context> globalContext;
 static std::mutex gCLContextMutex;
 static std::shared_ptr<::cl::Context> getGlobalContext(){
     return globalContext.lock();
-}
+        }
 
 static void setGlobalContext(std::shared_ptr<cl::Context> Context){
     std::lock_guard<std::mutex> lck(gCLContextMutex);
