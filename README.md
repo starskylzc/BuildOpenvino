@@ -18,7 +18,6 @@ later became ORT, and is now MNN. Renaming will follow when convenient.)
     ├── build_mnn_{windows.ps1,macos.sh,linux.sh}    per-platform MNN build drivers
     ├── build_opencv_windows.ps1                      Windows OpenCV driver
     ├── build_{linux,macos}_slice.sh                  Linux/Mac OpenCV driver
-    ├── patch_mnn_opencl_runtime.py                   per-platform-id globalContext
     ├── patch_mnn_silence_print.py                    no-op MNN_PRINT in MNNDefine.h
     └── smoke_test_*.{py,ps1}                         per-RID artifact sanity probes
 

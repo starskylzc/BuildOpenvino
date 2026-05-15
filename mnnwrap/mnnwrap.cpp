@@ -82,9 +82,9 @@ extern "C" MNNWRAP_API void yuyi_backend_native_log(const char* fmt, ...) {
 
 struct YuYiMnnRuntime_s {
     // 每个 RuntimeManager 配独立 Executor + 独立 MNNDeviceContext。
-    // GPU 路径用 MNNDeviceContext.platformId 显式指定 OpenCL platform,
-    // 绕开 MNN OpenCLRuntime 的 envPlatId getenv 路径 + globalContext 缓存
-    // (那条路径 process 级共享,会让选 iGPU 实际跑 dGPU)。
+    // GPU 路径用 mnnwrap 自造的 cl_context 通过 MNNDeviceContext.contextPtr 灌给 MNN,
+    // MNN 看到 contextPtr 非空就直接用,完全绕开内部 globalContext 单例(那条路径
+    // process 级共享,在 Win 多 GPU + 老 NVIDIA driver 下会让选 dGPU 实际跑 iGPU)。
     std::shared_ptr<Executor> executor;
     std::shared_ptr<Executor::RuntimeManager> rt;
     // backendConfig + devCtx 都做成 runtime 成员 — MNN createRuntimeManager
@@ -94,6 +94,16 @@ struct YuYiMnnRuntime_s {
     MNNDeviceContext devCtx;
     MNNForwardType actualType = MNN_FORWARD_CPU;
     std::mutex lock;
+
+    // ── OpenCL 自管资源(仅 forward=OPENCL 路径填) ────────────────────
+    // 我们用 ICD loader 直接 clCreateContext 出来的 cl_context, 灌给 devCtx.contextPtr。
+    // MNN 用 no-op deleter 包它(看 OpenCLRuntime.cpp contextPtr 分支),不会释放,
+    // 由本 wrapper 在 runtime_destroy 里 clReleaseContext。
+    void*  ownedClContext = nullptr;
+    // OpenCL.dll / libOpenCL.so 的句柄 + 函数指针,生命周期跟 ownedClContext 绑定 —
+    // 不能在 runtime_create 结束时 release(否则后面 clReleaseContext 调用悬空指针)。
+    void*  clLib = nullptr;
+    int32_t (*clReleaseContextFn)(void*) = nullptr;
 };
 
 struct YuYiMnnModule_s {
@@ -172,16 +182,26 @@ constexpr uint32_t CL_DRIVER_VERSION                = 0x102D;
 constexpr uint32_t CL_DEVICE_VENDOR_ID              = 0x1001;
 constexpr uint32_t CL_DEVICE_GLOBAL_MEM_SIZE        = 0x101F;
 constexpr uint32_t CL_DEVICE_HOST_UNIFIED_MEMORY    = 0x1035;
+// Context 选项 — yuyi_backend_runtime_create 用这两条直接造 cl_context
+constexpr intptr_t CL_CONTEXT_PLATFORM              = 0x1084;
+constexpr uint32_t CL_CONTEXT_DEVICES               = 0x1081;
 
 typedef int32_t  (*pfn_clGetPlatformIDs)(uint32_t, void**, uint32_t*);
 typedef int32_t  (*pfn_clGetDeviceIDs)(void*, uint64_t, uint32_t, void**, uint32_t*);
 typedef int32_t  (*pfn_clGetDeviceInfo)(void*, uint32_t, size_t, void*, size_t*);
+// clCreateContext(properties[], num_devices, devices[], pfn_notify, user_data, errcode_ret) -> cl_context
+typedef void*    (*pfn_clCreateContext)(const intptr_t*, uint32_t, void* const*, void*, void*, int32_t*);
+typedef int32_t  (*pfn_clReleaseContext)(void*);
+typedef int32_t  (*pfn_clGetContextInfo)(void*, uint32_t, size_t, void*, size_t*);
 
 struct IcdFns {
     void* lib = nullptr;
-    pfn_clGetPlatformIDs getPlatformIDs = nullptr;
-    pfn_clGetDeviceIDs   getDeviceIDs   = nullptr;
-    pfn_clGetDeviceInfo  getDeviceInfo  = nullptr;
+    pfn_clGetPlatformIDs  getPlatformIDs = nullptr;
+    pfn_clGetDeviceIDs    getDeviceIDs   = nullptr;
+    pfn_clGetDeviceInfo   getDeviceInfo  = nullptr;
+    pfn_clCreateContext   createContext  = nullptr;
+    pfn_clReleaseContext  releaseContext = nullptr;
+    pfn_clGetContextInfo  getContextInfo = nullptr;
 
     bool resolve() {
 #if defined(_WIN32) || defined(_WIN64)
@@ -190,6 +210,9 @@ struct IcdFns {
         getPlatformIDs = (pfn_clGetPlatformIDs)GetProcAddress((HMODULE)lib, "clGetPlatformIDs");
         getDeviceIDs   = (pfn_clGetDeviceIDs)  GetProcAddress((HMODULE)lib, "clGetDeviceIDs");
         getDeviceInfo  = (pfn_clGetDeviceInfo) GetProcAddress((HMODULE)lib, "clGetDeviceInfo");
+        createContext  = (pfn_clCreateContext) GetProcAddress((HMODULE)lib, "clCreateContext");
+        releaseContext = (pfn_clReleaseContext)GetProcAddress((HMODULE)lib, "clReleaseContext");
+        getContextInfo = (pfn_clGetContextInfo)GetProcAddress((HMODULE)lib, "clGetContextInfo");
 #else
         // Linux 上 libOpenCL.so.1 是 ICD loader 的 SONAME(ocl-icd-libopencl1 / KhronosGroup OpenCL-ICD-Loader)
         // .so 不带版本号有时找不到,优先 .so.1
@@ -201,8 +224,18 @@ struct IcdFns {
         getPlatformIDs = (pfn_clGetPlatformIDs)dlsym(lib, "clGetPlatformIDs");
         getDeviceIDs   = (pfn_clGetDeviceIDs)  dlsym(lib, "clGetDeviceIDs");
         getDeviceInfo  = (pfn_clGetDeviceInfo) dlsym(lib, "clGetDeviceInfo");
+        createContext  = (pfn_clCreateContext) dlsym(lib, "clCreateContext");
+        releaseContext = (pfn_clReleaseContext)dlsym(lib, "clReleaseContext");
+        getContextInfo = (pfn_clGetContextInfo)dlsym(lib, "clGetContextInfo");
 #endif
+        // 枚举所需的三个是核心,Context 三个是 GPU 选卡路径新加的 —
+        // ListOpenClDevices 只 enumerate 不 createContext,枚举三个就够。
         return getPlatformIDs && getDeviceIDs && getDeviceInfo;
+    }
+
+    /// Context 创建链所需的三个函数指针是否齐全 — runtime_create OPENCL 分支前置检查。
+    bool hasContextApi() const {
+        return createContext && releaseContext && getContextInfo;
     }
 
     void release() {
@@ -227,6 +260,40 @@ static void fillString(void* dev, uint32_t param, char* dst, size_t dstCap, pfn_
         return;
     }
     dst[dstCap - 1] = '\0';  // 显式 NUL 终止
+}
+
+/// 给定 platformId / deviceId, 用 ICD 解析到具体的 cl_platform_id + cl_device_id;
+/// 失败返回 false, *outPlat / *outDev 不变。
+static bool resolvePlatformDevice(const IcdFns& icd, uint32_t platformId, uint32_t deviceId,
+                                  void** outPlat, void** outDev) {
+    uint32_t platCount = 0;
+    if (icd.getPlatformIDs(0, nullptr, &platCount) != CL_SUCCESS || platCount == 0) {
+        return false;
+    }
+    if (platformId >= platCount) {
+        return false;
+    }
+    std::vector<void*> platforms(platCount, nullptr);
+    if (icd.getPlatformIDs(platCount, platforms.data(), nullptr) != CL_SUCCESS) {
+        return false;
+    }
+    void* plat = platforms[platformId];
+
+    uint32_t devCount = 0;
+    if (icd.getDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 0, nullptr, &devCount) != CL_SUCCESS
+        || devCount == 0) {
+        return false;
+    }
+    if (deviceId >= devCount) {
+        return false;
+    }
+    std::vector<void*> devices(devCount, nullptr);
+    if (icd.getDeviceIDs(plat, CL_DEVICE_TYPE_GPU, devCount, devices.data(), nullptr) != CL_SUCCESS) {
+        return false;
+    }
+    *outPlat = plat;
+    *outDev  = devices[deviceId];
+    return true;
 }
 
 } // namespace clenum
@@ -366,32 +433,109 @@ MNNWRAP_API YuYiMnnRuntimeHandle yuyi_backend_runtime_create(const YuYiMnnRuntim
     }
     sc.backendConfig = &bc;
 
-    // ── OpenCL 路径:用 MNNDeviceContext.{platformId,deviceId} 显式选卡 ──
-    // 通过 BackendConfig.sharedContext 传给 MNN,OpenCLBackend.cpp 直接用这两个值
-    // 给 OpenCLRuntime ctor,**完全绕开 envPlatId getenv 路径** +
-    // **跨 RuntimeManager 共享 cl::Context 全局缓存的副作用**。
+    // ── OpenCL 路径:wrapper 自造 cl_context 通过 MNNDeviceContext.contextPtr 灌给 MNN ──
     //
-    // 注意 platformId / deviceId 分别是 clGetPlatformIDs 与 clGetDeviceIDs 的下标 —
-    // 上层(HwProbe)枚举什么就传什么,实现"枚举见到什么 → 启动什么"的硬绑定。
-    // 历史曾把 platformId 当作"GPU 物理序号"硬编码 deviceId=0,在同厂商多卡 +
-    // 跨厂商 ICD 排列上都会选错卡;现在 deviceId 也走配置不再写死。
+    // ## 为什么不让 MNN 自己根据 platformId 创建 context
+    //
+    // MNN OpenCLRuntime 用 process 级 `static weak_ptr<cl::Context> globalContext`
+    // 缓存第一次创建的 cl::Context。同 process 后续 OpenCL backend init 全部拿这个缓存,
+    // **传 platformId / deviceId 都被无视**。多 GPU 机器上(Win 老 NVIDIA Optimus-ish
+    // 路由 / Kepler driver / OpenCL ICD 顺序变化等场景)选 dGPU 实际跑 iGPU。
+    //
+    // OpenCLRuntime.cpp 同时还有一条 contextPtr 分支(MNN 文档级 API):
+    //   if (nullptr != contextPtr) {
+    //       mContext = shared_ptr<cl::Context>((cl::Context*)contextPtr, no_op_deleter);
+    //   } else { mContext = getGlobalContext(); ... }
+    //
+    // contextPtr 非空时 MNN 完全跳过 globalContext, 直接用我们给的 context。
+    // wrapper 自己 ICD loader 调 clCreateContext + CL_CONTEXT_PLATFORM 锁死 platform,
+    // 然后 clGetContextInfo(CL_CONTEXT_DEVICES) 再验一次 — 驱动若偷偷把 context 路由
+    // 到别的卡, 在这一步就能抓到(verifyDev != 我们请求的 dev), 立即 fail 让上层重选,
+    // 绝不沉默地跑错卡。
+    //
+    // platformId / deviceId 字段也填上 — MNN OpenCLRuntime 即便走 contextPtr 分支,
+    // 后续还要用 platforms[platformId].getDevices()[deviceId] 拿 cl_device_id 给
+    // CommandQueue 用, 必须跟我们 cl_context 的实际 device 一致。
     //
     // CUDA / Vulkan / NN 等其它 GPU forward type 当前未被任何 profile 派发(参
-    // MnnBackend.ResolveForwardType),wrapper 这里也不再为它们填 sharedContext,
+    // MnnBackend.ResolveForwardType), wrapper 这里也不再为它们填 sharedContext,
     // 避免无关 backend 的 platformId 语义混淆。需要 CUDA 时单独走 CUDA 分支即可。
     if (sc.type == MNN_FORWARD_OPENCL) {
-        h->devCtx.platformId   = (uint32_t)(cfg->gpuPlatformId >= 0 ? cfg->gpuPlatformId : 0);
-        h->devCtx.deviceId     = (uint32_t)(cfg->gpuDeviceId   >= 0 ? cfg->gpuDeviceId   : 0);
-        h->devCtx.platformSize = 0;     // 0 = MNN 自动探测平台数量
-        h->devCtx.contextPtr   = nullptr; // null = MNN 内部 clCreateContext(用我们指定的 platform)
+        uint32_t reqPlat = (uint32_t)(cfg->gpuPlatformId >= 0 ? cfg->gpuPlatformId : 0);
+        uint32_t reqDev  = (uint32_t)(cfg->gpuDeviceId   >= 0 ? cfg->gpuDeviceId   : 0);
+
+        clenum::IcdFns icd;
+        if (!icd.resolve()) {
+            yuyi_backend_native_log("[mnnwrap] OpenCL ICD loader 加载失败 — 系统未装 OpenCL driver, GPU 路径不可用\n");
+            delete h;
+            return nullptr;
+        }
+        if (!icd.hasContextApi()) {
+            yuyi_backend_native_log("[mnnwrap] OpenCL ICD 缺 clCreateContext/clReleaseContext/clGetContextInfo 三件套 — driver 太老或损坏\n");
+            icd.release();
+            delete h;
+            return nullptr;
+        }
+
+        void* plat = nullptr;
+        void* dev  = nullptr;
+        if (!clenum::resolvePlatformDevice(icd, reqPlat, reqDev, &plat, &dev)) {
+            yuyi_backend_native_log("[mnnwrap] OpenCL 解析 platformId=%u deviceId=%u 失败 — ICD 枚举顺序变了或卡数不够\n",
+                                    reqPlat, reqDev);
+            icd.release();
+            delete h;
+            return nullptr;
+        }
+
+        // 用 CL_CONTEXT_PLATFORM 显式锁死 platform, 防驱动按默认 platform 重路由
+        const intptr_t props[] = {
+            clenum::CL_CONTEXT_PLATFORM, (intptr_t)plat,
+            0
+        };
+        int32_t err = 0;
+        void* clCtx = icd.createContext(props, 1, &dev, nullptr, nullptr, &err);
+        if (clCtx == nullptr || err != (int32_t)clenum::CL_SUCCESS) {
+            yuyi_backend_native_log("[mnnwrap] clCreateContext 失败(err=%d, platformId=%u deviceId=%u) — driver/卡不可用\n",
+                                    err, reqPlat, reqDev);
+            icd.release();
+            delete h;
+            return nullptr;
+        }
+
+        // 验证:context 真在我们请求的 device 上, 没被驱动 reroute
+        void* verifyDev = nullptr;
+        size_t verifySize = 0;
+        if (icd.getContextInfo(clCtx, clenum::CL_CONTEXT_DEVICES, sizeof(verifyDev), &verifyDev, &verifySize) != (int32_t)clenum::CL_SUCCESS
+            || verifyDev != dev) {
+            yuyi_backend_native_log("[mnnwrap] clGetContextInfo 验证失败 — 驱动把 context 路由到了别的 device (请求 %p, 实际 %p)。"
+                                    "Win10+ 上检查 Graphics performance preference / NVIDIA Control Panel 的 Manage 3D Settings, "
+                                    "把本程序设为 High Performance 卡\n",
+                                    dev, verifyDev);
+            icd.releaseContext(clCtx);
+            icd.release();
+            delete h;
+            return nullptr;
+        }
+
+        // 验证通过 — 把 context + 生命周期管理塞进 runtime handle。
+        // 把 icd.lib 所有权交给 h, 防 IcdFns 析构把 OpenCL.dll FreeLibrary 导致后续
+        // clReleaseContext 调用悬空函数指针。
+        h->ownedClContext      = clCtx;
+        h->clLib               = icd.lib;
+        h->clReleaseContextFn  = icd.releaseContext;
+        icd.lib = nullptr;     // 转移所有权,IcdFns 析构变 no-op
+
+        h->devCtx.platformId   = reqPlat;
+        h->devCtx.deviceId     = reqDev;
+        h->devCtx.platformSize = 0;       // 0 = MNN 自己再枚举一次(只为 mFirstGPUDevicePtr)
+        h->devCtx.contextPtr   = clCtx;   // ⭐ 关键:MNN 看到非空, 走 contextPtr 分支跳过 globalContext
         bc.sharedContext = (void*)&h->devCtx;
     }
 
     // ── 独立 Executor + ExecutorScope:绕开全局 Executor 的 mRuntimeInfo
     // 按 forwardType 缓存 runtime(导致两 OpenCL RuntimeManager 共享同 runtime)。
-    // newExecutor 内部 onCreate 时 sharedContext 还没传(via newExecutor 不接受 sc),
-    // 所以 newExecutor 创的 runtime 仍可能用默认 platform — 但下面 createRuntimeManager
-    // 会用 ScheduleConfig 重建 runtime,带 sharedContext.platformId,真正生效。
+    // OPENCL 路径下我们 contextPtr 已经锁死了 device, 即便 Executor 复用 runtime 也无所谓 —
+    // 复用的 runtime 也绑在我们这个 context 上。
     std::shared_ptr<Executor> executor = Executor::newExecutor(sc.type, bc, sc.numThread);
     if (!executor) {
         delete h;
@@ -448,6 +592,25 @@ MNNWRAP_API int32_t yuyi_backend_runtime_actual_forward_type(YuYiMnnRuntimeHandl
 
 MNNWRAP_API void yuyi_backend_runtime_destroy(YuYiMnnRuntimeHandle rt) {
     if (rt == nullptr) return;
+
+    // 关键顺序:先 reset MNN 持有的 executor/rt(让 MNN 内部 OpenCLRuntime 析构,
+    // 它会用 mContext 调 clReleaseCommandQueue / clReleaseEvent 等清理 — 此时
+    // 我们的 cl_context 必须还活着), 再 clReleaseContext 释放 wrapper 持有的 +1 引用。
+    rt->rt.reset();
+    rt->executor.reset();
+
+    if (rt->ownedClContext != nullptr && rt->clReleaseContextFn != nullptr) {
+        rt->clReleaseContextFn(rt->ownedClContext);
+        rt->ownedClContext = nullptr;
+    }
+    if (rt->clLib != nullptr) {
+#if defined(_WIN32) || defined(_WIN64)
+        FreeLibrary((HMODULE)rt->clLib);
+#else
+        dlclose(rt->clLib);
+#endif
+        rt->clLib = nullptr;
+    }
     delete rt;
 }
 

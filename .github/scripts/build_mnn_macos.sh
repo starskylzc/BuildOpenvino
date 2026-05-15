@@ -57,13 +57,10 @@ case "$ARCH" in
   *) echo "::error::Unsupported ARCH: $ARCH"; exit 1 ;;
 esac
 
-# ── Patch MNN OpenCLRuntime.cpp: globalContext → per-platform map ────
-# 防多 GPU 切换时 cl::Context 误复用。
+# ── 不再 patch MNN OpenCLRuntime.cpp ─────────────────────────────────
+# macOS 不编 OpenCL (用 Metal+CoreML), 本来这个 patch 在 macOS 上就无效;
+# Win/Linux 那边 mnnwrap 改用 contextPtr 路径, 也不再需要 globalContext map patch。
 SCRIPT_DIR_FOR_PATCH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" ]; then
-  python3 "$SCRIPT_DIR_FOR_PATCH/patch_mnn_opencl_runtime.py" "$MNN_SOURCE" || \
-    echo "::warning::OpenCLRuntime patch failed (exit $?)"
-fi
 # Silence MNN_PRINT to keep stdout clean
 if [ -f "$SCRIPT_DIR_FOR_PATCH/patch_mnn_silence_print.py" ]; then
   python3 "$SCRIPT_DIR_FOR_PATCH/patch_mnn_silence_print.py" "$MNN_SOURCE" || \
