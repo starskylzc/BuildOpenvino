@@ -213,12 +213,14 @@ switch ($ARCH) {
 if ($linkerSharedExtra) { $cmakeArchExtra += "-DCMAKE_SHARED_LINKER_FLAGS=$linkerSharedExtra" }
 if ($linkerExeExtra)    { $cmakeArchExtra += "-DCMAKE_EXE_LINKER_FLAGS=$linkerExeExtra" }
 
-# ── 2.4 不再 patch MNN OpenCLRuntime.cpp ─────────────────────────────
-# 老版本走过 patch_mnn_opencl_runtime.py 把 globalContext 改成 per-platformId map,
-# 但 mnnwrap.cpp 现在用 MNN 文档级 contextPtr 路径(自造 cl_context 灌给 MNN),
-# OpenCLRuntime.cpp 看到 contextPtr 非空就走 contextPtr 分支彻底跳过 globalContext —
-# patch 的 map 就成了 dead code, 反而引入"patch 字符串跟上游 whitespace drift 后
-# 静默失效"的风险。直接不 patch, 走 vanilla MNN + mnnwrap contextPtr。
+# ── 2.4 Patch MNN OpenCLRuntime.cpp: globalContext → per-platform map ─
+# 防多 GPU 切换时 cl::Context 误复用(用户选 iGPU 实际跑 dGPU)。详见
+# patch_mnn_opencl_runtime.py 注释。
+$patchScript = Join-Path $PSScriptRoot 'patch_mnn_opencl_runtime.py'
+if (Test-Path $patchScript) {
+    & python $patchScript $MNN_SOURCE
+    if ($LASTEXITCODE -ne 0) { Write-Host "::warning::OpenCLRuntime patch failed (exit $LASTEXITCODE)" }
+}
 
 # ── Patch MNN_PRINT to no-op (silence native stdout leaks) ─────────────
 $silenceScript = Join-Path $PSScriptRoot 'patch_mnn_silence_print.py'
